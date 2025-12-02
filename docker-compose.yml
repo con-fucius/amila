@@ -11,7 +11,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Load from .env file
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
@@ -25,18 +24,14 @@ services:
       - MCP_SERVER_PORT=${MCP_SERVER_PORT}
       - ENVIRONMENT=${ENVIRONMENT}
       - LOG_LEVEL=${LOG_LEVEL}
-      # OpenTelemetry Configuration
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=bi-agent-backend
       - OTEL_SERVICE_VERSION=1.0.0
-      # Google Gemini Configuration (Development/Testing)
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      # FalkorDB Configuration
       - FALKORDB_HOST=falkordb
       - FALKORDB_PORT=6379
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
       - FALKORDB_DATABASE=${FALKORDB_DATABASE:-amil_knowledge_graph}
-      # Graphiti Configuration
       - GRAPHITI_TELEMETRY_ENABLED=${GRAPHITI_TELEMETRY_ENABLED:-false}
       - GRAPHITI_SEMAPHORE_LIMIT=${GRAPHITI_SEMAPHORE_LIMIT:-10}
       - GRAPHITI_LLM_PROVIDER=${GRAPHITI_LLM_PROVIDER:-gemini}
@@ -87,23 +82,21 @@ services:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
       - ./logs:/var/log
     ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
-      - "8888:8888"   # Prometheus metrics endpoint
-      - "8889:8889"   # Prometheus exporter metrics
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
     networks:
       - bi-agent-network
     restart: unless-stopped
 
-  # Prometheus for Metrics Collection
+  # Prometheus
   prometheus:
     image: prom/prometheus:latest
     container_name: bi-agent-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
     volumes:
@@ -115,7 +108,7 @@ services:
       - bi-agent-network
     restart: unless-stopped
 
-  # Grafana for Visualization (optional - for observability dashboards)
+  # Grafana (optional)
   grafana:
     image: grafana/grafana:latest
     container_name: bi-agent-grafana
@@ -125,21 +118,17 @@ services:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=false
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
     networks:
       - bi-agent-network
     restart: unless-stopped
     depends_on:
       - prometheus
     profiles:
-      - observability  # Only start with: docker-compose --profile observability up
+      - observability
 
-  # Redis for Sessions and Caching
-  # ADDITIONAL ISSUE: Redis Memory - maxmemory policy configured
+  # Redis
   redis:
     image: redis:7-alpine
     container_name: bi-agent-redis
@@ -147,14 +136,8 @@ services:
       redis-server
       --appendonly yes
       --requirepass ${REDIS_PASSWORD:-redispass123}
-      --save 60 1000
-      --save 300 100
-      --save 900 1
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
-      --maxmemory-samples 10
-      --lfu-log-factor 10
-      --lfu-decay-time 1
     ports:
       - "6379:6379"
     volumes:
@@ -168,13 +151,13 @@ services:
       timeout: 3s
       retries: 5
 
-  # FalkorDB for Graphiti Knowledge Graph
+  # FalkorDB
   falkordb:
     image: falkordb/falkordb:latest
     container_name: bi-agent-falkordb
     ports:
-      - "6380:6379"  # Map FalkorDB Redis protocol to host port 6380 (avoid conflict with Redis)
-      - "3005:3000"  # Map FalkorDB Web UI to host port 3005 (avoid conflict with frontend at 3000)
+      - "6380:6379"
+      - "3005:3000"
     volumes:
       - falkordb_data:/data
     networks:
@@ -186,19 +169,17 @@ services:
       timeout: 3s
       retries: 5
     environment:
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}  # Optional password for FalkorDB
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
 
-  # Apache Doris All-in-One (for development/testing)
+  # Apache Doris
   doris:
     image: apache/doris:doris-all-in-one-2.1.0
     container_name: bi-agent-doris
     ports:
-      - "8030:8030"  # FE HTTP port (Web UI)
-      - "9030:9030"  # FE MySQL protocol port
-      - "8040:8040"  # BE HTTP port
-      - "9060:9060"  # BE heartbeat port
-    # Note: Using tmpfs for data to avoid persistent state issues on Windows
-    # Remove tmpfs and use volumes for production data persistence
+      - "8030:8030"
+      - "9030:9030"
+      - "8040:8040"
+      - "9060:9060"
     tmpfs:
       - /opt/apache-doris/fe/doris-meta
       - /opt/apache-doris/be/storage
@@ -212,7 +193,7 @@ services:
       retries: 10
       start_period: 120s
 
-  # Celery Worker for Background Tasks
+  # Celery Worker
   celery-worker:
     build:
       context: ./backend
@@ -238,7 +219,7 @@ services:
       - bi-agent-network
     restart: unless-stopped
 
-  # Flower for Celery Monitoring
+  # Flower (Celery monitoring)
   flower:
     build:
       context: ./backend
@@ -258,57 +239,7 @@ services:
       - bi-agent-network
     restart: unless-stopped
 
-  # PostgreSQL for Superset (separate from Oracle)
-  superset-db:
-    image: postgres:15-alpine
-    container_name: bi-agent-superset-db
-    environment:
-      - POSTGRES_DB=superset
-      - POSTGRES_USER=superset
-      - POSTGRES_PASSWORD=${SUPERSET_DB_PASSWORD:-supersetpass}
-    volumes:
-      - superset_db_data:/var/lib/postgresql/data
-    networks:
-      - bi-agent-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U superset"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Apache Superset for BI Dashboards
-  superset:
-    image: apache/superset:latest
-    container_name: bi-agent-superset
-    ports:
-      - "8088:8088"
-    environment:
-      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-supersetSecretKey123!}
-      - DATABASE_DIALECT=postgresql
-      - DATABASE_HOST=superset-db
-      - DATABASE_PORT=5432
-      - DATABASE_DB=superset
-      - DATABASE_USER=superset
-      - DATABASE_PASSWORD=${SUPERSET_DB_PASSWORD:-supersetpass}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    volumes:
-      - superset_home:/app/superset_home
-    depends_on:
-      - superset-db
-      - redis
-    networks:
-      - bi-agent-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # LangGraph Studio (Development Only)
+  # LangGraph Studio (dev only)
   langgraph-studio:
     image: langchain/langgraph-studio:latest
     container_name: bi-agent-langgraph-studio
@@ -324,7 +255,7 @@ services:
       - bi-agent-network
     restart: unless-stopped
     profiles:
-      - dev  # Only start in development mode
+      - dev
 
 networks:
   bi-agent-network:
@@ -342,8 +273,3 @@ volumes:
     name: bi-agent-falkordb-data
   doris_data:
     name: bi-agent-doris-data
-  superset_db_data:
-    name: bi-agent-superset-db-data
-  superset_home:
-    name: bi-agent-superset-home
-
