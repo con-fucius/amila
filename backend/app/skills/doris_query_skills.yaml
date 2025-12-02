@@ -1,0 +1,131 @@
+# Doris SQL Query Skills
+# Provides Doris-specific SQL patterns, analytical query optimizations, and columnar storage best practices
+
+name: doris_query_skills
+version: "1.0"
+database_type: doris
+enabled: true
+
+# SQL Dialect Rules
+dialect_rules:
+  pagination:
+    pattern: "LIMIT {n}"
+    example: "SELECT * FROM customers LIMIT 10"
+    with_offset: "LIMIT {n} OFFSET {offset}"
+    note: "Doris uses standard LIMIT syntax"
+    
+  null_handling:
+    function: "IFNULL"
+    pattern: "IFNULL({column}, {default})"
+    example: "IFNULL(DISCOUNT, 0)"
+    alternatives: ["COALESCE", "NULLIF"]
+    
+  current_datetime:
+    function: "NOW()"
+    example: "WHERE ORDER_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)"
+    alternatives: ["CURDATE()", "CURTIME()", "CURRENT_TIMESTAMP"]
+    
+  string_concat:
+    function: "CONCAT"
+    pattern: "CONCAT({str1}, {str2}, ...)"
+    example: "CONCAT(FIRST_NAME, ' ', LAST_NAME)"
+    note: "Use CONCAT function, not || operator"
+
+# Date/Time Patterns
+date_patterns:
+  extract_quarter:
+    expression: "QUARTER({date_column})"
+    example: "QUARTER(ORDER_DATE) AS QUARTER"
+    
+  extract_month:
+    expression: "MONTH({date_column})"
+    example: "MONTH(ORDER_DATE) AS MONTH"
+    
+  extract_year:
+    expression: "YEAR({date_column})"
+    example: "YEAR(ORDER_DATE) AS YEAR"
+    
+  date_format:
+    function: "DATE_FORMAT"
+    pattern: "DATE_FORMAT({date}, '{format}')"
+    common_formats:
+      - "%Y-%m-%d"
+      - "%Y-%m"
+      - "%Y"
+
+# Doris-Specific Features
+doris_features:
+  vectorized_execution:
+    description: "Doris uses vectorized execution for analytical queries"
+    tip: "Aggregation queries are highly optimized"
+    
+  columnar_storage:
+    description: "Doris stores data in columnar format"
+    tip: "Select only needed columns for better performance"
+    
+  materialized_views:
+    description: "Use materialized views for pre-aggregated data"
+    pattern: "CREATE MATERIALIZED VIEW {name} AS SELECT ..."
+    
+  bitmap_index:
+    description: "Bitmap indexes for low-cardinality columns"
+    use_case: "Status, type, category columns"
+
+# Performance Hints
+performance_hints:
+  - rule: "Use partition pruning with date columns"
+    reason: "Doris partitions data by date for efficient queries"
+    
+  - rule: "Prefer aggregation queries over row-level operations"
+    reason: "Doris is optimized for OLAP workloads"
+    
+  - rule: "Use LIMIT to restrict result sets"
+    reason: "Prevents excessive data transfer"
+    
+  - rule: "Leverage pre-aggregated rollup tables when available"
+    reason: "Significantly faster than base table aggregations"
+
+# Anti-patterns (Don't Do)
+anti_patterns:
+  - pattern: "FETCH FIRST {n} ROWS ONLY"
+    reason: "Oracle syntax, not valid in Doris"
+    fix: "Use LIMIT {n}"
+    
+  - pattern: "NVL({col}, {val})"
+    reason: "NVL is Oracle syntax"
+    fix: "Use IFNULL({col}, {val}) or COALESCE({col}, {val})"
+    
+  - pattern: "SYSDATE"
+    reason: "SYSDATE is Oracle syntax"
+    fix: "Use NOW() or CURRENT_TIMESTAMP"
+    
+  - pattern: "TO_CHAR({date}, '{format}')"
+    reason: "TO_CHAR is Oracle syntax"
+    fix: "Use DATE_FORMAT({date}, '{format}')"
+
+# Common Query Templates
+templates:
+  top_n_by_metric:
+    description: "Get top N records by a metric"
+    template: |
+      SELECT {columns}
+      FROM {table}
+      ORDER BY {metric} DESC
+      LIMIT {n}
+      
+  aggregation_by_period:
+    description: "Aggregate data by time period"
+    template: |
+      SELECT DATE_FORMAT({date_column}, '{period_format}') AS period,
+             {aggregations}
+      FROM {table}
+      WHERE {date_column} BETWEEN '{start_date}' AND '{end_date}'
+      GROUP BY DATE_FORMAT({date_column}, '{period_format}')
+      ORDER BY period
+      
+  window_function:
+    description: "Use window functions for running totals/rankings"
+    template: |
+      SELECT {columns},
+             {window_function} OVER (PARTITION BY {partition_col} ORDER BY {order_col}) AS {alias}
+      FROM {table}

@@ -1,0 +1,107 @@
+# Schema Mapping Skills
+# Column name disambiguation and business term to technical column mappings
+
+name: schema_mapping_skills
+version: "1.0"
+enabled: true
+
+# Common Business Term Mappings
+business_term_mappings:
+  # Revenue/Sales related
+  revenue:
+    synonyms: ["sales", "income", "earnings", "turnover"]
+    likely_columns: ["REVENUE", "SALES", "TOTAL_SALES", "AMOUNT", "SALES_AMOUNT"]
+    
+  profit:
+    synonyms: ["margin", "earnings", "net income"]
+    likely_columns: ["PROFIT", "NET_PROFIT", "GROSS_PROFIT", "MARGIN"]
+    derived_expression: "{revenue_column} - {cost_column}"
+    
+  cost:
+    synonyms: ["expense", "expenditure", "spending"]
+    likely_columns: ["COST", "TOTAL_COST", "EXPENSE", "AMOUNT"]
+
+  # Customer related
+  customer:
+    synonyms: ["client", "buyer", "account", "user"]
+    likely_columns: ["CUSTOMER_ID", "CUSTOMER_NAME", "CLIENT_ID", "ACCOUNT_ID"]
+    
+  customer_name:
+    synonyms: ["client name", "account name", "buyer name"]
+    likely_columns: ["CUSTOMER_NAME", "CLIENT_NAME", "ACCOUNT_NAME", "NAME"]
+
+  # Time related
+  date:
+    synonyms: ["time", "timestamp", "when"]
+    likely_columns: ["DATE", "ORDER_DATE", "TRANSACTION_DATE", "CREATED_AT", "TIMESTAMP"]
+    
+  quarter:
+    synonyms: ["qtr", "q"]
+    derived_oracle: "TO_CHAR({date_column}, 'Q')"
+    derived_doris: "QUARTER({date_column})"
+    
+  month:
+    synonyms: ["mon", "mm"]
+    derived_oracle: "TO_CHAR({date_column}, 'MM')"
+    derived_doris: "MONTH({date_column})"
+    
+  year:
+    synonyms: ["yr", "yyyy"]
+    derived_oracle: "TO_CHAR({date_column}, 'YYYY')"
+    derived_doris: "YEAR({date_column})"
+
+  # Quantity related
+  quantity:
+    synonyms: ["qty", "count", "number", "units"]
+    likely_columns: ["QUANTITY", "QTY", "COUNT", "UNITS", "NUM"]
+
+# Disambiguation Rules
+disambiguation_rules:
+  - rule: "When multiple columns match, prefer columns with exact name match"
+    priority: 1
+    
+  - rule: "When user mentions 'by {term}', {term} is likely a grouping column"
+    priority: 2
+    
+  - rule: "When user mentions 'total' or 'sum', apply SUM() aggregation"
+    priority: 3
+    
+  - rule: "When user mentions 'average' or 'avg', apply AVG() aggregation"
+    priority: 3
+    
+  - rule: "When user mentions 'count', apply COUNT() aggregation"
+    priority: 3
+
+# Clarification Templates
+clarification_templates:
+  ambiguous_column:
+    message: "I found multiple columns that could match '{concept}'. Which one did you mean?"
+    options_format: "- {column_name} ({table_name}): {description}"
+    
+  no_match:
+    message: "I couldn't find a column matching '{concept}'. Did you mean one of these?"
+    suggestions_format: "- {suggestion}"
+    
+  derived_confirmation:
+    message: "'{concept}' isn't a direct column. I'll calculate it using: {expression}"
+
+# Column Name Patterns
+column_patterns:
+  # Common prefixes
+  prefixes:
+    - "TOTAL_"
+    - "SUM_"
+    - "AVG_"
+    - "COUNT_"
+    - "NUM_"
+    
+  # Common suffixes
+  suffixes:
+    - "_ID"
+    - "_NAME"
+    - "_DATE"
+    - "_TIME"
+    - "_AMT"
+    - "_AMOUNT"
+    - "_COUNT"
+    - "_QTY"

@@ -1,0 +1,101 @@
+# Oracle SQL Query Skills
+# Provides Oracle-specific SQL patterns, dialect quirks, and performance optimizations
+
+name: oracle_query_skills
+version: "1.0"
+database_type: oracle
+enabled: true
+
+# SQL Dialect Rules
+dialect_rules:
+  pagination:
+    pattern: "FETCH FIRST {n} ROWS ONLY"
+    example: "SELECT * FROM customers FETCH FIRST 10 ROWS ONLY"
+    note: "Use FETCH FIRST instead of LIMIT for Oracle 12c+"
+    
+  null_handling:
+    function: "NVL"
+    pattern: "NVL({column}, {default})"
+    example: "NVL(DISCOUNT, 0)"
+    alternatives: ["NVL2", "COALESCE"]
+    
+  current_datetime:
+    function: "SYSDATE"
+    example: "WHERE ORDER_DATE > SYSDATE - 30"
+    note: "SYSDATE returns DATE type, use SYSTIMESTAMP for precision"
+    
+  string_concat:
+    operator: "||"
+    example: "FIRST_NAME || ' ' || LAST_NAME"
+    note: "Use || for string concatenation, not CONCAT"
+
+# Date/Time Patterns
+date_patterns:
+  extract_quarter:
+    expression: "TO_CHAR({date_column}, 'Q')"
+    example: "TO_CHAR(ORDER_DATE, 'Q') AS QUARTER"
+    
+  extract_month:
+    expression: "TO_CHAR({date_column}, 'MM')"
+    example: "TO_CHAR(ORDER_DATE, 'MM') AS MONTH"
+    
+  extract_year:
+    expression: "TO_CHAR({date_column}, 'YYYY')"
+    example: "TO_CHAR(ORDER_DATE, 'YYYY') AS YEAR"
+    
+  date_format:
+    function: "TO_CHAR"
+    pattern: "TO_CHAR({date}, '{format}')"
+    common_formats:
+      - "YYYY-MM-DD"
+      - "DD-MON-YYYY"
+      - "MM/DD/YYYY"
+
+# Performance Hints
+performance_hints:
+  - rule: "Always include WHERE clause on large tables"
+    reason: "Prevents full table scans"
+    
+  - rule: "Use indexed columns in WHERE clause first"
+    reason: "Improves query execution plan"
+    
+  - rule: "Avoid SELECT * in production queries"
+    reason: "Reduces network overhead and improves performance"
+    
+  - rule: "Use ROWNUM for limiting results in subqueries"
+    pattern: "WHERE ROWNUM <= {n}"
+    note: "Apply ROWNUM after ORDER BY using subquery"
+
+# Anti-patterns (Don't Do)
+anti_patterns:
+  - pattern: "LIMIT {n}"
+    reason: "LIMIT is not valid Oracle syntax"
+    fix: "Use FETCH FIRST {n} ROWS ONLY"
+    
+  - pattern: "IFNULL({col}, {val})"
+    reason: "IFNULL is MySQL/Doris syntax"
+    fix: "Use NVL({col}, {val})"
+    
+  - pattern: "NOW()"
+    reason: "NOW() is not valid Oracle syntax"
+    fix: "Use SYSDATE or SYSTIMESTAMP"
+
+# Common Query Templates
+templates:
+  top_n_by_metric:
+    description: "Get top N records by a metric"
+    template: |
+      SELECT {columns}
+      FROM {table}
+      ORDER BY {metric} DESC
+      FETCH FIRST {n} ROWS ONLY
+      
+  aggregation_by_period:
+    description: "Aggregate data by time period"
+    template: |
+      SELECT TO_CHAR({date_column}, '{period_format}') AS period,
+             {aggregations}
+      FROM {table}
+      WHERE {date_column} BETWEEN {start_date} AND {end_date}
+      GROUP BY TO_CHAR({date_column}, '{period_format}')
+      ORDER BY period
