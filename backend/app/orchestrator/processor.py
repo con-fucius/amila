@@ -284,6 +284,7 @@ async def process_query(
         "visualization_hints": {},
         "llm_metadata": {
             "execution_steps": [],  # Track actual execution steps for frontend
+            "thinking_steps": [],  # Track reasoning steps for frontend
             "start_time": time.time(),
         },
         "user_id": user_id,
@@ -307,6 +308,15 @@ async def process_query(
         "max_iterations": 40,  # Safety limit
         "node_history": [],  # Track node execution for reasoning visibility
         "current_node": "",  # Current executing node
+        # Query cost estimation and execution plan
+        "cost_estimate": {},
+        "execution_plan": "",
+        # Clarification flow
+        "clarification_message": "",
+        "clarification_details": {},
+        "clarification_history": [],
+        # Preview data for progressive disclosure
+        "preview": {},
     }
     
     # Get orchestrator from registry (recover if missing)
@@ -415,10 +425,12 @@ async def process_query(
             raw_llm_metadata.get("clarification_needed", False)
         )
         
-        # Check if query is waiting for approval
+        # Check if query is waiting for approval (HITL interrupt)
+        # With interrupt_before=["await_approval"], the graph pauses BEFORE that node
+        # So needs_approval=True indicates we're waiting for user approval
         is_pending_approval = (
-            final_state.get("next_action") == "request_approval" or
-            final_state.get("needs_approval", False)
+            final_state.get("next_action") in ["request_approval", "await_approval"] or
+            (final_state.get("needs_approval", False) and not final_state.get("approved", False))
         )
         
         # Format status based on state
@@ -427,17 +439,30 @@ async def process_query(
             message = (
                 final_state.get("error")
                 or raw_llm_metadata.get("clarification_message")
+                or final_state.get("clarification_message")
                 or "Clarification needed to generate correct SQL"
             )
+            # Preserve clarification context for frontend
+            if final_state.get("clarification_details"):
+                raw_llm_metadata["clarification_details"] = final_state["clarification_details"]
         elif is_pending_approval and not final_state.get("error"):
             # Query is waiting for approval - this is NOT an error
+            # Graph was interrupted before await_approval node
             status = "pending_approval"
             approval_ctx = final_state.get("approval_context", {})
             risk_level = approval_ctx.get("risk_level", "unknown")
             message = f"Query requires approval ({risk_level} risk). Please review and approve to execute."
+            logger.info(f"Query {query_id} paused for HITL approval (risk: {risk_level})")
         elif final_state.get("error"):
             status = "error"
             message = final_state.get("error")
+            # Ensure error context is preserved
+            if not raw_llm_metadata.get("error_details"):
+                raw_llm_metadata["error_details"] = {
+                    "message": message,
+                    "failed_at": final_state.get("current_stage", final_state.get("error_stage", "unknown")),
+                    "sql_attempted": final_state.get("sql_query"),
+                }
         elif not execution_result_copy or not isinstance(execution_result_copy, dict):
             # No execution result - check if it's because of pending approval
             if is_pending_approval:
@@ -499,6 +524,12 @@ async def process_query(
             "trace_id": trace_identifier,
             "node_history": final_state.get("node_history", []),  # Include node execution history
             "current_node": final_state.get("current_node", ""),  # Include current node
+            # Query cost estimation and execution plan for observability
+            "cost_estimate": final_state.get("cost_estimate"),
+            "execution_plan": final_state.get("execution_plan"),
+            # Clarification context for frontend
+            "clarification_message": final_state.get("clarification_message") if is_clarification else None,
+            "clarification_details": final_state.get("clarification_details") if is_clarification else None,
         }
         
         # Push to query history for undo/redo functionality

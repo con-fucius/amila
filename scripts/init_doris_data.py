@@ -29,11 +29,12 @@ except ImportError:
     sys.exit(1)
 
 # Configuration
-DORIS_HOST = "127.0.0.1"
-DORIS_PORT = 9030
-DORIS_USER = "root"
-DORIS_PASSWORD = ""
-DORIS_DATABASE = "demo"
+import os
+DORIS_HOST = os.getenv("DORIS_DB_HOST", "127.0.0.1")
+DORIS_PORT = int(os.getenv("DORIS_DB_PORT", 9030))
+DORIS_USER = os.getenv("DORIS_DB_USER", "root")
+DORIS_PASSWORD = os.getenv("DORIS_DB_PASSWORD", "")
+DORIS_DATABASE = os.getenv("DORIS_DB_DATABASE", "demo")
 
 # Data generation constants
 PRODUCTS = [

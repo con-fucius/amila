@@ -1,9 +1,12 @@
 /**
  * API Service for Backend Communication
  * Handles all HTTP requests to the FastAPI backend
+ * 
+ * When running in Docker, uses relative paths (empty string) so requests go through nginx proxy.
+ * nginx.conf proxies /api/* to backend:8000 and /health to backend:8000/health
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 
 export class APIError extends Error {
   status: number;
@@ -311,12 +314,16 @@ class APIService {
   }
 
   async getSchema(options?: { connection_name?: string; use_cache?: boolean; database_type?: 'oracle' | 'doris' }): Promise<SchemaResponse> {
-    const url = new URL(`${this.baseURL}/api/v1/schema/`)
-    if (options?.connection_name) url.searchParams.set('connection_name', options.connection_name)
-    if (options?.use_cache !== undefined) url.searchParams.set('use_cache', String(options.use_cache))
-    if (options?.database_type) url.searchParams.set('database_type', options.database_type)
+    // Build query params manually to avoid URL constructor issues with relative paths
+    const params = new URLSearchParams()
+    if (options?.connection_name) params.set('connection_name', options.connection_name)
+    if (options?.use_cache !== undefined) params.set('use_cache', String(options.use_cache))
+    if (options?.database_type) params.set('database_type', options.database_type)
+    
+    const queryString = params.toString()
+    const endpoint = `/api/v1/schema/${queryString ? `?${queryString}` : ''}`
 
-    return this.request<SchemaResponse>(url.toString())
+    return this.request<SchemaResponse>(endpoint)
   }
 
   async checkHealth(): Promise<{ status: string; components?: any; latency_ms?: number }> {

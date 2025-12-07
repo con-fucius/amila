@@ -104,7 +104,7 @@ class SQLclMCPClient:
     
     def __init__(
         self,
-        sqlcl_path: str = r"D:\DownloadsInD\sqlcl-latest\sqlcl\bin\sql.exe",
+        sqlcl_path: str = "sql",
         sqlcl_args: List[str] = None,
         timeout: int = 600,
         encoding: str = "utf-8"

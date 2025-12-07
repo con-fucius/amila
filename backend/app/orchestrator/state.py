@@ -40,6 +40,10 @@ class QueryState(TypedDict):
     sql_confidence: int  # Confidence score 0-100
     optimization_suggestions: list  # Query optimization suggestions
     
+    # Query cost estimation and execution plan visibility
+    cost_estimate: dict  # {total_cost, cardinality, cost_level, warnings, recommendations}
+    execution_plan: str  # Formatted EXPLAIN PLAN output for observability
+    
     # Control flow
     needs_approval: bool
     approved: bool

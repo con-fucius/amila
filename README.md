@@ -20,46 +20,44 @@ Natural language database queries via LangGraph orchestrator.
 
 ## Quick Start
 
-### 1. Setup Doris MCP Server
+### 1. Configure Environment
+
+- Copy `.env.example` at the repository root to `.env` and set values for your environment.
+- Copy `backend/.env.example` to `backend/.env` for backend-specific configuration.
+- Do not commit any populated `.env*` files.
+
+### 2. Start with Docker (recommended)
+
+**Windows (PowerShell):**
+
 ```powershell
-cd backend/services/doris-mcp-server
-uv venv
-uv pip install -r requirements.txt
+./start.ps1 minimal   # backend, frontend, redis, falkordb
+./start.ps1 full      # + doris, celery-worker, flower, otel-collector, prometheus, grafana
+./start.ps1 dev       # essential services + LangGraph Studio + observability
 ```
 
-### 2. Start Docker Services
-```powershell
-docker-compose up -d redis falkordb doris
+**macOS / Linux:**
+
+```bash
+./start.sh minimal
+./start.sh full
+./start.sh dev
 ```
 
-### 3. Initialize Doris Database
-```powershell
-cd backend
-.\.venv\Scripts\python.exe ..\scripts\init_doris_data.py
+**Minimal UAT stack (Docker Compose file only):**
+
+```bash
+docker compose -f docker-compose.minimal.yml up --build
 ```
 
-### 4. Start Backend
-```powershell
-cd backend
-.venv\Scripts\Activate.ps1
-python main.py
-```
+### 3. Access Points (Docker)
 
-### 5. Start Frontend
-```powershell
-cd frontend
-pnpm install
-pnpm dev
-```
-
-## Access Points
-
-| Service | URL |
-|---------|-----|
-| Frontend | http://localhost:5173 |
-| Backend API | http://localhost:8000 |
-| API Docs | http://localhost:8000/docs |
-| Doris Web UI | http://localhost:8030 |
+| Service      | URL                       |
+|-------------|---------------------------|
+| Frontend    | http://localhost:3000     |
+| Backend API | http://localhost:8000     |
+| API Docs    | http://localhost:8000/docs |
+| Doris Web UI| http://localhost:8030     |
 
 ## Environment Variables
 

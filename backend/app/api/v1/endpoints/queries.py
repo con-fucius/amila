@@ -471,10 +471,18 @@ async def approve_query(
     user: dict = Depends(rbac_manager.get_current_user)
 ) -> Dict[str, Any]:
     """
-    Approve query for execution and resume orchestrator workflow
+    Approve or reject query execution and resume orchestrator workflow.
     
-    This endpoint resumes the LangGraph workflow from the checkpoint
-    where it was paused at the 'request_approval' state.
+    This endpoint handles the HITL (Human-in-the-Loop) approval flow:
+    1. Graph pauses at await_approval node (interrupt_before)
+    2. User reviews SQL and calls this endpoint
+    3. State is updated in checkpoint
+    4. Graph resumes from await_approval node
+    
+    Security:
+    - Only admin and analyst roles can approve
+    - Modified SQL is re-validated for injection
+    - Idempotency check prevents duplicate executions
     """
     from app.core.client_registry import registry
     
@@ -532,8 +540,6 @@ async def approve_query(
                 f"Risk increased for modified SQL in query {query_id}: "
                 f"{risk_reassessment.get('original_risk')} -> {risk_reassessment.get('new_risk')}"
             )
-            # Include risk warning in response but allow execution
-            # In a stricter implementation, you could reject here
     
     # Get orchestrator from registry
     orchestrator = registry.get_query_orchestrator()
@@ -544,8 +550,7 @@ async def approve_query(
         )
     
     try:
-        # Resume graph execution from checkpoint
-        # The query_id serves as the session_id for checkpointing
+        # Configuration for checkpoint access
         config = {
             "configurable": {
                 "thread_id": query_id,
@@ -561,14 +566,20 @@ async def approve_query(
                 detail=f"Query {query_id} not found or already completed"
             )
         
-        current_state = state_snapshot.values
+        current_state = dict(state_snapshot.values)  # Make a mutable copy
         
         # Handle rejection
         if not request.approved:
-            current_state["approved"] = False
-            current_state["needs_approval"] = False
-            current_state["error"] = request.rejection_reason or "Query rejected by user"
-            current_state["next_action"] = "error"
+            # Update state for rejection
+            rejection_updates = {
+                "approved": False,
+                "needs_approval": False,
+                "error": request.rejection_reason or "Query rejected by user",
+                "next_action": "rejected",
+            }
+            
+            # Update checkpoint state
+            await orchestrator.aupdate_state(config, rejection_updates)
 
             # Notify SSE subscribers that the query was rejected
             try:
@@ -576,7 +587,7 @@ async def approve_query(
                 await qs_manager.update_state(
                     query_id,
                     QueryExecState.REJECTED,
-                    {"error": current_state.get("error")},
+                    {"error": rejection_updates["error"]},
                 )
             except Exception as e:
                 logger.warning(f"Failed to emit SSE rejection state for {query_id}: {e}")
@@ -588,6 +599,15 @@ async def approve_query(
                 approved=False,
             )
             
+            # Resume graph to complete rejection flow
+            try:
+                await asyncio.wait_for(
+                    orchestrator.ainvoke(None, config),
+                    timeout=30.0
+                )
+            except Exception as e:
+                logger.warning(f"Rejection flow completion warning: {e}")
+            
             return {
                 "query_id": query_id,
                 "status": "rejected",
@@ -596,19 +616,21 @@ async def approve_query(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         
-        # Update state to mark as approved
-        current_state["approved"] = True
-        current_state["needs_approval"] = False
-        current_state["next_action"] = "execute"
+        # Prepare approval state updates
+        approval_updates = {
+            "approved": True,
+            "needs_approval": False,
+            "execution_result": {},  # Clear for fresh execution
+            "result_analysis": {},
+        }
         
-        # CRITICAL: Clear execution_result to force re-execution
-        current_state["execution_result"] = {}
-        current_state["result_analysis"] = {}
-
         # Apply modified SQL if provided
         if request.modified_sql:
             logger.info(f"User modified SQL for query {query_id}")
-            current_state["sql_query"] = request.modified_sql
+            approval_updates["sql_query"] = request.modified_sql
+        
+        # Update checkpoint state with approval
+        await orchestrator.aupdate_state(config, approval_updates)
         
         # Mark approval with idempotency key to prevent duplicates
         final_sql = request.modified_sql if request.modified_sql else current_state.get("sql_query", "")
@@ -627,7 +649,7 @@ async def approve_query(
                     query_id,
                     QueryExecState.APPROVED,
                     {
-                        "sql": current_state.get("sql_query", ""),
+                        "sql": final_sql or current_state.get("sql_query", ""),
                         "approval_context": current_state.get("approval_context"),
                     },
                 )
@@ -635,7 +657,7 @@ async def approve_query(
                     query_id,
                     QueryExecState.EXECUTING,
                     {
-                        "sql": current_state.get("sql_query", ""),
+                        "sql": final_sql or current_state.get("sql_query", ""),
                         "thinking_steps": current_state.get("llm_metadata", {}).get("thinking_steps"),
                     },
                 )
@@ -662,14 +684,16 @@ async def approve_query(
                     "resume_reason": "approval",
                 },
             ) as resume_span:
+                # Resume from checkpoint by passing None as input
+                # This continues execution from where it was interrupted
                 final_state = await asyncio.wait_for(
-                    orchestrator.ainvoke(current_state, config),
+                    orchestrator.ainvoke(None, config),
                     timeout=600.0
                 )
                 resume_span["output"] = {
                     "status": "completed",
                     "query_id": query_id,
-                    "error": final_state.get("error"),
+                    "error": final_state.get("error") if final_state else None,
                 }
         except asyncio.TimeoutError:
             logger.error(f"Query {query_id} execution timeout (600s)")

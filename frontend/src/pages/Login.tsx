@@ -32,13 +32,6 @@ export function Login() {
     }
   }
 
-  // Dev bypass for quick testing
-  const handleDevBypass = () => {
-    localStorage.setItem('access_token', 'dev-bypass-token')
-    localStorage.setItem('refresh_token', 'dev-bypass-refresh')
-    navigate(from, { replace: true })
-  }
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
       <div className="w-full max-w-md p-8">
@@ -118,19 +111,20 @@ export function Login() {
             </button>
           </form>
 
-          {/* Dev bypass - only in development */}
+          {/* Test credentials hint */}
           {import.meta.env.DEV && (
             <div className="mt-6 pt-6 border-t border-gray-700">
-              <p className="text-xs text-gray-500 mb-3 text-center">Development Mode</p>
-              <button
-                onClick={handleDevBypass}
-                className="w-full py-2 rounded-lg text-sm font-medium bg-gray-700/50 text-gray-300 hover:bg-gray-700 border border-gray-600 transition-all"
-              >
-                Skip Login (Dev Only)
-              </button>
-              <p className="text-xs text-gray-500 mt-3 text-center">
-                Test credentials: admin / adminpassword
-              </p>
+              <p className="text-xs text-gray-500 mb-2 text-center font-medium">Test Accounts</p>
+              <div className="space-y-1.5 text-xs text-gray-400">
+                <div className="flex items-center justify-between px-3 py-1.5 rounded bg-gray-700/30">
+                  <span>Admin:</span>
+                  <code className="text-emerald-400">admin / adminpassword</code>
+                </div>
+                <div className="flex items-center justify-between px-3 py-1.5 rounded bg-gray-700/30">
+                  <span>Tester:</span>
+                  <code className="text-emerald-400">tester / testerpassword</code>
+                </div>
+              </div>
             </div>
           )}
         </div>

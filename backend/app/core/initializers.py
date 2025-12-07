@@ -15,17 +15,27 @@ logger = logging.getLogger(__name__)
 
 async def init_doris() -> Tuple[bool, Optional[str]]:
     if not settings.DORIS_MCP_ENABLED:
-        return False, None
+        logger.info("Doris MCP integration is disabled (DORIS_MCP_ENABLED=false)")
+        return False, "Doris MCP disabled"
     
     try:
         logger.info("Initializing Doris MCP server...")
+        
+        # Check if doris-mcp-server package is available
+        try:
+            import doris_mcp_server
+            logger.info(f"Doris MCP Server package version: {getattr(doris_mcp_server, '__version__', 'unknown')}")
+        except ImportError:
+            logger.error("doris-mcp-server package not installed. Install with: pip install doris-mcp-server")
+            return False, "doris-mcp-server package not installed"
+        
         doris_server_ready = await doris_server.initialize()
         
         if doris_server_ready:
             doris_client_ready = await doris_client.initialize()
             if doris_client_ready:
                 registry.set_doris_client(doris_client)
-                logger.info("Doris MCP client registered")
+                logger.info("Doris MCP client registered successfully")
                 return True, None
             else:
                 return False, "Doris MCP Client initialization failed"
@@ -73,23 +83,19 @@ async def configure_redis_memory_policy() -> None:
         logger.info(f"Current Redis memory config: maxmemory={current_maxmemory}, policy={current_policy}")
         
         # Set memory policy to allkeys-lru if not already set
-        # This ensures LRU eviction when memory is full
         if current_policy == "noeviction":
             try:
                 await client.config_set("maxmemory-policy", "allkeys-lru")
                 logger.info("Redis maxmemory-policy set to allkeys-lru")
             except Exception as e:
-                # This might fail if Redis is configured to not allow runtime config changes
                 logger.warning(f"Could not set Redis maxmemory-policy: {e}")
         
         # Set maxmemory if not configured (default to 256MB for development)
-        # In production, this should be set via Redis configuration file
         if current_maxmemory == 0:
             try:
-                # Default to 256MB - adjust based on environment
                 default_maxmemory = "256mb"
                 if settings.environment == "production":
-                    default_maxmemory = "1gb"  # Higher limit for production
+                    default_maxmemory = "1gb"
                 
                 await client.config_set("maxmemory", default_maxmemory)
                 logger.info(f"Redis maxmemory set to {default_maxmemory}")
@@ -109,8 +115,16 @@ async def init_semantic_index() -> Tuple[bool, Optional[str]]:
         logger.info("Semantic schema index initialized")
         return True, None
     except Exception as e:
-        logger.warning(f"Semantic index initialization failed: {e}")
-        return False, str(e)
+        error_msg = str(e)
+        # Check if it's a RediSearch module missing error
+        if "FT.CREATE" in error_msg or "unknown command" in error_msg.lower():
+            logger.warning(
+                "RediSearch module not available. Semantic index disabled. "
+                "Use redis/redis-stack-server image for full functionality."
+            )
+        else:
+            logger.warning(f"Semantic index initialization failed: {e}")
+        return False, error_msg
 
 async def init_graphiti() -> Tuple[bool, Optional[str]]:
     try:
@@ -125,7 +139,31 @@ async def init_graphiti() -> Tuple[bool, Optional[str]]:
         return False, str(e)
 
 async def init_sqlcl_pool() -> Tuple[bool, Optional[str]]:
+    import shutil
+    from pathlib import Path
+    
     try:
+        # Check if SQLcl is available
+        sqlcl_path = settings.sqlcl_path
+        sqlcl_exists = False
+        
+        # Check if it's an absolute path that exists
+        if Path(sqlcl_path).is_absolute():
+            sqlcl_exists = Path(sqlcl_path).exists()
+        else:
+            # Check if it's in PATH
+            sqlcl_exists = shutil.which(sqlcl_path) is not None
+        
+        if not sqlcl_exists:
+            logger.warning(f"SQLcl not found at '{sqlcl_path}'. SQLcl MCP integration will be disabled.")
+            logger.info("To enable SQLcl: download from Oracle and set SQLCL_PATH environment variable")
+            return False, f"SQLcl not found at {sqlcl_path}"
+        
+        # Check if Oracle connection is configured
+        if not settings.oracle_default_connection:
+            logger.warning("No Oracle default connection configured. SQLcl MCP integration will be disabled.")
+            return False, "No Oracle default connection configured"
+        
         logger.info("Initializing SQLcl process pool...")
         pool = SQLclProcessPool(
             pool_size=settings.sqlcl_max_processes,
@@ -156,7 +194,7 @@ async def init_sqlcl_pool() -> Tuple[bool, Optional[str]]:
                 
             return True, None
         else:
-            return False, "SQLcl process pool initialization failed"
+            return False, "SQLcl process pool initialization failed - check Oracle connection configuration"
             
     except Exception as e:
         logger.error(f"SQLcl pool error: {e}")

@@ -59,13 +59,8 @@ class AppSettings(BaseSettings):
     mcp_retry_attempts: int = Field(default=3, ge=1, le=10, description="MCP retry attempts")
     mcp_retry_backoff: float = Field(default=1.5, ge=1.0, le=10.0, description="MCP retry backoff")
 
-    # Doris MCP Configuration
-    DORIS_MCP_ENABLED: bool = Field(default=False, description="Enable Doris MCP Server integration")
-    DORIS_MCP_REPO_URL: str = Field(default="https://github.com/apache/doris-mcp-server.git", description="Doris MCP Server Git Repo")
-    DORIS_MCP_SERVER_PATH: Optional[str] = Field(
-        default=None,
-        description="Local path to Doris MCP Server (overrides git clone if set)"
-    )
+    # Doris MCP Configuration (installed via pip: doris-mcp-server)
+    DORIS_MCP_ENABLED: bool = Field(default=True, description="Enable Doris MCP Server integration")
     DORIS_MCP_HOST: str = Field(default="127.0.0.1", description="Host for Doris MCP Server subprocess")
     DORIS_MCP_PORT: int = Field(default=8808, ge=1024, le=65535, description="Port for Doris MCP Server subprocess")
     DORIS_DB_HOST: str = Field(default="localhost", description="Doris Database Host")
@@ -367,6 +362,30 @@ class AppSettings(BaseSettings):
         if self.FALKORDB_PASSWORD:
             config["password"] = self.FALKORDB_PASSWORD
         return config
+
+    @property
+    def users_db(self) -> dict:
+        """
+        Test user accounts for authentication
+        In production, this should be replaced with a proper database user store
+        """
+        from passlib.context import CryptContext
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        
+        return {
+            "admin": {
+                "username": "admin",
+                "hashed_password": pwd_context.hash("adminpassword"),
+                "disabled": False,
+                "role": "admin"
+            },
+            "tester": {
+                "username": "tester",
+                "hashed_password": pwd_context.hash("testerpassword"),
+                "disabled": False,
+                "role": "analyst"
+            }
+        }
 
 
 class ConfigurationManager:

@@ -1,23 +1,26 @@
 # Multi-stage build for production React app
-FROM node:18-alpine as build
+FROM node:18-alpine AS build
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files for dependency installation
-COPY package.json package-lock.json* ./
+# Install pnpm globally (using corepack for better version management)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install dependencies
-RUN npm ci --only=production
+# Copy package files for dependency installation
+COPY package.json pnpm-lock.yaml ./
+
+# Install dependencies with pnpm
+RUN pnpm install --frozen-lockfile
 
 # Copy source code
 COPY . .
 
 # Build the React application
-RUN npm run build
+RUN pnpm run build
 
 # Production stage with Nginx
-FROM nginx:alpine as production
+FROM nginx:alpine AS production
 
 # Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
@@ -25,17 +28,17 @@ COPY nginx.conf /etc/nginx/nginx.conf
 # Copy built React app from build stage
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nextjs -u 1001
+# Create directories nginx needs and set permissions
+# nginx alpine runs as nginx user by default, but we need to ensure proper permissions
+RUN mkdir -p /var/cache/nginx /var/run /var/log/nginx && \
+    chown -R nginx:nginx /var/cache/nginx /var/run /var/log/nginx /usr/share/nginx/html && \
+    chmod -R 755 /var/cache/nginx /var/run /var/log/nginx /usr/share/nginx/html && \
+    # Create pid file location with proper permissions
+    touch /var/run/nginx.pid && \
+    chown nginx:nginx /var/run/nginx.pid
 
-# Change ownership of nginx files
-RUN chown -R nextjs:nodejs /var/cache/nginx && \
-    chown -R nextjs:nodejs /var/log/nginx && \
-    chown -R nextjs:nodejs /etc/nginx/conf.d
-
-# Switch to non-root user
-USER nextjs
+# Switch to nginx user (built-in non-root user in nginx:alpine)
+USER nginx
 
 # Expose port
 EXPOSE 80

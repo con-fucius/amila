@@ -1,0 +1,117 @@
+# Minimal Docker Compose for UAT - Just FE, BE, and required dependencies
+# Usage: docker compose -f docker-compose.minimal.yml up --build
+
+version: '3.8'
+
+services:
+  # FastAPI Backend Service
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    image: bi-agent-backend:${VERSION:-1.0.0-alpha}
+    container_name: bi-agent-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.docker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - DORIS_DB_HOST=doris
+      - DORIS_MCP_HOST=doris-mcp-server
+    volumes:
+      - backend_data:/app/data
+      - ./logs:/app/logs
+      - ./.dbtools:/home/app/.dbtools:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    networks:
+      - bi-agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # React Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: bi-agent-frontend:${VERSION:-1.0.0-alpha}
+    container_name: bi-agent-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - bi-agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Redis (required for sessions/cache)
+  redis:
+    image: redis:7-alpine
+    container_name: bi-agent-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-redispass123}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - bi-agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispass123}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # FalkorDB (required for Graphiti knowledge graph)
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: bi-agent-falkordb
+    ports:
+      - "6380:6379"
+    volumes:
+      - falkordb_data:/data
+    networks:
+      - bi-agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "PING"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  bi-agent-network:
+    driver: bridge
+    name: bi-agent-network
+
+volumes:
+  redis_data:
+    name: bi-agent-redis-data
+  falkordb_data:
+    name: bi-agent-falkordb-data
+  backend_data:
+    name: bi-agent-backend-data

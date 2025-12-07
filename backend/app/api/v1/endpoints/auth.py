@@ -63,7 +63,7 @@ USERS_DB = {
 }
 
 
-def authenticate_user(username: str, password: str) -> dict | None:
+async def authenticate_user(username: str, password: str) -> dict | None:
     """
     Authenticate a user by username and password using the AuthenticationManager
 
@@ -74,7 +74,7 @@ def authenticate_user(username: str, password: str) -> dict | None:
     Returns:
         dict: User data if authentication successful, None otherwise
     """
-    return auth_manager.authenticate_user(username, password)
+    return await auth_manager.authenticate_user(username, password)
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
@@ -118,7 +118,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()) -> Dict[str, A
     User login endpoint
     Authenticates user and returns JWT access and refresh tokens
     """
-    user = authenticate_user(form_data.username, form_data.password)
+    user = await authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -137,8 +137,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()) -> Dict[str, A
     # Store refresh token
     refresh_payload = auth_manager.decode_token(refresh_token, "refresh")
     if refresh_payload:
-        session_id = auth_manager.create_session(user["username"])
-        auth_manager.store_refresh_token(user["username"], refresh_payload["jti"], session_id)
+        session_id = await auth_manager.create_session(user["username"])
+        await auth_manager.store_refresh_token(user["username"], refresh_payload["jti"], session_id)
 
     logger.info(f"User {user['username']} logged in successfully")
 

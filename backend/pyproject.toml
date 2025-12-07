@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bi-agent-mvp-backend"
+version = "1.0.0"
 description = "Amila backend for natural language database querying"
 authors = [
     {name = "BI Agent Team"}
@@ -73,6 +74,8 @@ dependencies = [
     "pyyaml>=6.0",
     # SQL Dialect Conversion (Oracle/Doris transpilation)
     "sqlglot>=25.0.0",
+    # SQL parsing (required by orchestrator)
+    "sqlparse>=0.4.4",
 ]
 
 [project.optional-dependencies]

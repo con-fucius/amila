@@ -188,7 +188,7 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
     if validation_result.requires_approval:
         state["needs_approval"] = True
         state["approved"] = False
-        state["next_action"] = "request_approval"  # FIXED: Match graph routing (not await_approval)
+        state["next_action"] = "await_approval"  # Route to HITL approval gate
         logger.warning(f"Query requires approval: {validation_result.risk_level.value} risk")
         state["messages"].append(AIMessage(
             content=f" Query requires admin approval ({validation_result.risk_level.value} risk)"
@@ -247,15 +247,16 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
     if validation_result.risk_level.value in ["medium", "high"] and not is_admin:
         state["needs_approval"] = True
 
-    # Query Cost Estimation - estimate before execution
+    # Query Cost Estimation - estimate before execution with EXPLAIN PLAN visibility
     cost_estimate = None
     try:
         from app.services.query_cost_estimator import QueryCostEstimator, CostLevel
 
+        # Include execution plan for observability (helps debugging slow queries)
         cost_estimate = await QueryCostEstimator.estimate_query_cost(
             sql_query=state["sql_query"],
             connection_name=settings.oracle_default_connection,
-            include_plan=False,
+            include_plan=True,  # Enable EXPLAIN PLAN visibility
         )
 
         state["cost_estimate"] = {
@@ -267,6 +268,11 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
             "warnings": cost_estimate.warnings,
             "recommendations": cost_estimate.recommendations,
         }
+        
+        # Store execution plan for frontend visibility
+        if cost_estimate.execution_plan:
+            state["execution_plan"] = cost_estimate.execution_plan
+            state["cost_estimate"]["execution_plan"] = cost_estimate.execution_plan
 
         span["output"]["cost_estimate"] = {
             "total_cost": cost_estimate.total_cost,
@@ -308,7 +314,7 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
             est_rows = 0
         if est_rows and est_rows > 1000 and not is_admin:
             state["needs_approval"] = True
-            state["next_action"] = "request_approval"
+            state["next_action"] = "await_approval"
             state["messages"].append(
                 AIMessage(content=f" Large result set expected (~{est_rows} rows). Preview/approval required.")
             )
@@ -342,7 +348,7 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
 
     if validation_result.is_valid:
         if state["needs_approval"]:
-            state["next_action"] = "request_approval"
+            state["next_action"] = "await_approval"
             logger.info(f"Query requires approval: {validation_result.risk_level.value} risk")
         else:
             state["next_action"] = "execute"

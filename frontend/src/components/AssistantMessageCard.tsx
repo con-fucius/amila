@@ -115,7 +115,7 @@ export function AssistantMessageCard({
 
       {isReasoningOpen && (
         <div className="border rounded-lg p-3 bg-gray-50 dark:bg-slate-900/50 dark:border-slate-700">
-          <div className="text-xs font-semibold mb-3 text-gray-700 dark:text-gray-200">🧠 Execution Details</div>
+          <div className="text-xs font-semibold mb-3 text-gray-700 dark:text-gray-200">Execution Details</div>
 
           {message.toolCall?.status === 'pending' && (
             <div className="space-y-2">

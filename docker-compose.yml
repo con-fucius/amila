@@ -1,6 +1,8 @@
-version: '3.8'
-
 services:
+  # ============================================
+  # ESSENTIAL SERVICES (start with: docker-compose up -d)
+  # ============================================
+
   # FastAPI Backend Service
   backend:
     build: 
@@ -10,24 +12,38 @@ services:
     container_name: bi-agent-backend
     ports:
       - "8000:8000"
+    env_file:
+      - .env.docker
     environment:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
-      - ORACLE_HOST=${ORACLE_HOST}
-      - ORACLE_PORT=${ORACLE_PORT}
-      - ORACLE_SERVICE_NAME=${ORACLE_SERVICE_NAME}
+      - ORACLE_HOST=${ORACLE_HOST:-host.docker.internal}
+      - ORACLE_PORT=${ORACLE_PORT:-1521}
+      - ORACLE_SERVICE_NAME=${ORACLE_SERVICE_NAME:-XEPDB1}
       - ORACLE_USERNAME=${ORACLE_USERNAME}
       - ORACLE_PASSWORD=${ORACLE_PASSWORD}
+      - ORACLE_DEFAULT_CONNECTION=${ORACLE_DEFAULT_CONNECTION:-TestUserCSV}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - MCP_SERVER_HOST=${MCP_SERVER_HOST}
-      - MCP_SERVER_PORT=${MCP_SERVER_PORT}
-      - ENVIRONMENT=${ENVIRONMENT}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-      - OTEL_SERVICE_NAME=bi-agent-backend
-      - OTEL_SERVICE_VERSION=1.0.0
+      - JWT_REFRESH_SECRET_KEY=${JWT_REFRESH_SECRET_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - SQLCL_PATH=/opt/sqlcl/bin/sql
+      - SQLCL_ARGS=["-mcp"]
+      - SQLCL_TIMEOUT=600
+      - SQLCL_MAX_PROCESSES=1
+      - DORIS_MCP_ENABLED=${DORIS_MCP_ENABLED:-true}
+      - DORIS_MCP_HOST=127.0.0.1
+      - DORIS_MCP_PORT=8808
+      - DORIS_DB_HOST=${DORIS_DB_HOST:-host.docker.internal}
+      - DORIS_DB_PORT=${DORIS_DB_PORT:-9030}
+      - DORIS_DB_USER=${DORIS_DB_USER:-root}
+      - DORIS_DB_PASSWORD=${DORIS_DB_PASSWORD:-}
+      - DORIS_DB_DATABASE=${DORIS_DB_DATABASE:-demo}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redispass123}
       - FALKORDB_HOST=falkordb
       - FALKORDB_PORT=6379
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
@@ -36,12 +52,16 @@ services:
       - GRAPHITI_SEMAPHORE_LIMIT=${GRAPHITI_SEMAPHORE_LIMIT:-10}
       - GRAPHITI_LLM_PROVIDER=${GRAPHITI_LLM_PROVIDER:-gemini}
       - GRAPHITI_EMBEDDING_PROVIDER=${GRAPHITI_EMBEDDING_PROVIDER:-gemini}
+      - LANGGRAPH_CHECKPOINT_DB=/app/data/checkpoints.db
     volumes:
-      - ./backend:/app
+      - backend_data:/app/data
       - ./logs:/app/logs
+      - ./.dbtools:/home/app/.dbtools:ro
     depends_on:
-      - otel-collector
-      - falkordb
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - bi-agent-network
     restart: unless-stopped
@@ -49,8 +69,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 120s
 
   # React Frontend Service
   frontend:
@@ -62,16 +82,21 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - bi-agent-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
+
+  # ============================================
+  # FULL BUILD SERVICES (start with: docker-compose --profile full up -d)
+  # ============================================
 
   # OpenTelemetry Collector
   otel-collector:
@@ -89,6 +114,9 @@ services:
     networks:
       - bi-agent-network
     restart: unless-stopped
+    profiles:
+      - full
+      - observability
 
   # Prometheus
   prometheus:
@@ -107,6 +135,9 @@ services:
     networks:
       - bi-agent-network
     restart: unless-stopped
+    profiles:
+      - full
+      - observability
 
   # Grafana (optional)
   grafana:
@@ -128,16 +159,12 @@ services:
     profiles:
       - observability
 
-  # Redis
+  # Redis Stack (includes RediSearch for semantic indexing)
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:latest
     container_name: bi-agent-redis
-    command: >
-      redis-server
-      --appendonly yes
-      --requirepass ${REDIS_PASSWORD:-redispass123}
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+    environment:
+      - REDIS_ARGS=--requirepass ${REDIS_PASSWORD:-redispass123} --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes
     ports:
       - "6379:6379"
     volumes:
@@ -146,7 +173,7 @@ services:
       - bi-agent-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispass123}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -192,6 +219,8 @@ services:
       timeout: 10s
       retries: 10
       start_period: 120s
+    profiles:
+      - full
 
   # Celery Worker
   celery-worker:
@@ -199,25 +228,25 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: bi-agent-celery-worker
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=4
+    command: ["python", "-m", "celery", "-A", "app.core.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    env_file:
+      - .env.docker
     environment:
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redispass123}@redis:6379/0
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redispass123}@redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redispass123}@redis:6379/1
-      - ENVIRONMENT=${ENVIRONMENT}
-      - LOG_LEVEL=${LOG_LEVEL}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
-      - ./backend:/app
+      - backend_data:/app/data
       - ./logs:/app/logs
     depends_on:
-      - redis
-      - backend
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     networks:
       - bi-agent-network
     restart: unless-stopped
+    profiles:
+      - full
 
   # Flower (Celery monitoring)
   flower:
@@ -225,19 +254,25 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: bi-agent-flower
-    command: celery -A app.core.celery_app flower --port=5555
+    command: ["python", "-m", "celery", "-A", "app.core.celery_app", "flower", "--port=5555"]
     ports:
       - "5555:5555"
+    env_file:
+      - .env.docker
     environment:
-      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redispass123}@redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redispass123}@redis:6379/1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - FLOWER_BASIC_AUTH=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
     depends_on:
-      - redis
-      - celery-worker
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
     networks:
       - bi-agent-network
     restart: unless-stopped
+    profiles:
+      - full
 
   # LangGraph Studio (dev only)
   langgraph-studio:
@@ -263,13 +298,13 @@ networks:
     name: bi-agent-network
 
 volumes:
-  prometheus_data:
-    name: bi-agent-prometheus-data
-  grafana_data:
-    name: bi-agent-grafana-data
   redis_data:
     name: bi-agent-redis-data
   falkordb_data:
     name: bi-agent-falkordb-data
-  doris_data:
-    name: bi-agent-doris-data
+  prometheus_data:
+    name: bi-agent-prometheus-data
+  grafana_data:
+    name: bi-agent-grafana-data
+  backend_data:
+    name: bi-agent-backend-data

@@ -56,12 +56,12 @@ RUN groupadd -r doris && useradd -r -g doris doris
 RUN chown -R doris:doris /app
 USER doris
 
-# Health check
+# Health check - uses SERVER_PORT env var (default 8808)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
+    CMD curl -f http://localhost:${SERVER_PORT:-8808}/health || exit 1
 
-# Expose ports
-EXPOSE 3000 3001 3002
+# Expose port (configurable via SERVER_PORT)
+EXPOSE 8808
 
 # Start command
-CMD ["/app/start_server.sh"]
+CMD ["python", "-m", "doris_mcp_server.main", "--transport", "http", "--host", "0.0.0.0", "--port", "8808"]
