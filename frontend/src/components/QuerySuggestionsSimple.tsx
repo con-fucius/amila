@@ -78,27 +78,32 @@ export function QuerySuggestionsSimple({ show, onSuggestionClick, currentInput }
 
   return (
     <Card className="absolute bottom-full left-0 right-0 mb-2 shadow-md border border-gray-100 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm z-50">
-      <CardContent className="p-2">
-        <div className="text-[10px] font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
-          {currentInput.trim() ? 'Suggestions' : 'Quick Start'}
+      <CardContent className="p-1.5">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[9px] font-medium text-gray-400 dark:text-gray-500 tracking-wide">
+            {currentInput.trim() ? 'Suggestions' : 'Quickstart'}
+          </span>
+          {!currentInput.trim() && (
+            <span className="text-[8px] text-gray-400 dark:text-gray-500">Click to use</span>
+          )}
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-1">
           {filteredTemplates.slice(0, 2).map((category) => (
             <div key={category.category}>
-              <div className="flex items-center gap-1.5 mb-1">
-                <category.icon size={11} className="text-gray-400" />
-                <span className="text-[10px] font-medium text-gray-500 dark:text-gray-400">
+              <div className="flex items-center gap-1 mb-0.5">
+                <category.icon size={9} className="text-gray-400" />
+                <span className="text-[9px] font-medium text-gray-500 dark:text-gray-400">
                   {category.category}
                 </span>
               </div>
 
-              <div className="flex flex-wrap gap-1">
+              <div className="flex flex-wrap gap-0.5">
                 {category.suggestions.slice(0, 2).map((suggestion, idx) => (
                   <Badge
                     key={idx}
                     variant="secondary"
-                    className={`cursor-pointer hover:scale-[1.02] transition-all duration-150 text-[10px] py-0.5 px-1.5 ${category.color}`}
+                    className={`cursor-pointer hover:scale-[1.02] transition-all duration-150 text-[9px] py-0 px-1 ${category.color}`}
                     onClick={() => onSuggestionClick(suggestion)}
                   >
                     {suggestion}
@@ -108,12 +113,6 @@ export function QuerySuggestionsSimple({ show, onSuggestionClick, currentInput }
             </div>
           ))}
         </div>
-
-        {!currentInput.trim() && (
-          <div className="text-[9px] text-gray-400 dark:text-gray-500 text-center mt-2 pt-1.5 border-t border-gray-100 dark:border-slate-700">
-            Click to use or type your query
-          </div>
-        )}
       </CardContent>
     </Card>
   )

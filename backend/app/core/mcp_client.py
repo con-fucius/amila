@@ -664,7 +664,15 @@ class SQLclMCPClient:
                                 if "ORA-" in line:
                                     ora_msg = line.strip()
                                     break
-                            return {"status": "error", "message": ora_msg or "Oracle error", "sql": sql}
+                                    ora_msg = None
+                            for line in text_payload.splitlines():
+                                if "ORA-" in line:
+                                    ora_msg = line.strip()
+                                    break
+                            
+                            # If we see ORA- but couldn't exact a specific line, return the start of the payload
+                            msg_to_return = ora_msg if ora_msg else f"Oracle Error (details): {text_payload[:200]}"
+                            return {"status": "error", "message": msg_to_return, "sql": sql}
 
                         # 1) JSON payload path (preferred by SQLcl MCP tools)
                         if (text_payload.startswith('{') and '"status"' in text_payload) or text_payload.startswith('['):
@@ -684,7 +692,8 @@ class SQLclMCPClient:
                                             "execution_time_ms": parsed.get("execution_time_ms", 0),
                                         }
                                     if status != "success":
-                                        return {"status": "error", "message": parsed.get("message", "Execution error"), "sql": sql, "results": results}
+                                        error_detail = parsed.get("message") or parsed.get("error") or json.dumps(parsed)
+                                        return {"status": "error", "message": str(error_detail), "sql": sql, "results": results}
                                     return {
                                         "status": "success",
                                         "query_id": f"mcp_{hash(sql) % 10000}",

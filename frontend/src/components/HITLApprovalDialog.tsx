@@ -26,15 +26,16 @@ interface HITLApprovalDialogProps {
     dataClassification?: string
     sessionId?: string
     user?: string
+    databaseType?: 'oracle' | 'doris'
   }
 }
 
 const riskColors = {
-  SAFE: { bg: 'bg-green-100', text: 'text-green-700', border: 'border-green-400' },
-  LOW: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-400' },
-  MEDIUM: { bg: 'bg-yellow-100', text: 'text-yellow-700', border: 'border-yellow-400' },
-  HIGH: { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-400' },
-  CRITICAL: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-400' },
+  SAFE: { bg: 'bg-green-900/40', text: 'text-green-300', border: 'border-green-500/50' },
+  LOW: { bg: 'bg-blue-900/40', text: 'text-blue-300', border: 'border-blue-500/50' },
+  MEDIUM: { bg: 'bg-yellow-900/40', text: 'text-yellow-300', border: 'border-yellow-500/50' },
+  HIGH: { bg: 'bg-orange-900/40', text: 'text-orange-300', border: 'border-orange-500/50' },
+  CRITICAL: { bg: 'bg-red-900/40', text: 'text-red-300', border: 'border-red-500/50' },
 }
 
 export function HITLApprovalDialog({
@@ -193,35 +194,39 @@ export function HITLApprovalDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <div className="flex items-start gap-4">
+      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 shadow-2xl shadow-emerald-500/5 animate-in fade-in-0 zoom-in-95 duration-200">
+        {/* Subtle edge glow effect */}
+        <div className="absolute inset-0 rounded-lg bg-gradient-to-r from-emerald-500/10 via-transparent to-blue-500/10 pointer-events-none" />
+        <div className="absolute inset-[1px] rounded-lg bg-gradient-to-b from-white/5 to-transparent pointer-events-none" />
+
+        <DialogHeader className="relative">
+          <div className="flex items-start gap-3">
             <div className={cn(
-              "w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0",
+              "w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0",
               colors.bg
             )}>
-              <AlertTriangle className={cn("h-6 w-6", colors.text)} />
+              <AlertTriangle className={cn("h-5 w-5", colors.text)} />
             </div>
             <div className="flex-1">
-              <DialogTitle className="text-xl">Human-in-the-Loop Approval Required</DialogTitle>
-              <DialogDescription className="mt-1">
-                This query requires your review before execution for security and compliance.
+              <DialogTitle className="text-lg text-gray-100">Approval Required</DialogTitle>
+              <DialogDescription className="mt-0.5 text-gray-400 text-sm">
+                Review this query before execution
               </DialogDescription>
               <Badge
                 variant="outline"
-                className={cn("mt-2", colors.bg, colors.text, colors.border)}
+                className={cn("mt-1.5 text-xs", colors.bg, colors.text, colors.border)}
               >
-                Risk Level: {riskLevel}
+                {riskLevel} Risk
               </Badge>
             </div>
           </div>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="space-y-3 relative">
           {/* User Query */}
           <div>
-            <div className="text-sm font-semibold text-gray-600 mb-2">Your Query:</div>
-            <div className="p-3 bg-gray-50 border rounded-lg text-sm">
+            <div className="text-xs font-medium text-gray-400 mb-1">Your Query:</div>
+            <div className="p-2.5 bg-slate-800/60 border border-slate-700/50 rounded-lg text-sm text-gray-200">
               {query}
             </div>
           </div>
@@ -312,61 +317,61 @@ export function HITLApprovalDialog({
           </div>
 
           {/* Security & Performance Metrics */}
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-white rounded-lg p-3 border">
-              <div className="text-xs text-gray-500 mb-1">Operation Type</div>
-              <div className="font-semibold text-sm text-green-600">
-                {metadata.operationType || 'SELECT (Read-Only)'}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
+              <div className="text-[10px] text-gray-500 mb-0.5">Operation</div>
+              <div className="font-medium text-xs text-emerald-400">
+                {metadata.operationType || 'SELECT'}
               </div>
             </div>
-            <div className="bg-white rounded-lg p-3 border">
-              <div className="text-xs text-gray-500 mb-1">Risk Assessment</div>
-              <div className="font-semibold text-sm text-green-600">
-                {riskLevel === 'SAFE' || riskLevel === 'LOW' ? ' Low Risk' : ' Review Required'}
+            <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
+              <div className="text-[10px] text-gray-500 mb-0.5">Risk</div>
+              <div className={cn("font-medium text-xs", colors.text)}>
+                {riskLevel === 'SAFE' || riskLevel === 'LOW' ? 'Low' : 'Review'}
               </div>
             </div>
-            <div className="bg-white rounded-lg p-3 border">
-              <div className="text-xs text-gray-500 mb-1">Est. Execution Time</div>
-              <div className="font-semibold text-sm text-gray-700">
-                {metadata.estimatedTime || '< 0.5s'}
+            <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
+              <div className="text-[10px] text-gray-500 mb-0.5">Est. Time</div>
+              <div className="font-medium text-xs text-gray-300">
+                {metadata.estimatedTime || '<0.5s'}
               </div>
             </div>
           </div>
 
-          {/* Additional Details */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs border rounded-lg p-3 bg-gray-50">
+          {/* Additional Details - Compact */}
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px] border border-slate-700/50 rounded-lg p-2.5 bg-slate-800/40">
             <div className="flex justify-between">
-              <span className="text-gray-500">Tables Accessed:</span>
-              <span className="font-medium">
+              <span className="text-gray-500">Tables:</span>
+              <span className="font-medium text-gray-300 truncate ml-2">
                 {metadata.tablesAccessed?.join(', ') || 'SALES'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-gray-500">Estimated Rows:</span>
-              <span className="font-medium">
-                ~{metadata.estimatedRows || 10} rows
+              <span className="text-gray-500">Est. Rows:</span>
+              <span className="font-medium text-gray-300">
+                ~{metadata.estimatedRows || 10}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-gray-500">Data Classification:</span>
+              <span className="text-gray-500">Classification:</span>
               <span className={cn(
                 "font-medium",
-                metadata.dataClassification === 'Confidential' ? "text-yellow-600" : ""
+                metadata.dataClassification === 'Confidential' ? "text-yellow-400" : "text-gray-300"
               )}>
                 {metadata.dataClassification || 'Standard'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-gray-500">SQL Injection Check:</span>
-              <span className="font-medium text-green-600"> Passed</span>
+              <span className="text-gray-500">SQL Injection:</span>
+              <span className="font-medium text-emerald-400">✓ Passed</span>
             </div>
           </div>
 
-          {/* Audit Trail Info */}
-          <Alert variant="default" className="bg-blue-50 border-blue-200">
-            <Info className="h-4 w-4 text-blue-600" />
-            <AlertTitle className="text-sm text-blue-900">Audit Trail Enabled</AlertTitle>
-          </Alert>
+          {/* Audit Trail - More compact */}
+          <div className="flex items-center gap-2 p-2 bg-blue-900/20 border border-blue-500/30 rounded-lg">
+            <Info className="h-3.5 w-3.5 text-blue-400" />
+            <span className="text-xs text-blue-300">Audit Trail Enabled</span>
+          </div>
 
           {/* Risk Warning */}
           {(riskLevel === 'HIGH' || riskLevel === 'CRITICAL') && (
@@ -381,28 +386,28 @@ export function HITLApprovalDialog({
           )}
         </div>
 
-        <DialogFooter className="flex-col sm:flex-row gap-2">
+        <DialogFooter className="flex-col sm:flex-row gap-2 relative">
           <div className="flex flex-1 gap-2 text-xs items-center">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" className="rounded" defaultChecked />
+            <label className="flex items-center gap-2 cursor-pointer text-gray-400">
+              <input type="checkbox" className="rounded bg-slate-800 border-slate-600" defaultChecked />
               <span>Save to approved queries</span>
             </label>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={onReject}>
-              Reject Query
+            <Button variant="outline" onClick={onReject} className="border-slate-600 text-gray-300 hover:bg-slate-800 hover:text-white">
+              Reject
             </Button>
             {onModify && (
-              <Button variant="outline" onClick={onModify} className="border-green-600 text-green-600 hover:bg-green-50">
+              <Button variant="outline" onClick={onModify} className="border-emerald-600/60 text-emerald-400 hover:bg-emerald-900/30">
                 Modify
               </Button>
             )}
             <Button
               onClick={handleApprove}
               disabled={!isValidSQL}
-              className="bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white"
             >
-              {editedSQL !== sql ? ' Approve Modified Query' : ' Approve & Execute'}
+              {editedSQL !== sql ? 'Approve Modified' : 'Approve & Execute'}
             </Button>
           </div>
         </DialogFooter>
@@ -505,7 +510,9 @@ export function HITLApprovalDialog({
                   onClick={() => {
                     try {
                       const encoded = encodeURIComponent(editedSQL)
-                      window.open(`/query-builder?sql=${encoded}`, '_blank')
+                      // Include database_type from metadata if available
+                      const dbType = metadata?.databaseType || 'oracle'
+                      window.open(`/query-builder?sql=${encoded}&database_type=${dbType}`, '_blank')
                     } catch { }
                   }}
                 >

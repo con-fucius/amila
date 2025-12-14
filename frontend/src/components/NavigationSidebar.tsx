@@ -22,6 +22,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog'
+import { SystemHealthMonitor } from './SystemHealthMonitor'
 
 interface NavigationSidebarProps {
   isCollapsed: boolean
@@ -39,13 +40,13 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
   const currentChatId = useCurrentChatId()
   const databaseType = useDatabaseType()
   const messages = useMessages()
-  const { status: healthStatus, components, recheckHealth } = useBackendHealth(5000)
+  const { components, recheckHealth } = useBackendHealth(5000)
   const colorMode = useContext(ColorModeContext)
   const isDark = colorMode.mode === 'dark'
   const [userProfile, setUserProfile] = useState<{ username: string; role: string } | null>(null)
   const [showSwitchWarning, setShowSwitchWarning] = useState(false)
   const [pendingDbSwitch, setPendingDbSwitch] = useState<DatabaseType | null>(null)
-  
+
   const toggleDark = () => {
     colorMode.toggleColorMode()
     document.documentElement.classList.toggle('dark', colorMode.mode !== 'dark')
@@ -70,21 +71,21 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
 
   const handleDatabaseChange = useCallback((type: DatabaseType) => {
     if (type === databaseType) return
-    
+
     // Check health first
     if (!isDatabaseHealthy(type)) {
       recheckHealth()
       console.warn(`[NavigationSidebar] ${type} database not healthy, switch blocked`)
       return
     }
-    
+
     // Warn if there's conversation history
     if (hasConversationHistory) {
       setPendingDbSwitch(type)
       setShowSwitchWarning(true)
       return
     }
-    
+
     setDatabaseType(type)
   }, [databaseType, isDatabaseHealthy, hasConversationHistory, setDatabaseType, recheckHealth])
 
@@ -129,50 +130,17 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
     }
   }, [])
 
-  // Normalize backend component status values to a lowercase string
-  const normalizeStatus = (value: any): string => {
-    if (!value) return 'unknown'
-    return String(value).toLowerCase()
-  }
+
 
   // Derive status for the four main system health pills
   // Database: check doris_mcp first (for Doris), then sqlcl_pool (for Oracle), then generic database field
-  const databaseStatus = normalizeStatus(
-    components?.database ??
-    (components?.doris_mcp === 'connected' ? 'available' : null) ??
-    (components?.sqlcl_pool === 'active' ? 'available' : null) ??
-    components?.doris_mcp ??
-    components?.sqlcl_pool ??
-    components?.mcp_client
-  )
 
-  const cacheStatus = normalizeStatus(components?.redis)
 
-  // Backend is healthy if either Doris or SQLcl is connected
-  const backendComposite = components
-    ? ((components.doris_mcp === 'connected' || components.sqlcl_pool === 'active' || components.mcp_client === 'connected')
-      ? 'healthy'
-      : (components.doris_mcp || components.sqlcl_pool || components.mcp_client || healthStatus))
-    : healthStatus
 
-  const backendStatusNorm = normalizeStatus(backendComposite)
 
-  const graphStatus = normalizeStatus(components?.graphiti)
 
-  const makePillClass = (status: string) => {
-    const healthy = ['available', 'connected', 'active', 'healthy', 'ok', 'ready', 'reachable']
-    const caution = ['unknown', 'initializing', 'checking', 'booting', 'mock', 'fallback', 'not_initialized', 'unavailable']
-    const s = status
 
-    if (healthy.includes(s)) {
-      return 'border-green-200 text-green-300 bg-green-900/20'
-    }
-    if (caution.includes(s)) {
-      return 'border-yellow-200 text-yellow-200 bg-yellow-900/30'
-    }
-    // Treat everything else as a failure (red)
-    return 'border-red-200 text-red-300 bg-red-900/20'
-  }
+
 
   return (
     <aside
@@ -306,7 +274,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
           <div className="text-[11px] text-gray-300 space-y-5">
             {/* Database Selector */}
             <div>
-              <div className="mb-2 font-semibold text-[11px] tracking-wide text-gray-400 uppercase flex items-center gap-1">
+              <div className="mb-2 font-semibold text-[11px] tracking-wide text-gray-400 flex items-center gap-1">
                 <Database className="w-3 h-3" />
                 <span>Database</span>
                 {isProcessing && <span className="text-yellow-400 text-[9px]">(locked)</span>}
@@ -316,8 +284,8 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
                   onClick={() => !isProcessing && handleDatabaseChange('oracle')}
                   disabled={isProcessing || !isDatabaseHealthy('oracle')}
                   title={
-                    isProcessing 
-                      ? 'Cannot switch database while processing' 
+                    isProcessing
+                      ? 'Cannot switch database while processing'
                       : !isDatabaseHealthy('oracle')
                         ? 'Oracle database unavailable'
                         : 'Switch to Oracle'
@@ -340,8 +308,8 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
                   onClick={() => !isProcessing && handleDatabaseChange('doris')}
                   disabled={isProcessing || !isDatabaseHealthy('doris')}
                   title={
-                    isProcessing 
-                      ? 'Cannot switch database while processing' 
+                    isProcessing
+                      ? 'Cannot switch database while processing'
                       : !isDatabaseHealthy('doris')
                         ? 'Doris database unavailable'
                         : 'Switch to Doris'
@@ -375,36 +343,8 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
             >
               {isDark ? 'Dark' : 'Light'}
             </button>
-            <div className="mt-3">
-              <div className="mb-2 font-semibold text-[11px] tracking-wide text-gray-400 uppercase">
-                System health
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <span
-                  className={cn('px-3 py-1.5 rounded-md border text-center text-[11px] font-medium truncate', makePillClass(databaseStatus))}
-                  title={`Database: ${databaseStatus}`}
-                >
-                  Database
-                </span>
-                <span
-                  className={cn('px-3 py-1.5 rounded-md border text-center text-[11px] font-medium truncate', makePillClass(cacheStatus))}
-                  title={`Cache: ${cacheStatus}`}
-                >
-                  Cache
-                </span>
-                <span
-                  className={cn('px-3 py-1.5 rounded-md border text-center text-[11px] font-medium truncate', makePillClass(backendStatusNorm))}
-                  title={`Backend: ${backendStatusNorm}`}
-                >
-                  Backend
-                </span>
-                <span
-                  className={cn('px-3 py-1.5 rounded-md border text-center text-[11px] font-medium truncate', makePillClass(graphStatus))}
-                  title={`Graph: ${graphStatus}`}
-                >
-                  Graph
-                </span>
-              </div>
+            <div className="mt-4">
+              <SystemHealthMonitor components={components} />
             </div>
           </div>
           <button
@@ -421,6 +361,59 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               </div>
             </div>
           </button>
+        </div>
+      )}
+
+      {/* Minimized Footer - shows icons when sidebar is collapsed */}
+      {isCollapsed && (
+        <div className="absolute bottom-0 left-0 right-0 border-t border-gray-700 py-3 px-2 space-y-2 bg-gradient-to-b from-gray-900/95 to-gray-950">
+          {/* Database indicator */}
+          <div className="flex justify-center">
+            <button
+              className={cn(
+                'p-2 rounded-lg transition-all relative',
+                databaseType === 'oracle' || databaseType === 'doris'
+                  ? 'bg-emerald-600/30 text-emerald-200'
+                  : 'bg-gray-800/70 text-gray-400 hover:bg-gray-700'
+              )}
+              title={`${databaseType === 'oracle' ? 'Oracle' : 'Doris'} - ${isDatabaseHealthy(databaseType) ? 'Connected' : 'Disconnected'}`}
+            >
+              <Database className="w-4 h-4" />
+              <span className={cn(
+                'absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full',
+                isDatabaseHealthy(databaseType) ? 'bg-green-400' : 'bg-red-400'
+              )} />
+            </button>
+          </div>
+
+          {/* System health indicator */}
+          <div className="flex justify-center flex-col items-center gap-2">
+            <SystemHealthMonitor components={components} collapsed={true} />
+          </div>
+
+          {/* Settings/Theme toggle */}
+          <div className="flex justify-center">
+            <button
+              onClick={toggleDark}
+              className="p-2 rounded-lg bg-gray-800/70 text-gray-400 hover:bg-gray-700 transition-all"
+              title={`Theme: ${isDark ? 'Dark' : 'Light'}`}
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* User account */}
+          <div className="flex justify-center">
+            <button
+              onClick={() => navigate('/account')}
+              className="p-1 rounded-lg hover:bg-gray-700/50 transition-all"
+              title={userProfile?.username || 'Account'}
+            >
+              <div className="w-7 h-7 rounded-full bg-gradient-to-r from-emerald-500 to-green-600 flex items-center justify-center text-white">
+                <User className="w-3.5 h-3.5" />
+              </div>
+            </button>
+          </div>
         </div>
       )}
 
@@ -441,18 +434,18 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               Switch Database?
             </AlertDialogTitle>
             <AlertDialogDescription className="text-gray-300">
-              You have an active conversation. Switching to {pendingDbSwitch === 'oracle' ? 'Oracle' : 'Doris'} may affect query context and results. 
+              You have an active conversation. Switching to {pendingDbSwitch === 'oracle' ? 'Oracle' : 'Doris'} may affect query context and results.
               Previous queries were executed against {databaseType === 'oracle' ? 'Oracle' : 'Doris'}.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel 
+            <AlertDialogCancel
               onClick={cancelDatabaseSwitch}
               className="bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
             >
               Cancel
             </AlertDialogCancel>
-            <AlertDialogAction 
+            <AlertDialogAction
               onClick={confirmDatabaseSwitch}
               className="bg-emerald-600 hover:bg-emerald-700 text-white"
             >

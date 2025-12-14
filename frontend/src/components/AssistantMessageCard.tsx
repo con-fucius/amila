@@ -52,7 +52,8 @@ export function AssistantMessageCard({
         </CardContent>
       </Card>
 
-      {message.toolCall?.status === 'pending' && message.toolCall.metadata?.currentState && (
+      {/* Progress indicator - skip for conversational responses */}
+      {message.toolCall?.status === 'pending' && message.toolCall.metadata?.currentState && !message.toolCall.metadata?.isConversational && (
         <ProgressIndicator
           currentState={message.toolCall.metadata.currentState}
           steps={[]}
@@ -63,8 +64,8 @@ export function AssistantMessageCard({
         />
       )}
 
-      {/* SQL query ribbon directly under preamble */}
-      {message.toolCall?.metadata?.sql && (
+      {/* SQL query ribbon directly under preamble - skip for conversational responses */}
+      {message.toolCall?.metadata?.sql && !message.toolCall.metadata?.isConversational && (
         <div className="mt-3">
           <SQLPanel
             sql={message.toolCall.metadata.sql}
@@ -264,7 +265,8 @@ export function AssistantMessageCard({
         </div>
       )}
 
-      {message.toolCall?.status === 'pending' && (
+      {/* Loading skeleton - skip for conversational responses */}
+      {message.toolCall?.status === 'pending' && !message.toolCall.metadata?.isConversational && (
         <Card className="border-emerald-100/70 bg-white/70 dark:border-emerald-500/30 dark:bg-slate-950/70 backdrop-blur-md shadow-sm">
           <CardContent className="p-3">
             <div className="flex items-center justify-end mb-2">

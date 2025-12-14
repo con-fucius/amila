@@ -138,13 +138,23 @@ class RBACManager:
         
         token = credentials.credentials
         
-        # DEV ONLY: Bypass for temp token
+        # DEV ONLY: Bypass for temp token - RESTRICTED to development environment only
+        # SECURITY: In production, this bypass is completely disabled
         if token == "temp-dev-token":
-            return {
-                "username": "dev_user",
-                "role": Role.ADMIN,  # Admin role bypasses approval
-                "token_data": {"sub": "dev_user", "role": "admin"}
-            }
+            from app.core.config import settings
+            if settings.is_development:
+                logger.warning("DEV ONLY: temp-dev-token used - returns VIEWER role (not admin)")
+                return {
+                    "username": "dev_user",
+                    "role": Role.VIEWER,  # SECURITY: Restricted to VIEWER, not ADMIN
+                    "token_data": {"sub": "dev_user", "role": "viewer"}
+                }
+            else:
+                logger.error("SECURITY: temp-dev-token rejected in non-development environment")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Development tokens not allowed in this environment"
+                )
         
         # Decode token
         payload = self.auth_manager.decode_token(token, token_type="access")

@@ -222,6 +222,28 @@ export function RealChatInterface() {
         details: (resp as any).clarification_details,
         databaseType,
       })
+    } else if (outcome.kind === 'conversational') {
+      // Handle conversational responses (greetings, help, meta questions)
+      const conversationalMessage = outcome.message
+      const lastMessage = messages[messages.length - 1]
+      
+      if (lastMessage && lastMessage.type === 'assistant') {
+        mergeMessage(lastMessage.id, (prev) => ({
+          ...prev,
+          content: conversationalMessage,
+          toolCall: {
+            ...(prev.toolCall || { name: 'query_processor', params: { query: lastUserQueryRef.current || '' } }),
+            status: 'completed',
+            metadata: {
+              ...(prev.toolCall?.metadata || {}),
+              isConversational: true,
+              intent: (response as any)?.intent || (response as any)?.llm_metadata?.intent,
+            },
+          },
+        }))
+      }
+      setApprovalDialog(null)
+      setClarificationDialog(null)
     } else if (outcome.kind === 'success') {
       const resp = outcome.response
       const normalized = outcome.normalizedResult

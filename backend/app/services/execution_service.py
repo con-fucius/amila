@@ -11,6 +11,7 @@ from app.core.langfuse_client import (
     trace_span,
     update_trace,
 )
+from app.core.audit import audit_query_execution
 from app.core.resilience import circuit_breaker_context, CircuitBreakerConfig, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,20 @@ class ExecutionService:
 
                         logger.info(f"Query executed successfully ({circuit_breaker_name})")
                         record_trace("success", result_dict=result)
+
+                        # Audit successful execution
+                        # We use trace_metadata to get user context if available
+                        await audit_query_execution(
+                            user=trace_metadata.get("user_id", user_id or "system"),
+                            user_role=trace_metadata.get("user_role", "unknown"),
+                            sql_query=query_text,
+                            success=True,
+                            execution_time_ms=int((time.time() - start_time) * 1000),
+                            row_count=row_count if row_count is not None else 0,
+                            session_id=trace_metadata.get("session_id"),
+                            correlation_id=trace_identifier,
+                        )
+
                         return result
 
                     except asyncio.TimeoutError:
@@ -140,8 +155,20 @@ class ExecutionService:
                         error_msg = f"Query execution timed out after {timeout} seconds"
                         record_trace("error", error_message=error_msg)
                         
+
+                        # Audit timeout
+                        await audit_query_execution(
+                            user=trace_metadata.get("user_id", user_id or "system"),
+                            user_role=trace_metadata.get("user_role", "unknown"),
+                            sql_query=query_text,
+                            success=False,
+                            execution_time_ms=int((time.time() - start_time) * 1000),
+                            error=error_msg,
+                            session_id=trace_metadata.get("session_id"),
+                            correlation_id=trace_identifier,
+                        )
+
                         # Return standardized error structure (don't raise, let caller decide or return error dict)
-                        # Actually, existing services perform specific returns or raises. 
                         # To be generic, we can raise specific exceptions or return an error dict.
                         # The services usually return an error dict.
                         return {
@@ -158,12 +185,38 @@ class ExecutionService:
                 "error",
                 error_message="Execution temporarily disabled due to repeated failures"
             )
+            
+            # Audit circuit breaker failure
+            await audit_query_execution(
+                user=trace_metadata.get("user_id", user_id or "system"),
+                user_role=trace_metadata.get("user_role", "unknown"),
+                sql_query=query_text,
+                success=False,
+                execution_time_ms=0,
+                error=f"Circuit Breaker '{circuit_breaker_name}' Open: {str(e)}",
+                session_id=trace_metadata.get("session_id"),
+                correlation_id=trace_identifier,
+            )
+
             raise # Re-raise for caller to handle specific HTTP mapping if needed
             
         except (ConnectionError, TimeoutError, OSError) as e:
             # Recoverable errors - may succeed on retry
             logger.warning(f"Recoverable execution error: {e}", exc_info=True)
             record_trace("error", error_message=f"Recoverable: {str(e)}")
+
+            # Audit recoverable error
+            await audit_query_execution(
+                user=trace_metadata.get("user_id", user_id or "system"),
+                user_role=trace_metadata.get("user_role", "unknown"),
+                sql_query=query_text,
+                success=False,
+                execution_time_ms=int((time.time() - start_time) * 1000),
+                error=f"Recoverable Error: {str(e)}",
+                session_id=trace_metadata.get("session_id"),
+                correlation_id=trace_identifier,
+            )
+
             return {
                 "status": "error",
                 "error": str(e),
@@ -176,6 +229,19 @@ class ExecutionService:
             # Non-recoverable errors
             logger.error(f"Execution failed: {e}", exc_info=True)
             record_trace("error", error_message=str(e))
+
+            # Audit non-recoverable error
+            await audit_query_execution(
+                user=trace_metadata.get("user_id", user_id or "system"),
+                user_role=trace_metadata.get("user_role", "unknown"),
+                sql_query=query_text,
+                success=False,
+                execution_time_ms=int((time.time() - start_time) * 1000),
+                error=str(e),
+                session_id=trace_metadata.get("session_id"),
+                correlation_id=trace_identifier,
+            )
+
             return {
                 "status": "error",
                 "error": str(e),

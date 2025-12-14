@@ -100,6 +100,7 @@ class QueryService:
         connection_name: Optional[str] = None,
         timeout: float = 600.0,
         user_id: Optional[str] = None,
+        user_role: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -110,6 +111,7 @@ class QueryService:
             connection_name: Database connection name
             timeout: Query timeout in seconds (default: 600.0)
             user_id: Optional user identifier for trace attribution
+            user_role: Optional user role for audit logging
             request_id: Optional existing request identifier to reuse for tracing
         
         Returns:
@@ -163,7 +165,8 @@ class QueryService:
                 "entrypoint": "execute_sql_query",
                 "connection": conn,
                 "frontend_surface": "query_builder",
-                "database": "oracle"
+                "database": "oracle",
+                "user_role": user_role or "unknown"
             },
             circuit_breaker_name="sql_execution",
             timeout=timeout,

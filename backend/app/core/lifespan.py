@@ -1,11 +1,45 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Dict, Any
 
 from app.core.config import settings
+
+
+async def _run_periodic_cleanup():
+    """
+    Background task to periodically clean up expired query metadata and states.
+    Runs every 5 minutes to prevent memory leaks from unbounded dict growth.
+    """
+    logger = logging.getLogger(__name__)
+    cleanup_interval = 300  # 5 minutes
+    
+    while True:
+        try:
+            await asyncio.sleep(cleanup_interval)
+            
+            # Import here to avoid circular imports
+            from app.services.query_state_manager import get_query_state_manager
+            
+            state_manager = await get_query_state_manager()
+            
+            # Clean up expired metadata (older than 24 hours)
+            cleaned_metadata = await state_manager.cleanup_expired_metadata()
+            
+            # Clean up terminal query states (finished, error, rejected)
+            cleaned_states = await state_manager.cleanup_terminal_states()
+            
+            if cleaned_metadata > 0 or cleaned_states > 0:
+                logger.info(f"Periodic cleanup: {cleaned_metadata} metadata, {cleaned_states} states removed")
+                
+        except asyncio.CancelledError:
+            logger.info("Cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Periodic cleanup error: {e}")
 from app.core.observability import setup_observability
 from app.core.logging_config import setup_logging
 from app.core.client_registry import registry
@@ -164,6 +198,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning(f"System started with {len(startup_errors)} warnings")
     else:
         logger.info("All systems ready")
+    
+    # Start background cleanup task for query state manager
+    cleanup_task = None
+    try:
+        cleanup_task = asyncio.create_task(_run_periodic_cleanup())
+        app.state.cleanup_task = cleanup_task
+        logger.info("Started periodic cleanup background task")
+    except Exception as e:
+        logger.warning(f"Failed to start cleanup task: {e}")
 
     if trace_identifier and langfuse_helpers.get('update_trace'):
         try:
@@ -182,6 +225,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("Shutting down...")
+    
+    # Cancel cleanup task
+    if hasattr(app.state, "cleanup_task") and app.state.cleanup_task:
+        try:
+            app.state.cleanup_task.cancel()
+            await asyncio.wait_for(app.state.cleanup_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception as e:
+            logger.warning(f"Cleanup task cancellation error: {e}")
     
     # Cleanup checkpointer
     if hasattr(app.state, "checkpointer_context") and app.state.checkpointer_context:

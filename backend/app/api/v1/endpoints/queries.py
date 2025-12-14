@@ -47,7 +47,7 @@ from app.core.rbac import (
     Role
 )
 from app.core.rate_limiter import apply_rate_limit, RateLimitTier
-from app.core.audit import audit_query_execution, audit_query_approval
+from app.core.audit import audit_query_execution, audit_query_approval, audit_logger, AuditAction, AuditSeverity
 from app.core.sql_validator import sql_validator, validate_sql
 from app.core.security_middleware import input_sanitizer
 from app.core.config import settings
@@ -243,6 +243,7 @@ async def submit_query(
                         DorisQueryService.execute_sql_query(
                             sql_query=request.query.strip(),
                             user_id=user["username"],
+                            user_role=user["role"].value,
                             request_id=query_id,
                         ),
                         timeout=600.0,
@@ -253,6 +254,7 @@ async def submit_query(
                             sql_query=request.query.strip(),
                             connection_name=request.connection_name,
                             user_id=user["username"],
+                            user_role=user["role"].value,
                             request_id=query_id,
                         ),
                         timeout=600.0,
@@ -263,15 +265,7 @@ async def submit_query(
                 }
         except asyncio.TimeoutError:
             # Audit timeout
-            await audit_query_execution(
-                user=user["username"],
-                user_role=user["role"].value,
-                sql_query=request.query.strip(),
-                success=False,
-                error="Query timeout (600s)",
-                ip_address=req.client.host if req.client else None,
-            )
-            
+            # Audit timeout handled by ExecutionService
             if langfuse_client:
                 try:
                     timeout_metadata = {
@@ -303,15 +297,7 @@ async def submit_query(
             logger.info(f"Query executed successfully: {row_count} rows in {execution_time}ms")
             
             # Audit successful execution
-            await audit_query_execution(
-                user=user["username"],
-                user_role=user["role"].value,
-                sql_query=request.query.strip(),
-                success=True,
-                execution_time_ms=execution_time,
-                row_count=row_count,
-                ip_address=req.client.host if req.client else None,
-            )
+            # Audit successful execution handled by ExecutionService
             
             response = QueryResponse(
                 query_id=execution_result.get("query_id", f"query_{hash(request.query) % 10000}"),
@@ -352,14 +338,7 @@ async def submit_query(
             logger.error("Query execution failed: %s", error_message)
             
             # Audit failed execution
-            await audit_query_execution(
-                user=user["username"],
-                user_role=user["role"].value,
-                sql_query=request.query.strip(),
-                success=False,
-                error=error_message,
-                ip_address=req.client.host if req.client else None,
-            )
+            # Audit failed execution handled by ExecutionService
             
             if langfuse_client:
                 try:
@@ -415,14 +394,7 @@ async def submit_query(
                 pass
         
         # Audit exception
-        await audit_query_execution(
-            user=user["username"],
-            user_role=user["role"].value,
-            sql_query=request.query.strip(),
-            success=False,
-            error=str(e),
-            ip_address=req.client.host if req.client else None,
-        )
+        # Audit exception handled by ExecutionService
         
         raise HTTPException(
             status_code=500, 
@@ -431,23 +403,57 @@ async def submit_query(
 
 
 @router.get("/{query_id}/status")
-async def get_query_status(query_id: str) -> Dict[str, Any]:
+async def get_query_status(
+    query_id: str,
+    user: Optional[dict] = Depends(rbac_manager.get_current_user_optional),
+) -> Dict[str, Any]:
     """
     Get query processing status from state manager.
+    
+    Returns current state and metadata for a query.
+    Authorization: Query owner or admin can view full metadata.
     """
     # Validate query_id format
     validate_query_id(query_id)
     
     try:
         state_manager = await get_query_state_manager()
+        
+        # Get persistent metadata
         query_metadata = await state_manager.get_query_metadata(query_id)
         
+        # Get current state
+        current_state = await state_manager.get_state(query_id)
+        
         if query_metadata:
+            # Authorization check: owner or admin sees full metadata
+            is_owner = user and (
+                user.get("username") == query_metadata.get("username") or
+                user.get("username") == query_metadata.get("user_id")
+            )
+            is_admin = user and user.get("role") == Role.ADMIN
+            
+            if is_owner or is_admin:
+                return {
+                    "query_id": query_id,
+                    "status": current_state.value if current_state else query_metadata.get("status", "unknown"),
+                    "message": "Query status retrieved",
+                    "metadata": query_metadata,
+                }
+            else:
+                # Non-owner gets limited info
+                return {
+                    "query_id": query_id,
+                    "status": current_state.value if current_state else query_metadata.get("status", "unknown"),
+                    "message": "Query status retrieved",
+                }
+        
+        # Check if we have state but no metadata (legacy queries)
+        if current_state:
             return {
                 "query_id": query_id,
-                "status": query_metadata.get("status", "unknown"),
-                "message": "Query status retrieved",
-                "metadata": query_metadata,
+                "status": current_state.value,
+                "message": "Query status retrieved (no metadata)",
             }
         
         return {
@@ -494,6 +500,26 @@ async def approve_query(
         raise HTTPException(
             status_code=403,
             detail="Only admin and analyst roles can approve queries"
+        )
+    
+    # SECURITY: Verify query ownership before allowing approval/rejection
+    state_manager = await get_query_state_manager()
+    query_metadata = await state_manager.get_query_metadata(query_id)
+    
+    if query_metadata:
+        query_owner = query_metadata.get("user_id") or query_metadata.get("username")
+        # Only the query owner or admin can approve/reject
+        if query_owner and query_owner != user.get("username") and user.get("role") != Role.ADMIN:
+            logger.warning(f"Approval denied: {user['username']} tried to approve query owned by {query_owner}")
+            raise HTTPException(
+                status_code=403,
+                detail="You can only approve/reject your own queries (unless admin)"
+            )
+    elif not settings.is_development:
+        # In production, reject approval for unregistered queries
+        raise HTTPException(
+            status_code=404,
+            detail="Query not found or not registered"
         )
     
     # Import approval service for idempotency and risk assessment
@@ -561,6 +587,15 @@ async def approve_query(
         state_snapshot = await orchestrator.aget_state(config)
         
         if not state_snapshot or not state_snapshot.values:
+            # Debugging 404 error
+            logger.error(f"Query {query_id} state NOT found in checkpoint. Config: {config}")
+            try:
+                # List recent threads to see what IS there
+                recent_threads = [c.config["configurable"]["thread_id"] async for c in checkpointer.alist(config={"configurable": {}})]
+                logger.info(f"Available checkpoint threads: {recent_threads[:20]}")
+            except Exception as e:
+                logger.error(f"Failed to list checkpoints for debug: {e}")
+                
             raise HTTPException(
                 status_code=404,
                 detail=f"Query {query_id} not found or already completed"
@@ -899,6 +934,7 @@ async def stream_query_state(
     Stream real-time query state changes via Server-Sent Events (SSE)
     
     **Auth:** Supports header-based auth (Bearer token) or query param (legacy)
+    **Rate Limit:** Applied to prevent resource exhaustion
     **Usage:** GET /api/v1/queries/{query_id}/stream
     
     Streams query lifecycle states:
@@ -913,6 +949,9 @@ async def stream_query_state(
     Returns:
         StreamingResponse with text/event-stream content type
     """
+    from app.core.rate_limiter import rate_limiter, RateLimitTier
+    from app.core.audit import audit_sse_access
+    
     # Validate query_id format
     validate_query_id(query_id)
     
@@ -939,6 +978,30 @@ async def stream_query_state(
         else:
             raise HTTPException(status_code=401, detail="Authentication required for SSE")
     
+    # Rate limiting for SSE endpoint to prevent resource exhaustion
+    try:
+        user_tier = RateLimitTier(user["role"].value) if hasattr(user["role"], "value") else RateLimitTier.VIEWER
+        await rate_limiter.check_rate_limit(
+            user=user["username"],
+            endpoint="/api/v1/queries/stream",
+            tier=user_tier
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"SSE rate limit check failed: {e}")
+    
+    # Audit SSE access
+    try:
+        await audit_sse_access(
+            user=user["username"],
+            user_role=user["role"].value if hasattr(user["role"], "value") else str(user["role"]),
+            query_id=query_id,
+            ip_address=request.client.host if request.client else None,
+        )
+    except Exception as e:
+        logger.warning(f"SSE audit logging failed: {e}")
+    
     logger.info(f"Starting SSE stream for query {query_id[:8]}... (user: {user['username']})")
     
     # Get query state manager instance
@@ -946,20 +1009,38 @@ async def stream_query_state(
     
     # Authorization check: verify user owns this query or has admin role
     query_metadata = await state_manager.get_query_metadata(query_id)
-    if query_metadata:
+    
+    # SECURITY: If no metadata exists, the query was never registered
+    # In production, reject unregistered queries to prevent enumeration
+    if not query_metadata:
+        if not settings.is_development:
+            logger.warning(f"SSE access denied for unregistered query {query_id[:8]} by {user['username']}")
+            raise HTTPException(
+                status_code=404,
+                detail="Query not found or not registered"
+            )
+        else:
+            logger.warning(f"DEV: Allowing SSE for unregistered query {query_id[:8]}")
+    else:
+        # Verify ownership
         query_owner = query_metadata.get("user_id") or query_metadata.get("username")
         if query_owner and query_owner != user.get("username") and user.get("role") != Role.ADMIN:
+            logger.warning(f"SSE access denied: {user['username']} tried to access query owned by {query_owner}")
             raise HTTPException(
                 status_code=403,
                 detail="You do not have permission to view this query's state"
             )
     
     async def event_generator():
-        """Generator function for SSE stream with proper cleanup"""
-        subscription_id = None
+        """
+        Generator function for SSE stream.
+        
+        Uses QueryStateManager.subscribe() which returns an async generator
+        that yields SSE-formatted strings directly.
+        """
         try:
-            subscription_id = await state_manager.subscribe(query_id)
-            async for message in state_manager.listen(subscription_id):
+            # subscribe() is an async generator - iterate directly
+            async for message in state_manager.subscribe(query_id):
                 # Check if client disconnected
                 if await request.is_disconnected():
                     logger.info(f"Client disconnected from SSE stream {query_id[:8]}")
@@ -970,13 +1051,6 @@ async def stream_query_state(
         except Exception as e:
             logger.error(f"SSE stream error for {query_id[:8]}: {e}", exc_info=True)
             yield f"event: error\ndata: {{\"message\": \"{str(e)}\"}}\n\n"
-        finally:
-            # Cleanup: unsubscribe to prevent memory leaks
-            if subscription_id:
-                try:
-                    await state_manager.unsubscribe(subscription_id)
-                except Exception as cleanup_err:
-                    logger.warning(f"SSE cleanup error for {query_id[:8]}: {cleanup_err}")
     
     return StreamingResponse(
         event_generator(),
@@ -1026,25 +1100,50 @@ class OrchestratorQueryResponse(BaseModel):
     clarification_details: Optional[Dict[str, Any]] = None
     sql_confidence: Optional[int] = None
     optimization_suggestions: Optional[list[Dict[str, Any]]] = None
+    # Conversational response fields
+    message: Optional[str] = None
+    is_conversational: Optional[bool] = None  # None = not set, avoids always serializing
+    intent: Optional[str] = None
 
     class Config:
         extra = "allow"
+        # Exclude None values from serialization to reduce payload size
+        json_encoders = {type(None): lambda v: None}
 
 
 async def _get_user_or_default(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
-    """Get authenticated user or return default for development"""
-    if not credentials:
-        logger.warning(f"No auth credentials provided, using default admin user for development")
-        return {"username": "admin", "role": Role.ADMIN}
-    return await rbac_manager.get_current_user(credentials)
+    """
+    Get authenticated user or return restricted default for development only.
+    
+    Security:
+    - In production: Requires authentication, raises 401 if missing
+    - In development: Returns a VIEWER role (not admin) for testing convenience
+    """
+    if credentials:
+        return await rbac_manager.get_current_user(credentials)
+    
+    # No credentials provided
+    if settings.is_development:
+        logger.warning("No auth credentials provided, using default VIEWER user for development")
+        return {"username": "dev_user", "role": Role.VIEWER}
+    else:
+        # Production: require authentication
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required"
+        )
 
 @router.post("/process", response_model=OrchestratorQueryResponse)
 async def process_query_with_orchestrator(
+    req: Request,
     request: OrchestratorQueryRequest,
     user: dict = Depends(_get_user_or_default)
 ) -> OrchestratorQueryResponse:
     """
     Process natural language query through LangGraph orchestrator with Graphiti context
+    
+    **RBAC:** Requires analyst role or higher for query execution
+    **Rate Limit:** Applied based on user role
     
     This endpoint uses the full AI pipeline:
     1. Understand query intent
@@ -1064,6 +1163,22 @@ async def process_query_with_orchestrator(
     
     start_time = time.time()
     timestamp = datetime.now(timezone.utc).isoformat()
+    
+    # RBAC: Verify user has query execution permission
+    # Viewers can only view results, not execute new queries
+    if user["role"] not in [Role.ADMIN, Role.ANALYST]:
+        # Return proper HTTP 403 for permission errors
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Insufficient permissions. Analyst role or higher required to execute queries.",
+                "error_type": "permission_denied",
+                "user_role": user["role"].value,
+            }
+        )
+    
+    # Apply rate limiting - let HTTPException propagate with proper 429 status
+    await apply_rate_limit(req, user, RateLimitTier(user["role"].value))
     
     # Input validation and sanitization (OWASP LLM01 Defense)
     if not request.query or not request.query.strip():
@@ -1124,17 +1239,67 @@ async def process_query_with_orchestrator(
     
     try:
         logger.info(f"Processing query via orchestrator: {request.query[:100]}...")
-        logger.info(f"  User: {request.user_id}, Session: {request.session_id or 'auto-generated'}")
+        logger.info(f"  User: {user['username']}, Session: {request.session_id or 'auto-generated'}")
         logger.info(f"  Database type: {request.database_type or 'oracle'}")
         
-        # Call service layer
+        # Generate query_id upfront and register BEFORE calling service
+        # This fixes race condition where SSE auth check may fail for fast queries
+        pre_generated_query_id = f"query_{uuid.uuid4().hex[:12]}"
+        
+        # Register query with state manager BEFORE processing starts
+        # This ensures SSE subscribers can authenticate immediately
+        try:
+            state_manager = await get_query_state_manager()
+            await state_manager.register_query(
+                query_id=pre_generated_query_id,
+                user_id=user["username"],
+                username=user["username"],
+                session_id=request.session_id,
+                database_type=request.database_type or "oracle",
+                trace_id=None,  # Will be updated after service call
+            )
+        except Exception as reg_err:
+            logger.warning(f"Failed to pre-register query {pre_generated_query_id}: {reg_err}")
+        
+        # Call service layer with pre-generated query_id
         result = await QueryService.submit_natural_language_query(
             user_query=request.query,
             user_id=user["username"],  # Use authenticated user
             session_id=request.session_id,
             user_role=user["role"].value,  # Pass user role for RBAC
             database_type=request.database_type or "oracle",
+            thread_id_override=pre_generated_query_id,  # Use pre-generated ID
         )
+
+        # Audit the successful submission of the NL query
+        await audit_logger.log(
+            action=AuditAction.QUERY_SUBMIT,
+            user=user["username"],
+            user_role=user["role"].value,
+            success=True,
+            resource="nl_query",
+            resource_id=pre_generated_query_id,
+            details={
+                "query": request.query[:1000], # Log the prompt
+                "session_id": request.session_id,
+                "database_type": request.database_type,
+            },
+            ip_address=req.client.host if req.client else None,
+            session_id=request.session_id,
+        )
+        
+        # Update registration with trace_id if available
+        query_id = result.get("query_id", pre_generated_query_id)
+        if result.get("trace_id"):
+            try:
+                # Update metadata with trace_id
+                metadata = await state_manager.get_query_metadata(query_id)
+                if metadata:
+                    async with state_manager._metadata_lock:
+                        if query_id in state_manager._query_metadata:
+                            state_manager._query_metadata[query_id].trace_id = result.get("trace_id")
+            except Exception as upd_err:
+                logger.warning(f"Failed to update trace_id for {query_id}: {upd_err}")
         
         execution_time = int((time.time() - start_time) * 1000)
         logger.info(f"Orchestrator completed in {execution_time}ms")
@@ -1164,6 +1329,10 @@ async def process_query_with_orchestrator(
             clarification_details=result.get("clarification_details"),
             sql_confidence=result.get("sql_confidence"),
             optimization_suggestions=result.get("optimization_suggestions"),
+            # Conversational response fields
+            message=result.get("message"),
+            is_conversational=result.get("is_conversational", False),
+            intent=result.get("intent"),
         )
         
     except Exception as e:

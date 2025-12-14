@@ -430,3 +430,23 @@ async def audit_config_change(
         },
         ip_address=ip_address,
     )
+
+
+async def audit_sse_access(
+    user: str,
+    user_role: str,
+    query_id: str,
+    ip_address: str = None,
+):
+    """Audit SSE stream access for security monitoring"""
+    await audit_logger.log(
+        action=AuditAction.QUERY_VIEW,
+        user=user,
+        user_role=user_role,
+        success=True,
+        severity=AuditSeverity.INFO,
+        resource="sse_stream",
+        resource_id=query_id,
+        details={"stream_type": "query_state"},
+        ip_address=ip_address,
+    )

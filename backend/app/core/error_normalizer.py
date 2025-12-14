@@ -215,7 +215,7 @@ class OracleErrorNormalizer:
             elif isinstance(result, str):
                 error_msg = result
         
-        return error_msg.strip() if error_msg else "Unknown Oracle error"
+        return error_msg.strip() if error_msg else f"Unknown Oracle error (Raw: {str(error_response)[:200]})"
     
     @staticmethod
     def _extract_ora_code(error_msg: str) -> Optional[str]:

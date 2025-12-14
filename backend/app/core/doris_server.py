@@ -118,7 +118,14 @@ class DorisServerManager:
                 "--transport", "http",
                 "--host", self.host,
                 "--port", str(self.port),
+                "--doris-host", settings.DORIS_DB_HOST,
+                "--doris-port", str(settings.DORIS_DB_PORT),
+                "--doris-user", settings.DORIS_DB_USER,
+                "--doris-database", settings.DORIS_DB_DATABASE,
             ]
+            # Add password only if set
+            if settings.DORIS_DB_PASSWORD:
+                cmd.extend(["--doris-password", settings.DORIS_DB_PASSWORD])
         else:
             # Use python -m
             cmd = [
@@ -126,7 +133,14 @@ class DorisServerManager:
                 "--transport", "http",
                 "--host", self.host,
                 "--port", str(self.port),
+                "--doris-host", settings.DORIS_DB_HOST,
+                "--doris-port", str(settings.DORIS_DB_PORT),
+                "--doris-user", settings.DORIS_DB_USER,
+                "--doris-database", settings.DORIS_DB_DATABASE,
             ]
+            # Add password only if set
+            if settings.DORIS_DB_PASSWORD:
+                cmd.extend(["--doris-password", settings.DORIS_DB_PASSWORD])
         
         logger.info(f"Starting Doris MCP with command: {' '.join(cmd)}")
         

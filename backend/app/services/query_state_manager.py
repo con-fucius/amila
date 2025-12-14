@@ -1,6 +1,11 @@
 """
 Query State Manager Service
 Tracks query execution lifecycle and enables SSE streaming of state changes
+
+Provides:
+- Persistent query metadata storage (user ownership, timestamps)
+- Real-time SSE streaming via async generators
+- Thread-safe singleton pattern
 """
 
 import asyncio
@@ -8,7 +13,7 @@ import logging
 from typing import Dict, Optional, Set, AsyncGenerator
 from enum import Enum
 from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import json
 
 logger = logging.getLogger(__name__)
@@ -25,6 +30,25 @@ class QueryState(str, Enum):
     EXECUTING = "executing"
     FINISHED = "finished"
     ERROR = "error"
+
+
+@dataclass
+class QueryMetadata:
+    """
+    Persistent metadata for a query - used for authorization and status tracking
+    """
+    query_id: str
+    user_id: str
+    username: str
+    session_id: Optional[str] = None
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    status: str = "received"
+    database_type: Optional[str] = None
+    trace_id: Optional[str] = None
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
 
 
 @dataclass
@@ -48,6 +72,9 @@ class QueryStateEvent:
     suggested_queries: Optional[list] = None
     sql: Optional[str] = None
     
+    # Database context for frontend error handling
+    database_type: Optional[str] = None
+    
     def to_sse_message(self) -> str:
         """Convert to SSE message format"""
         data = asdict(self)
@@ -56,19 +83,31 @@ class QueryStateManager:
     """
     Manages query execution states and enables SSE streaming
     Thread-safe singleton for tracking query lifecycle
+    
+    Features:
+    - Persistent query metadata for authorization (user ownership)
+    - Real-time SSE streaming via async generators
+    - Automatic cleanup of expired queries
     """
     _instance: Optional['QueryStateManager'] = None
     _lock = asyncio.Lock()
     
+    # TTL for query metadata (24 hours)
+    METADATA_TTL_SECONDS = 86400
+    
     def __init__(self):
         # Query state storage: query_id -> current state
         self._query_states: Dict[str, QueryState] = {}
+        
+        # Persistent query metadata: query_id -> QueryMetadata
+        self._query_metadata: Dict[str, QueryMetadata] = {}
         
         # Event queues for SSE subscribers: query_id -> set of queues
         self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
         
         # Locks for thread-safe operations
         self._state_lock = asyncio.Lock()
+        self._metadata_lock = asyncio.Lock()
         self._subscriber_lock = asyncio.Lock()
         
         logger.info("QueryStateManager initialized")
@@ -81,6 +120,60 @@ class QueryStateManager:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
+    
+    async def register_query(
+        self,
+        query_id: str,
+        user_id: str,
+        username: str,
+        session_id: Optional[str] = None,
+        database_type: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> QueryMetadata:
+        """
+        Register a new query with ownership metadata.
+        Must be called when a query is first submitted.
+        
+        Args:
+            query_id: Unique query identifier
+            user_id: User ID who owns this query
+            username: Username for display/logging
+            session_id: Optional session identifier
+            database_type: Database type (oracle/doris)
+            trace_id: Optional trace ID for observability
+            
+        Returns:
+            QueryMetadata object
+        """
+        async with self._metadata_lock:
+            metadata = QueryMetadata(
+                query_id=query_id,
+                user_id=user_id,
+                username=username,
+                session_id=session_id,
+                database_type=database_type,
+                trace_id=trace_id,
+            )
+            self._query_metadata[query_id] = metadata
+            logger.info(f"Registered query {query_id[:8]}... for user {username}")
+            return metadata
+    
+    async def get_query_metadata(self, query_id: str) -> Optional[Dict]:
+        """
+        Get persistent metadata for a query.
+        Used for authorization checks and status retrieval.
+        
+        Args:
+            query_id: Query identifier
+            
+        Returns:
+            Dict with query metadata or None if not found
+        """
+        async with self._metadata_lock:
+            metadata = self._query_metadata.get(query_id)
+            if metadata:
+                return metadata.to_dict()
+            return None
     
     async def update_state(
         self,
@@ -103,6 +196,12 @@ class QueryStateManager:
             logger.info(
                 f"Query {query_id[:8]}... state: {old_state} -> {new_state}"
             )
+        
+        # Update persistent metadata status
+        async with self._metadata_lock:
+            if query_id in self._query_metadata:
+                self._query_metadata[query_id].status = new_state.value
+                self._query_metadata[query_id].updated_at = datetime.now(timezone.utc).isoformat()
         
         # Create state change event
         # Attach trace_id if provided in metadata
@@ -155,6 +254,7 @@ class QueryStateManager:
             insights=meta.get("insights"),
             suggested_queries=meta.get("suggested_queries"),
             sql=meta.get("sql"),
+            database_type=meta.get("database_type"),
         )
         
         # Notify all subscribers for this query
@@ -266,12 +366,84 @@ class QueryStateManager:
         async with self._state_lock:
             return self._query_states.get(query_id)
     
-    async def cleanup_query(self, query_id: str) -> None:
-        """Clean up query state after completion"""
+    async def cleanup_query(self, query_id: str, preserve_metadata: bool = True) -> None:
+        """
+        Clean up query state after completion.
+        
+        Args:
+            query_id: Query identifier
+            preserve_metadata: If True, keeps metadata for status queries (default)
+        """
         async with self._state_lock:
             if query_id in self._query_states:
                 del self._query_states[query_id]
                 logger.info(f"Cleaned up state for query {query_id[:8]}")
+        
+        if not preserve_metadata:
+            async with self._metadata_lock:
+                if query_id in self._query_metadata:
+                    del self._query_metadata[query_id]
+                    logger.info(f"Cleaned up metadata for query {query_id[:8]}")
+    
+    async def cleanup_expired_metadata(self) -> int:
+        """
+        Remove metadata older than TTL.
+        Should be called periodically by a background task.
+        
+        Returns:
+            Number of entries cleaned up
+        """
+        now = datetime.now(timezone.utc)
+        expired_ids = []
+        
+        async with self._metadata_lock:
+            for query_id, metadata in list(self._query_metadata.items()):
+                try:
+                    created = datetime.fromisoformat(metadata.created_at.replace('Z', '+00:00'))
+                    age_seconds = (now - created).total_seconds()
+                    if age_seconds > self.METADATA_TTL_SECONDS:
+                        expired_ids.append(query_id)
+                except Exception:
+                    pass
+            
+            for query_id in expired_ids:
+                del self._query_metadata[query_id]
+        
+        if expired_ids:
+            logger.info(f"Cleaned up {len(expired_ids)} expired query metadata entries")
+        
+        return len(expired_ids)
+    
+    async def cleanup_terminal_states(self) -> int:
+        """
+        Remove query states that are in terminal states (finished, error, rejected)
+        and have no active subscribers. Prevents unbounded _query_states growth.
+        
+        Returns:
+            Number of entries cleaned up
+        """
+        terminal_states = {QueryState.FINISHED, QueryState.ERROR, QueryState.REJECTED}
+        cleaned_ids = []
+        
+        async with self._state_lock:
+            async with self._subscriber_lock:
+                for query_id, state in list(self._query_states.items()):
+                    # Only clean up terminal states with no active subscribers
+                    if state in terminal_states:
+                        has_subscribers = query_id in self._subscribers and len(self._subscribers[query_id]) > 0
+                        if not has_subscribers:
+                            cleaned_ids.append(query_id)
+                
+                for query_id in cleaned_ids:
+                    del self._query_states[query_id]
+                    # Also clean up empty subscriber sets
+                    if query_id in self._subscribers:
+                        del self._subscribers[query_id]
+        
+        if cleaned_ids:
+            logger.info(f"Cleaned up {len(cleaned_ids)} terminal query states")
+        
+        return len(cleaned_ids)
 
 
 # Global instance accessor

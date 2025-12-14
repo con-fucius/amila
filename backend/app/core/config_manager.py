@@ -131,7 +131,7 @@ class AppSettings(BaseSettings):
     # Query Orchestrator Configuration (separate from Graphiti)
     QUERY_LLM_PROVIDER: str = Field(
         default="gemini",
-        pattern=r"^(gemini|bedrock|qwen)$",
+        pattern=r"^(gemini|bedrock|qwen|openrouter)$",
         description="LLM provider for the query orchestrator"
     )
     QUERY_LLM_MODEL: Optional[str] = Field(

@@ -21,6 +21,7 @@ class DorisQueryService:
         sql_query: str,
         timeout: float = 600.0,
         user_id: Optional[str] = None,
+        user_role: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -30,6 +31,7 @@ class DorisQueryService:
             sql_query: SQL query to execute
             timeout: Query timeout in seconds (default: 600.0)
             user_id: Optional user identifier for trace attribution
+            user_role: Optional user role for audit logging
             request_id: Optional existing request identifier
         
         Returns:
@@ -60,7 +62,8 @@ class DorisQueryService:
                 "entrypoint": "execute_doris_sql_query",
                 "database": "doris",
                 "frontend_surface": "chat",
-                "client_type": "doris_mcp"
+                "client_type": "doris_mcp",
+                "user_role": user_role or "unknown"
             },
             circuit_breaker_name="doris_sql_execution",
             timeout=timeout,

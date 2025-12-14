@@ -29,6 +29,9 @@ async def emit_state_event(q_state: dict, new_state, metadata: dict | None = Non
                 stage_hint = q_state.get("current_stage") or q_state.get("error_stage")
                 if stage_hint:
                     meta["stage"] = stage_hint
+            # Include database_type for frontend error handling differentiation
+            if q_state.get("database_type") and "database_type" not in meta:
+                meta["database_type"] = q_state["database_type"]
             await manager.update_state(q_state["query_id"], new_state, meta)
     except Exception:
         # Non-fatal; logging only

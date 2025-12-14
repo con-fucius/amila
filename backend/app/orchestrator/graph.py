@@ -198,10 +198,14 @@ async def create_query_orchestrator(checkpointer):
     
     # Compile graph with checkpointing and HITL interrupt
     # interrupt_before pauses execution BEFORE the specified node runs
+    if checkpointer is None:
+        logger.critical("Compiling graph WITHOUT checkpointer! State will not be persisted.")
+        raise ValueError("Checkpointer is required for persistent state management")
+        
     app = workflow.compile(
         checkpointer=checkpointer,
         interrupt_before=["await_approval"],  # HITL: pause before approval check
     )
     
-    logger.info("Query orchestrator graph compiled with HITL support")
+    logger.info(f"Query orchestrator graph compiled with HITL support (cp={id(checkpointer)})")
     return app

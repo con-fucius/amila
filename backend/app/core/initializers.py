@@ -207,14 +207,25 @@ async def init_orchestrator(app_state=None) -> Tuple[bool, Optional[str], Any]:
         from app.orchestrator import create_query_orchestrator
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+        if not settings.LANGGRAPH_CHECKPOINT_DB:
+            logger.warning("LANGGRAPH_CHECKPOINT_DB not set, using in-memory checkpointer (NOT PERSISTENT)")
+            
+        logger.info(f"Initializing LangGraph checkpointer at {settings.LANGGRAPH_CHECKPOINT_DB}")
         checkpointer_context = AsyncSqliteSaver.from_conn_string(settings.LANGGRAPH_CHECKPOINT_DB)
         checkpointer = await checkpointer_context.__aenter__()
         
+        # Verify connection immediately
+        try:
+            await checkpointer.alist({"configurable": {"thread_id": "test_connection"}})
+            logger.info("Checkpointer connection verified successfully")
+        except Exception as e:
+            logger.warning(f"Checkpointer connection test warning: {e}")
+
         orchestrator = await create_query_orchestrator(checkpointer)
         registry.set_query_orchestrator(orchestrator)
         registry.set_langgraph_checkpointer(checkpointer, checkpointer_context)
         
-        logger.info("LangGraph orchestrator initialized")
+        logger.info(f"LangGraph orchestrator initialized (cp_id={id(checkpointer)})")
         return True, None, checkpointer_context
         
     except Exception as e:

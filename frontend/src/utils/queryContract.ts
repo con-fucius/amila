@@ -6,6 +6,7 @@ export type QueryOutcomeKind =
   | 'needs_approval'
   | 'clarification_needed'
   | 'success'
+  | 'conversational'
   | 'error'
   | 'streaming'
 
@@ -17,6 +18,11 @@ interface BaseOutcome {
 export interface SuccessOutcome extends BaseOutcome {
   kind: 'success'
   normalizedResult: QueryResult
+}
+
+export interface ConversationalOutcome extends BaseOutcome {
+  kind: 'conversational'
+  message: string
 }
 
 export interface ErrorOutcome extends BaseOutcome {
@@ -38,6 +44,7 @@ export interface StreamingOutcome extends BaseOutcome {
 
 export type QueryOutcome =
   | SuccessOutcome
+  | ConversationalOutcome
   | ErrorOutcome
   | NeedsApprovalOutcome
   | ClarificationOutcome
@@ -101,6 +108,10 @@ export function classifyInitialQueryResponse(response: QueryResponse): QueryOutc
   const needsApproval = !!response.needs_approval
   const hasClarificationStatus = (response as any).status === 'clarification_needed'
   const hasClarificationMessage = !!(response as any).clarification_message
+  
+  // Check for conversational response (greetings, help, meta questions)
+  const isConversational = !!(response as any).is_conversational
+  const hasMessage = !!(response as any).message
 
   if (needsApproval) {
     return { kind: 'needs_approval', response }
@@ -117,6 +128,13 @@ export function classifyInitialQueryResponse(response: QueryResponse): QueryOutc
       'Query execution failed'
 
     return { kind: 'error', response, errorMessage }
+  }
+
+  // Conversational responses: success with message but no results/SQL
+  // These are greetings, help requests, meta questions, etc.
+  if (isConversational || (rawStatus === 'success' && hasMessage && !response.results && !response.sql_query)) {
+    const message = (response as any).message || 'Response received'
+    return { kind: 'conversational', response, message }
   }
 
   if (rawStatus === 'success' && response.results) {

@@ -49,6 +49,25 @@ function getAuthHeaders(): Record<string, string> {
   return headers
 }
 
+/**
+ * Check if JWT token is expired or about to expire (within 5 minutes)
+ */
+function isTokenExpired(token: string, bufferSeconds: number = 300): boolean {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return true
+    
+    const payload = JSON.parse(atob(parts[1]))
+    const exp = payload.exp
+    if (!exp) return true
+    
+    const now = Math.floor(Date.now() / 1000)
+    return exp < (now + bufferSeconds)
+  } catch {
+    return true
+  }
+}
+
 export interface SchemaResponse {
   status: string
   source: string
@@ -97,6 +116,10 @@ export interface QueryResponse {
   clarification_details?: any
   sql_confidence?: number
   optimization_suggestions?: any[]
+  // Conversational response fields
+  message?: string
+  is_conversational?: boolean
+  intent?: string
 }
 
 export interface HistoryAPIResponse {
@@ -142,8 +165,11 @@ class APIService {
     }
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  private async request<T>(endpoint: string, options: RequestInit = {}, retryOnAuth: boolean = true): Promise<T> {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseURL}${endpoint}`
+
+    // Check if token needs refresh before making request
+    await this.ensureValidToken()
 
     const defaultHeaders: Record<string, string> = {
       ...getAuthHeaders(),
@@ -180,10 +206,21 @@ class APIService {
           errorData = { detail: response.statusText };
         }
 
+        // Handle 401 with token refresh retry
+        if (response.status === 401 && retryOnAuth) {
+          const refreshed = await this.tryRefreshToken()
+          if (refreshed) {
+            // Retry the request with new token (no further retry)
+            return this.request<T>(endpoint, options, false)
+          }
+          // Refresh failed - clear tokens and notify
+          this.clearAuthTokens()
+          console.warn('Session expired - please log in again')
+        }
+
         // Standardized error handling
         const message = errorData.detail || errorData.message || errorData.error || 'An unexpected error occurred';
 
-        // You might trigger a global toast/notification here if you had a store/event bus
         if (response.status === 401) {
           console.warn('Unauthorized access - redirect to login?');
         } else if (response.status === 403) {
@@ -207,17 +244,89 @@ class APIService {
       throw new APIError(error instanceof Error ? error.message : 'Network error', 0);
     }
   }
+  
+  /**
+   * Ensure we have a valid (non-expired) access token before making requests
+   */
+  private async ensureValidToken(): Promise<void> {
+    const token = localStorage.getItem('access_token')
+    if (token && isTokenExpired(token)) {
+      await this.tryRefreshToken()
+    }
+  }
+  
+  /**
+   * Attempt to refresh the access token using the refresh token
+   */
+  private async tryRefreshToken(): Promise<boolean> {
+    const refreshToken = localStorage.getItem('refresh_token')
+    if (!refreshToken) return false
+    
+    try {
+      const response = await fetch(`${this.baseURL}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        localStorage.setItem('access_token', data.access_token)
+        if (data.refresh_token) {
+          localStorage.setItem('refresh_token', data.refresh_token)
+        }
+        console.log('[apiService] Token refreshed successfully')
+        return true
+      }
+    } catch (e) {
+      console.warn('[apiService] Token refresh failed:', e)
+    }
+    
+    return false
+  }
+  
+  /**
+   * Clear stored auth tokens
+   */
+  private clearAuthTokens(): void {
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('refresh_token')
+  }
 
   async submitQuery(request: QueryRequest): Promise<QueryResponse> {
+    // Get authenticated user from token if available
+    const authenticatedUserId = this.getAuthenticatedUserId()
+    
     return this.request<QueryResponse>('/api/v1/queries/process', {
       method: 'POST',
       body: JSON.stringify({
         query: request.query,
-        user_id: request.user_id || 'default_user',
+        // Use authenticated user ID, fall back to request.user_id, then default
+        user_id: authenticatedUserId || request.user_id || 'default_user',
         session_id: request.session_id || this.generateSessionId(),
         database_type: request.database_type || 'doris',
       }),
     })
+  }
+  
+  /**
+   * Extract user ID from stored JWT token
+   */
+  private getAuthenticatedUserId(): string | null {
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) return null
+      
+      // Decode JWT payload (base64)
+      const parts = token.split('.')
+      if (parts.length !== 3) return null
+      
+      const payload = JSON.parse(atob(parts[1]))
+      return payload.sub || null
+    } catch (e) {
+      console.warn('[apiService] Failed to extract user from token:', e)
+      return null
+    }
   }
 
   async clarifyQuery(params: { query_id: string; clarification: string; original_query?: string; database_type?: 'oracle' | 'doris' }): Promise<QueryResponse> {
@@ -233,11 +342,14 @@ class APIService {
   }
 
   async *streamQueryState(queryId: string): AsyncGenerator<any, void, unknown> {
-    const url = `${this.baseURL}/api/v1/queries/${queryId}/stream`
+    // Include auth token as query parameter for SSE (EventSource doesn't support headers)
+    const token = localStorage.getItem('access_token')
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    const url = `${this.baseURL}/api/v1/queries/${queryId}/stream${tokenParam}`
 
     if (import.meta.env.DEV) {
       try {
-        console.log('[apiService] GET (Stream)', url)
+        console.log('[apiService] GET (Stream)', url.replace(/token=[^&]+/, 'token=***'))
       } catch { }
     }
 
@@ -246,6 +358,7 @@ class APIService {
         ...getAuthHeaders(),
         'Accept': 'text/event-stream',
       },
+      credentials: 'include',
     })
 
     if (!response.ok) {

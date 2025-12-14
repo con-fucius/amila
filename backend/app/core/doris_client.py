@@ -35,6 +35,24 @@ class DorisMCPClient:
     def is_healthy(self) -> bool:
         return self._initialized and self._healthy
 
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform an active health check by probing the MCP server.
+        """
+        if not self._initialized or not self._session:
+            return {"status": "inactive", "message": "Not initialized"}
+            
+        try:
+            # Lightweight probe: list_tools
+            # We use a short timeout to ensure this doesn't block
+            async with asyncio.timeout(5.0):
+                await self._session.list_tools()
+                self._healthy = True
+                return {"status": "connected"}
+        except Exception as e:
+            self._healthy = False
+            return {"status": "error", "message": str(e)}
+
     @property
     def exec_query_tool(self) -> str:
         value = getattr(settings, "DORIS_EXEC_QUERY_TOOL", None)

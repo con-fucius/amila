@@ -84,7 +84,7 @@ async def _ensure_orchestrator_initialized():
 
             orchestrator = await create_query_orchestrator(checkpointer)
             registry.set_query_orchestrator(orchestrator)
-            logger.info(f"Orchestrator rebuilt successfully: id={id(orchestrator)}")
+            logger.info(f"Orchestrator rebuilt successfully: id={id(orchestrator)}, using cp_id={id(checkpointer)}")
             return orchestrator
         except Exception as init_err:
             logger.error(f"Failed to initialize LangGraph orchestrator dynamically: {init_err}", exc_info=True)
@@ -123,40 +123,53 @@ async def process_query(
     from app.services.conversation_router import ConversationRouter, IntentType
     from app.core.redis_client import redis_client
     
-    # Use route_with_context for LLM-based intent classification
-    schema_context = None
+    # CRITICAL: Wrap routing in try-catch to prevent crashes on greetings/simple inputs
+    routing_result = None
     try:
-        from app.services.schema_service import SchemaService
-        schema_result = await SchemaService.get_database_schema(use_cache=True)
-        if schema_result.get("status") == "success":
-            schema_context = schema_result.get("schema", {})
-    except Exception:
-        pass
+        # Use route_with_context for LLM-based intent classification
+        schema_context = None
+        try:
+            from app.services.schema_service import SchemaService
+            schema_result = await SchemaService.get_database_schema(use_cache=True)
+            if schema_result.get("status") == "success":
+                schema_context = schema_result.get("schema", {})
+        except Exception:
+            pass
+        
+        # Convert conversation_history to the format expected by route_with_context
+        formatted_history = None
+        if conversation_history:
+            formatted_history = [
+                {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+                for msg in conversation_history
+            ]
+        
+        # Route the query using context-aware routing - prefer pattern matching for reliability
+        # Use LLM=False initially to avoid crashes, can enable later if LLM is stable
+        try:
+            routing_result = await ConversationRouter.route_with_context(
+                user_query, 
+                formatted_history, 
+                schema_context,
+                use_llm=False  # Disable LLM for reliability - pattern matching is sufficient for greetings
+            )
+        except Exception as route_err:
+            logger.warning(f"Context routing failed: {route_err}, falling back to basic routing")
+            routing_result = ConversationRouter.route(user_query, formatted_history)
+            
+    except Exception as e:
+        logger.warning(f"Routing failed entirely: {e}, falling back to basic pattern matching")
+        # Fallback to basic synchronous routing
+        routing_result = ConversationRouter.route(user_query, None)
     
-    # Convert conversation_history to the format expected by route_with_context
-    formatted_history = None
-    if conversation_history:
-        formatted_history = [
-            {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-            for msg in conversation_history
-        ]
-    
-    # Route the query using enhanced context-aware routing
-    routing_result = await ConversationRouter.route_with_context(
-        user_query, 
-        formatted_history, 
-        schema_context,
-        use_llm=True  # Enable LLM-based classification
-    )
-    
-    # Store conversation history in Redis for memory persistence
+    # Store conversation history in Redis for memory persistence (non-critical)
     try:
         history_key = f"conversation:{session_id}:history"
         await redis_client.lpush(history_key, {
             "role": "user",
             "content": user_query,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "intent": routing_result.get("intent"),
+            "intent": routing_result.get("intent") if routing_result else "unknown",
         })
         # Keep only last 50 messages
         await redis_client.ltrim(history_key, 0, 49)
@@ -166,7 +179,7 @@ async def process_query(
         logger.warning(f"Failed to store conversation history in Redis: {e}")
     
     # Handle conversational intents directly without SQL generation
-    if not routing_result.get("requires_sql") and routing_result.get("response"):
+    if routing_result and not routing_result.get("requires_sql") and routing_result.get("response"):
         query_id = f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         return {
             "status": "success",
@@ -179,7 +192,7 @@ async def process_query(
             "needs_approval": False,
             "llm_metadata": {
                 "intent": routing_result["intent"],
-                "confidence": routing_result["confidence"],
+                "confidence": routing_result.get("confidence", 0.95),
                 "conversational": True,
             },
         }
@@ -194,7 +207,8 @@ async def process_query(
     import time
     
     start_time = time.time()
-    query_id = f"q_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    # Use override if provided to ensure ID consistency between persistence (thread_id) and client response
+    query_id = thread_id_override or f"q_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
     langfuse_client = get_langfuse_client()
     trace_metadata = {

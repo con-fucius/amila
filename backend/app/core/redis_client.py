@@ -44,48 +44,66 @@ class RedisClient:
             raise RuntimeError("Redis client not initialized. Call connect() before issuing commands.")
         return self._client
 
-    async def connect(self):
-        """Initialize Redis connection pools"""
-        try:
-            # Main client (default DB 0)
-            self._client = redis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-                max_connections=50,
-            )
+    async def connect(self, max_retries: int = 3, retry_delay: float = 1.0):
+        """Initialize Redis connection pools with retry logic"""
+        import asyncio
+        
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # Main client (default DB 0)
+                self._client = redis.from_url(
+                    settings.REDIS_URL,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    max_connections=50,
+                    socket_timeout=5.0,  # Add timeout
+                    socket_connect_timeout=5.0,
+                )
 
-            # Session storage (DB 0)
-            self._session_client = redis.from_url(
-                f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_SESSION_DB}",
-                encoding="utf-8",
-                decode_responses=True,
-                max_connections=20,
-            )
+                # Session storage (DB 0)
+                self._session_client = redis.from_url(
+                    f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_SESSION_DB}",
+                    encoding="utf-8",
+                    decode_responses=True,
+                    max_connections=20,
+                    socket_timeout=5.0,
+                    socket_connect_timeout=5.0,
+                )
 
-            # Cache storage (DB 1)
-            self._cache_client = redis.from_url(
-                f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_CACHE_DB}",
-                encoding="utf-8",
-                decode_responses=True,
-                max_connections=20,
-            )
+                # Cache storage (DB 1)
+                self._cache_client = redis.from_url(
+                    f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_CACHE_DB}",
+                    encoding="utf-8",
+                    decode_responses=True,
+                    max_connections=20,
+                    socket_timeout=5.0,
+                    socket_connect_timeout=5.0,
+                )
 
-            # Vector client (binary) for RediSearch HNSW index - use cache DB by default
-            # decode_responses=False is REQUIRED for VECTOR fields (binary blobs)
-            self._vector_client = redis.from_url(
-                f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_CACHE_DB}",
-                decode_responses=False,
-                max_connections=10,
-            )
+                # Vector client (binary) for RediSearch HNSW index - use cache DB by default
+                # decode_responses=False is REQUIRED for VECTOR fields (binary blobs)
+                self._vector_client = redis.from_url(
+                    f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_CACHE_DB}",
+                    decode_responses=False,
+                    max_connections=10,
+                    socket_timeout=5.0,
+                    socket_connect_timeout=5.0,
+                )
 
-            # Test connection
-            await self._client.ping()
-            logger.info(f"Redis connection established successfully")
+                # Test connection
+                await self._client.ping()
+                logger.info(f"Redis connection established successfully")
+                return
 
-        except RedisError as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+            except RedisError as e:
+                last_error = e
+                logger.warning(f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+        
+        logger.error(f"Failed to connect to Redis after {max_retries} attempts: {last_error}")
+        raise last_error
 
     async def disconnect(self):
         """Close all Redis connections"""
@@ -224,18 +242,27 @@ class RedisClient:
             logger.error(f"Failed to get schema {schema_key}: {e}")
             return None
 
-    async def invalidate_schema_cache(self, pattern: str = "schema:*") -> int:
-        """Clear schema cache by pattern"""
+    async def invalidate_schema_cache(self, pattern: str = "schema:*", batch_size: int = 100) -> int:
+        """Clear schema cache by pattern using SCAN (non-blocking)"""
         try:
-            keys = []
-            async for key in self._cache_client.scan_iter(match=pattern):
-                keys.append(key)
+            deleted_total = 0
+            keys_batch = []
             
-            if keys:
-                deleted = await self._cache_client.delete(*keys)
-                logger.info(f"Invalidated {deleted} schema cache entries")
-                return deleted
-            return 0
+            # Use scan_iter with count hint for batching
+            async for key in self._cache_client.scan_iter(match=pattern, count=batch_size):
+                keys_batch.append(key)
+                # Delete in batches to avoid blocking
+                if len(keys_batch) >= batch_size:
+                    deleted_total += await self._cache_client.delete(*keys_batch)
+                    keys_batch = []
+            
+            # Delete remaining keys
+            if keys_batch:
+                deleted_total += await self._cache_client.delete(*keys_batch)
+            
+            if deleted_total > 0:
+                logger.info(f"Invalidated {deleted_total} schema cache entries")
+            return deleted_total
         except RedisError as e:
             logger.error(f"Failed to invalidate schema cache: {e}")
             return 0
@@ -336,8 +363,13 @@ class RedisClient:
                 evict_count = max(1, MAX_QUERY_CACHE_ENTRIES // 10)
                 oldest_keys = await self._cache_client.zrange(QUERY_CACHE_INDEX_KEY, 0, evict_count - 1)
                 if oldest_keys:
-                    # Delete the actual cache entries
-                    await self._cache_client.delete(*[f"query:{k}" for k in oldest_keys])
+                    # Delete the actual cache entries - check existence first to avoid errors
+                    keys_to_delete = [f"query:{k}" for k in oldest_keys]
+                    # Pipeline for efficiency
+                    pipe = self._cache_client.pipeline()
+                    for k in keys_to_delete:
+                        pipe.delete(k)
+                    await pipe.execute()
                     # Remove from index
                     await self._cache_client.zremrangebyrank(QUERY_CACHE_INDEX_KEY, 0, evict_count - 1)
                     logger.info(f"LRU evicted {len(oldest_keys)} query cache entries")
@@ -414,8 +446,15 @@ class RedisClient:
             
         Returns:
             Number of queries successfully cached
+            
+        Note: Import of registry is deferred to avoid circular import at module load time.
         """
-        from app.core.client_registry import registry
+        # Deferred import to avoid circular dependency
+        try:
+            from app.core.client_registry import registry
+        except ImportError as e:
+            logger.error(f"Failed to import registry for cache warming: {e}")
+            return 0
         
         warmed = 0
         logger.info(f"Warming query cache with {len(common_queries)} common queries...")
@@ -462,10 +501,20 @@ class RedisClient:
         """Generic set operation"""
         try:
             client = self._require_client()
-            if ttl:
-                await client.setex(key, ttl, json.dumps(value))
+            # Handle serialization - strings pass through, others get JSON encoded
+            if isinstance(value, str):
+                payload = value
             else:
-                await client.set(key, json.dumps(value))
+                try:
+                    payload = json.dumps(value)
+                except (TypeError, ValueError) as e:
+                    logger.warning(f"Failed to serialize value for key {key}: {e}")
+                    payload = str(value)
+            
+            if ttl:
+                await client.setex(key, ttl, payload)
+            else:
+                await client.set(key, payload)
             return True
         except RedisError as e:
             logger.error(f"Failed to set key {key}: {e}")
@@ -534,8 +583,13 @@ class RedisClient:
         return await self._require_client().expire(key, seconds)
 
     async def keys(self, pattern: str) -> list[str]:
-        """Find keys matching a given pattern."""
+        """Find keys matching a given pattern.
+        WARNING: Uses KEYS command which is O(n) - use scan_iter for large datasets."""
         return await self._require_client().keys(pattern)
+    
+    async def zrevrange(self, key: str, start: int, stop: int, withscores: bool = False):
+        """Return a range of members in a sorted set, by score, high to low."""
+        return await self._require_client().zrevrange(key, start, stop, withscores=withscores)
 
     # ==================== VECTOR / SEARCH OPERATIONS ====================
 
@@ -581,16 +635,14 @@ class RedisClient:
         try:
             if not self._vector_client:
                 raise RuntimeError("Vector client not initialized")
-            # Flatten dict into HSET args
-            args = []
+            # Build mapping dict for hset - convert non-string/bytes to string
+            mapping = {}
             for k, v in fields.items():
-                if isinstance(v, str):
-                    args.extend([k, v])
-                elif isinstance(v, bytes):
-                    args.extend([k, v])
+                if isinstance(v, (str, bytes)):
+                    mapping[k] = v
                 else:
-                    args.extend([k, str(v)])
-            await self._vector_client.hset(key, mapping=None, *args)
+                    mapping[k] = str(v)
+            await self._vector_client.hset(key, mapping=mapping)
             return True
         except Exception as e:
             logger.error(f"Failed to upsert vector document {key}: {e}")

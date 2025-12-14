@@ -96,3 +96,15 @@ prometheus_data/
 
 # Grafana data
 grafana_data/
+
+# SQLcl connections (contains credentials)
+.dbtools/connections.json
+
+# Backup files
+*.backup
+*.bak
+*.orig
+*.old
+
+# Token configuration files (may contain secrets)
+tokens.json

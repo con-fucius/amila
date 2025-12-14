@@ -33,6 +33,13 @@ export function QueryBuilder() {
       if (initialSql) {
         setSQL(initialSql)
       }
+      // Read database_type from URL if passed from HITL dialog
+      const urlDbType = params.get('database_type')
+      if (urlDbType === 'oracle' || urlDbType === 'doris') {
+        // Import setDatabaseType if needed to sync with global store
+        // For now, the global store is used, but URL param can inform user
+        console.log(`[QueryBuilder] database_type from URL: ${urlDbType}`)
+      }
     } catch {
       // ignore URL parsing issues
     }

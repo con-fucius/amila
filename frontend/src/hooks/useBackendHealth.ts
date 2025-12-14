@@ -9,7 +9,7 @@ export interface BackendHealth {
   latencyMs?: number
 }
 
-export function useBackendHealth(checkIntervalMs: number = 30000) {
+export function useBackendHealth(checkIntervalMs: number = 5000) {
   const [health, setHealth] = useState<BackendHealth>({
     isConnected: false,
     status: null,

@@ -145,6 +145,7 @@ async def _execute_query_node_inner(state: QueryState, span: dict) -> QueryState
             sql_query=state["sql_query"],
             connection_name=connection_name,
             user_id=state.get("user_id"),
+            user_role=state.get("user_role"),
             request_id=state.get("query_id"),
         )
 

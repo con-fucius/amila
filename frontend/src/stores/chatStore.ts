@@ -43,11 +43,32 @@ export interface ChatMeta {
   messages: ChatMessage[]
 }
 
-// Helper to filter last 24 hours
-const within24h = (iso: string) => new Date(iso) > new Date(Date.now() - 24 * 60 * 60 * 1000)
+// Helper to filter last 24 hours - cached threshold for performance
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
+const within24h = (iso: string): boolean => {
+  try {
+    const date = new Date(iso)
+    if (isNaN(date.getTime())) return false
+    return date.getTime() > (Date.now() - TWENTY_FOUR_HOURS_MS)
+  } catch {
+    return false
+  }
+}
 
-// Generate IDs
-const genId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
+// Generate IDs using crypto API when available for better uniqueness
+const genId = (prefix: string): string => {
+  const timestamp = Date.now()
+  let random: string
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    random = crypto.randomUUID().slice(0, 8)
+  } else {
+    random = Math.random().toString(36).substring(2, 10)
+  }
+  return `${prefix}_${timestamp}_${random}`
+}
+
+// Maximum chats to persist to avoid localStorage quota issues
+const MAX_PERSISTED_CHATS = 50
 
 // Interface modes
 export type InterfaceMode = 'chat' | 'playground' | 'schema'
@@ -114,23 +135,37 @@ export const useChatStore = create<ChatState>()(
         setDatabaseType: (type: DatabaseType) => {
           const currentType = get().databaseType
           if (currentType !== type) {
-            // Update URL query param for bookmark-friendly state
-            const url = new URL(window.location.href)
-            url.searchParams.set('db', type)
-            window.history.replaceState({}, '', url.toString())
+            // Update URL query param for bookmark-friendly state (browser-only)
+            if (typeof window !== 'undefined' && window.location) {
+              try {
+                const url = new URL(window.location.href)
+                url.searchParams.set('db', type)
+                window.history.replaceState({}, '', url.toString())
+              } catch (e) {
+                console.warn('[chatStore] Failed to update URL:', e)
+              }
+            }
             
             // Clear schema cache in localStorage when switching databases
-            try {
-              const keysToRemove: string[] = []
-              for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i)
-                if (key && (key.includes('schema') || key.includes('Schema'))) {
-                  keysToRemove.push(key)
+            if (typeof localStorage !== 'undefined') {
+              try {
+                const keysToRemove: string[] = []
+                for (let i = 0; i < localStorage.length; i++) {
+                  const key = localStorage.key(i)
+                  if (key && (key.includes('schema') || key.includes('Schema'))) {
+                    keysToRemove.push(key)
+                  }
                 }
+                keysToRemove.forEach(key => {
+                  try {
+                    localStorage.removeItem(key)
+                  } catch {
+                    // Ignore individual removal failures
+                  }
+                })
+              } catch (e) {
+                console.warn('[chatStore] Failed to clear schema cache:', e)
               }
-              keysToRemove.forEach(key => localStorage.removeItem(key))
-            } catch (e) {
-              console.warn('[chatStore] Failed to clear schema cache:', e)
             }
           }
           set({ databaseType: type }, false, 'setDatabaseType')
@@ -201,9 +236,11 @@ export const useChatStore = create<ChatState>()(
             const chats = state.chats.map(c => {
               if (c.id !== state.currentChatId) return c
               const isUser = newMessage.type === 'user'
+              const currentCount = c.promptCount || 0
               return {
                 ...c,
-                promptCount: isUser ? Math.min(20, (c.promptCount || 0) + 1) : c.promptCount || 0,
+                // Only increment if under limit (fix: >= 20 || >= 15 was always true at 15)
+                promptCount: isUser && currentCount < 20 ? currentCount + 1 : currentCount,
                 messages: [...c.messages.filter(m => within24h(m.timestamp.toISOString())), newMessage],
               }
             })
@@ -239,10 +276,20 @@ export const useChatStore = create<ChatState>()(
       {
         name: 'amil-chat-storage',
         partialize: (state) => ({
-          chats: state.chats.filter(c => within24h(c.createdAt)).map(c => ({
-            ...c,
-            messages: c.messages.filter(m => within24h(m.timestamp.toISOString())),
-          })),
+          // Limit persisted chats to prevent localStorage quota issues
+          chats: state.chats
+            .filter(c => within24h(c.createdAt))
+            .slice(0, MAX_PERSISTED_CHATS)
+            .map(c => ({
+              ...c,
+              messages: c.messages.filter(m => {
+                try {
+                  return within24h(m.timestamp.toISOString())
+                } catch {
+                  return false
+                }
+              }),
+            })),
           currentChatId: state.currentChatId,
           currentInput: state.currentInput,
           currentMode: state.currentMode,
@@ -266,32 +313,45 @@ export const useChatStore = create<ChatState>()(
         },
         deserialize: (str) => {
           const data = JSON.parse(str)
-          const rawChats = data.state.chats || []
+          const rawChats = data.state?.chats || []
 
           const chats = rawChats
-            .filter((c: any) => within24h(c.createdAt))
+            .filter((c: any) => c && c.createdAt && within24h(c.createdAt))
+            .slice(0, MAX_PERSISTED_CHATS)
             .map((c: any) => ({
               ...c,
               messages: (c.messages || [])
-                .map((msg: any) => ({
-                  ...msg,
-                  timestamp: new Date(msg.timestamp),
-                }))
-                .filter((msg: any) => within24h(msg.timestamp.toISOString())),
+                .map((msg: any) => {
+                  // Validate message structure before casting
+                  if (!msg || typeof msg !== 'object') return null
+                  const ts = new Date(msg.timestamp)
+                  // Validate Date is valid
+                  if (isNaN(ts.getTime())) return null
+                  return {
+                    id: msg.id || genId('msg'),
+                    type: msg.type || 'user',
+                    content: msg.content || '',
+                    timestamp: ts,
+                    toolCall: msg.toolCall,
+                  }
+                })
+                .filter((msg: any) => msg !== null && within24h(msg.timestamp.toISOString())),
             }))
 
-          const current = chats.find((c: any) => c.id === data.state.currentChatId) || chats[0] || null
+          const current = chats.find((c: any) => c.id === data.state?.currentChatId) || chats[0] || null
 
-          // Check URL for database type override (bookmark-friendly)
-          let databaseType = data.state.databaseType || 'doris'
-          try {
-            const urlParams = new URLSearchParams(window.location.search)
-            const urlDb = urlParams.get('db')
-            if (urlDb === 'oracle' || urlDb === 'doris') {
-              databaseType = urlDb
+          // Check URL for database type override (bookmark-friendly) - SSR safe
+          let databaseType = data.state?.databaseType || 'doris'
+          if (typeof window !== 'undefined' && window.location) {
+            try {
+              const urlParams = new URLSearchParams(window.location.search)
+              const urlDb = urlParams.get('db')
+              if (urlDb === 'oracle' || urlDb === 'doris') {
+                databaseType = urlDb
+              }
+            } catch {
+              // Ignore URL parsing errors
             }
-          } catch (e) {
-            // Ignore URL parsing errors
           }
 
           return {

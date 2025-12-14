@@ -48,6 +48,7 @@ class DatabaseRouter:
         sql_query: str,
         connection_name: Optional[str] = None,
         user_id: Optional[str] = None,
+        user_role: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -58,13 +59,13 @@ class DatabaseRouter:
             sql_query: SQL query to execute
             connection_name: Database connection name (for Oracle)
             user_id: User identifier
+            user_role: User role for audit logging
             request_id: Request identifier
             
         Returns:
             Query execution result
         """
         db_enum = DatabaseType.DORIS if database_type == "doris" else DatabaseType.ORACLE
-        executor = RetryableExecutor(db_enum)
 
         async def _execute_operation():
             if database_type == "doris":
@@ -72,6 +73,7 @@ class DatabaseRouter:
                 return await DorisQueryService.execute_sql_query(
                     sql_query=sql_query,
                     user_id=user_id,
+                    user_role=user_role,
                     request_id=request_id,
                 )
             else:
@@ -80,7 +82,12 @@ class DatabaseRouter:
                     sql_query=sql_query,
                     connection_name=connection_name,
                     user_id=user_id,
+                    user_role=user_role,
                     request_id=request_id,
                 )
 
-        return await executor.execute_with_retry(_execute_operation)
+        return await RetryableExecutor.execute_with_retry(
+            func=_execute_operation,
+            database_type=db_enum,
+            operation_name=f"sql_execution_{database_type}"
+        )

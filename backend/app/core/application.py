@@ -109,40 +109,64 @@ def create_application() -> FastAPI:
             "uptime_seconds": int(time.time() - getattr(app.state, "start_time", time.time()))
         }
         
-        # Add component status (dynamic where possible)
-        doris_ready = getattr(app.state, "doris_initialized", False)
+        # Dynamic Health Checks
+        # Execute checks in parallel for performance
+        import asyncio
+        from app.core.doris_client import doris_client
+        from app.core.graphiti_client import get_graphiti_client
+        from app.core.redis_client import redis_client
+
+        async def check_component(name, coro):
+            try:
+                return name, await coro
+            except Exception as e:
+                return name, {"status": "error", "message": str(e)}
+
+        # Redis Check
+        redis_task = check_component("redis", redis_client.health_check())
+
+        # Doris Check
+        doris_task = check_component("doris_mcp", doris_client.health_check())
+
+        # Graphiti Check
+        async def check_graphiti():
+            client = await get_graphiti_client()
+            return await client.health_check()
+        graph_task = check_component("graphiti", check_graphiti())
+
+        # Run checks
+        results = await asyncio.gather(redis_task, doris_task, graph_task)
+        health_results = dict(results)
+
+        # Process Results
+        redis_status = health_results["redis"].get("status") == "healthy"
+        doris_status = health_results["doris_mcp"].get("status") == "connected"
+        graph_status = health_results["graphiti"].get("status") == "connected"
+
+        # SQLcl Status (still static for now as it's a pool)
         sqlcl_ready = getattr(app.state, "pool_initialized", False)
-        mcp_ready = getattr(app.state, "mcp_initialized", False)
         
-        # Database is available if either Doris or SQLcl is ready
-        db_available = doris_ready or sqlcl_ready or mcp_ready
-        
+        # Determine Aggregate Database Status
+        # Database is available if either specific DB path is working
+        db_available = doris_status or sqlcl_ready
+
         health_status["components"] = {
-            "doris_mcp": "connected" if doris_ready else "inactive",
+            "doris_mcp": health_results["doris_mcp"].get("status", "unknown"),
             "sqlcl_pool": "active" if sqlcl_ready else "inactive",
-            "mcp_client": "connected" if mcp_ready else "fallback",
+            "mcp_client": "connected" if getattr(app.state, "mcp_initialized", False) else "fallback", 
             "database": "available" if db_available else "mock",
-            "redis": "disconnected",  # dynamic update below
-            "graphiti": "connected" if getattr(app.state, "graphiti_initialized", False) else "inactive"
+            "redis": "connected" if redis_status else "disconnected",
+            "graphiti": health_results["graphiti"].get("status", "unknown")
         }
 
-        # Add pool status if available
-        sqlcl_pool = registry.get_sqlcl_pool()
-        if sqlcl_pool and getattr(app.state, "pool_initialized", False):
-            health_status["pool_status"] = sqlcl_pool.get_status()
+        # Add warnings
+        if not redis_status:
+            health_status.setdefault("warnings", []).append(f"Redis unhealthy: {health_results['redis'].get('error', 'unknown')}")
+        if not doris_status and settings.DORIS_MCP_ENABLED:
+             health_status.setdefault("warnings", []).append(f"Doris MCP unhealthy: {health_results['doris_mcp'].get('message', 'unknown')}")
 
-        # Dynamic Redis health check (does not fail the endpoint)
-        try:
-            from app.core.redis_client import redis_client
-            redis_health = await redis_client.health_check()
-            is_healthy = redis_health.get("status") == "healthy"
-            health_status["components"]["redis"] = "connected" if is_healthy else "disconnected"
-            if not is_healthy:
-                health_status.setdefault("warnings", []).append(f"Redis unhealthy: {redis_health.get('error','unknown')}")
-                health_status["status"] = "degraded"
-        except Exception as _e:
-            # Keep prior status; note as warning
-            health_status.setdefault("warnings", []).append("Redis health check error")
+        if health_status.get("warnings"):
+            health_status["status"] = "degraded"
 
         # Add startup warnings if any
         if hasattr(app.state, "startup_errors") and app.state.startup_errors:

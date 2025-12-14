@@ -3,7 +3,7 @@ Health Check Endpoints
 System health and status monitoring with comprehensive dependency checks
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from typing import Dict, Any
 import logging
 from datetime import datetime, timezone
@@ -19,11 +19,27 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/status")
-async def health_status() -> Dict[str, Any]:
+async def health_status(request: Request) -> Dict[str, Any]:
     """
     Basic health check endpoint
     Returns system status and version information
+    
+    Rate limited to prevent enumeration attacks
     """
+    from app.core.rate_limiter import rate_limiter, RateLimitTier
+    
+    # Apply rate limiting - use IP-based limiting for unauthenticated endpoint
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        await rate_limiter.check_rate_limit(
+            user=f"anon_{client_ip}",
+            endpoint="/health/status",
+            tier=RateLimitTier.GUEST  # Most restrictive tier
+        )
+    except Exception as e:
+        # If rate limit check fails (e.g., Redis down), allow request but log
+        logger.warning(f"Rate limit check failed for /status: {e}")
+    
     return {
         "status": "healthy",
         "service": settings.app_name,

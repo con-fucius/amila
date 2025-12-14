@@ -230,6 +230,14 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
         return
       }
 
+      if (outcome.kind === 'conversational') {
+        // Conversational responses (greetings, help, meta questions)
+        // These don't need SSE streaming - response is complete
+        setResponse(initial)
+        setIsLoading(false)
+        return
+      }
+
       if (outcome.kind === 'success') {
         setResponse(initial)
         setIsLoading(false)

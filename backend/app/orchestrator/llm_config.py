@@ -163,7 +163,49 @@ def get_llm():
             logger.debug("Initializing Qwen (OpenAI-compatible) LLM via langchain_community")
             return _ChatOpenAI(**params)
 
+    if llm_provider == 'openrouter':
+        # OpenRouter API - OpenAI-compatible endpoint
+        api_key = os.getenv('OPENROUTER_API_KEY')
+        if not api_key:
+            raise ValueError(
+                "OpenRouter provider selected but OPENROUTER_API_KEY is not set. "
+                "Get your API key from https://openrouter.ai/keys"
+            )
+        
+        model_name = get_query_llm_model('mistralai/devstral-2512:free')
+        base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
+        
+        logger.info(f"Initializing OpenRouter LLM: model={model_name}")
+        
+        try:
+            from langchain_openai import ChatOpenAI as _ChatOpenAI
+            # Avoid http_client wrapper issue by not passing custom headers via default_headers
+            # Use model_kwargs for extra params instead
+            return _ChatOpenAI(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.0,
+                max_tokens=4096,
+                http_client=None,  # Explicitly disable custom http_client
+                http_async_client=None,
+            )
+        except (ImportError, TypeError) as e:
+            logger.warning(f"langchain_openai ChatOpenAI failed: {e}, trying alternative")
+            try:
+                from langchain_community.chat_models import ChatOpenAI as _ChatOpenAI
+                return _ChatOpenAI(
+                    model=model_name,
+                    openai_api_key=api_key,
+                    openai_api_base=base_url,
+                    temperature=0.0,
+                    max_tokens=4096,
+                )
+            except Exception as e2:
+                logger.error(f"All OpenRouter init methods failed: {e2}")
+                raise ValueError(f"Failed to initialize OpenRouter LLM: {e2}")
+
     raise ValueError(
         f"Unsupported LLM provider: {llm_provider}. "
-        f"Supported providers: gemini, bedrock, qwen"
+        f"Supported providers: gemini, bedrock, qwen, openrouter"
     )

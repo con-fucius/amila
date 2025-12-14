@@ -18,7 +18,7 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
-      - ORACLE_HOST=${ORACLE_HOST:-host.docker.internal}
+      - ORACLE_HOST=host.docker.internal
       - ORACLE_PORT=${ORACLE_PORT:-1521}
       - ORACLE_SERVICE_NAME=${ORACLE_SERVICE_NAME:-XEPDB1}
       - ORACLE_USERNAME=${ORACLE_USERNAME}
@@ -36,11 +36,11 @@ services:
       - DORIS_MCP_ENABLED=${DORIS_MCP_ENABLED:-true}
       - DORIS_MCP_HOST=127.0.0.1
       - DORIS_MCP_PORT=8808
-      - DORIS_DB_HOST=${DORIS_DB_HOST:-host.docker.internal}
+      - DORIS_DB_HOST=${DORIS_DB_HOST:-doris}
       - DORIS_DB_PORT=${DORIS_DB_PORT:-9030}
       - DORIS_DB_USER=${DORIS_DB_USER:-root}
       - DORIS_DB_PASSWORD=${DORIS_DB_PASSWORD:-}
-      - DORIS_DB_DATABASE=${DORIS_DB_DATABASE:-demo}
+      - DORIS_DB_DATABASE=${DORIS_DB_DATABASE:-information_schema}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-redispass123}
@@ -56,11 +56,14 @@ services:
     volumes:
       - backend_data:/app/data
       - ./logs:/app/logs
-      - ./.dbtools:/home/app/.dbtools:ro
+      - ./.dbtools:/home/app/.dbtools
+      - ./backend/app:/app/app
     depends_on:
       falkordb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      doris:
         condition: service_healthy
     networks:
       - bi-agent-network
@@ -219,8 +222,6 @@ services:
       timeout: 10s
       retries: 10
       start_period: 120s
-    profiles:
-      - full
 
   # Celery Worker
   celery-worker:

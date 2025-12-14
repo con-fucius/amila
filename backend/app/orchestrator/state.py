@@ -2,13 +2,23 @@
 Query Orchestrator State Definition
 """
 
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, Optional, Literal
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+# Valid database types
+DatabaseTypeEnum = Literal["oracle", "doris"]
 
-class QueryState(TypedDict):
-    """Agent state tracking query processing workflow"""
+# Maximum history sizes to prevent unbounded memory growth
+MAX_CLARIFICATION_HISTORY = 10
+MAX_NODE_HISTORY = 50
+
+
+class QueryState(TypedDict, total=False):
+    """Agent state tracking query processing workflow.
+    
+    Uses total=False to make all fields optional with sensible defaults.
+    """
     
     # Message history for conversation context
     messages: Annotated[Sequence[BaseMessage], add_messages]
@@ -31,7 +41,7 @@ class QueryState(TypedDict):
     query_id: str
     timestamp: str
     trace_id: str  # For comprehensive logging & correlation
-    database_type: str
+    database_type: str  # Should be "oracle" or "doris"
     
     # LLM tracking
     llm_metadata: dict  # LLM provider, model, and generation status
@@ -58,9 +68,72 @@ class QueryState(TypedDict):
     # Clarification flow
     clarification_message: str
     clarification_details: dict
-    # Clarification history for multi-turn context preservation
-    clarification_history: list  # [{clarification, timestamp}]
+    # Clarification history for multi-turn context preservation (bounded)
+    clarification_history: list  # [{clarification, timestamp}] - max MAX_CLARIFICATION_HISTORY
 
-    # Execution visibility
-    node_history: list  # [{name, status, start_time, end_time, thinking_steps, error}]
+    # Execution visibility (bounded)
+    node_history: list  # [{name, status, start_time, end_time, thinking_steps, error}] - max MAX_NODE_HISTORY
     current_node: str
+
+
+def get_default_state() -> dict:
+    """Return default state values for initialization."""
+    return {
+        "messages": [],
+        "user_query": "",
+        "intent": "",
+        "hypothesis": "",
+        "context": {},
+        "sql_query": "",
+        "validation_result": {},
+        "execution_result": {},
+        "result_analysis": {},
+        "visualization_hints": {},
+        "user_id": "",
+        "user_role": "viewer",
+        "session_id": "",
+        "query_id": "",
+        "timestamp": "",
+        "trace_id": "",
+        "database_type": "oracle",
+        "llm_metadata": {},
+        "sql_confidence": 0,
+        "optimization_suggestions": [],
+        "cost_estimate": {},
+        "execution_plan": "",
+        "needs_approval": False,
+        "approved": False,
+        "error": "",
+        "next_action": "",
+        "repair_attempts": 0,
+        "fallback_attempts": 0,
+        "pivot_attempts": 0,
+        "pivot_strategies": [],
+        "preview": {},
+        "clarification_message": "",
+        "clarification_details": {},
+        "clarification_history": [],
+        "node_history": [],
+        "current_node": "",
+    }
+
+
+def validate_database_type(db_type: str) -> str:
+    """Validate and normalize database type."""
+    normalized = db_type.lower().strip() if db_type else "oracle"
+    if normalized not in ("oracle", "doris"):
+        return "oracle"  # Default fallback
+    return normalized
+
+
+def trim_history_lists(state: dict) -> dict:
+    """Trim unbounded history lists to prevent memory growth."""
+    if "clarification_history" in state and isinstance(state["clarification_history"], list):
+        if len(state["clarification_history"]) > MAX_CLARIFICATION_HISTORY:
+            state["clarification_history"] = state["clarification_history"][-MAX_CLARIFICATION_HISTORY:]
+    
+    if "node_history" in state and isinstance(state["node_history"], list):
+        if len(state["node_history"]) > MAX_NODE_HISTORY:
+            state["node_history"] = state["node_history"][-MAX_NODE_HISTORY:]
+    
+    return state
