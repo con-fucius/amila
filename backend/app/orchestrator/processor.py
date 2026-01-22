@@ -45,6 +45,64 @@ def validate_and_fix_state(state: dict) -> dict:
     return state
 
 
+def validate_conversation_history(conversation_history: list | None) -> list | None:
+    """
+    Validate conversation history structure at API boundary.
+    
+    This is a defensive check to ensure external data conforms to expected format
+    before being used for routing/context. This does NOT validate LangChain messages
+    in the state, as those are handled internally by LangChain's add_messages reducer.
+    
+    Args:
+        conversation_history: List of conversation messages from API
+        
+    Returns:
+        Validated and sanitized conversation history, or None if invalid
+        
+    Note:
+        LangChain messages in QueryState are NOT validated here because:
+        1. LangChain's add_messages reducer handles validation internally
+        2. All messages in state are constructed using proper LangChain types
+        3. Adding validation would duplicate LangChain's functionality
+        4. Type hints (Annotated[Sequence[BaseMessage], add_messages]) provide static checking
+    """
+    if conversation_history is None:
+        return None
+    
+    if not isinstance(conversation_history, list):
+        logger.warning(f"conversation_history is not a list (got {type(conversation_history).__name__}), ignoring")
+        return None
+    
+    validated = []
+    for i, msg in enumerate(conversation_history):
+        if not isinstance(msg, dict):
+            logger.warning(f"conversation_history[{i}] is not a dict (got {type(msg).__name__}), skipping")
+            continue
+        
+        # Ensure required fields exist
+        if "role" not in msg or "content" not in msg:
+            logger.warning(f"conversation_history[{i}] missing 'role' or 'content', skipping")
+            continue
+        
+        # Validate role is a string
+        if not isinstance(msg["role"], str):
+            logger.warning(f"conversation_history[{i}]['role'] is not a string, skipping")
+            continue
+        
+        # Validate content is a string
+        if not isinstance(msg["content"], str):
+            logger.warning(f"conversation_history[{i}]['content'] is not a string, skipping")
+            continue
+        
+        # Sanitize and add to validated list
+        validated.append({
+            "role": msg["role"].strip(),
+            "content": msg["content"].strip()
+        })
+    
+    return validated if validated else None
+
+
 async def _ensure_orchestrator_initialized():
     """Ensure the LangGraph orchestrator is available, rebuilding if needed."""
 
@@ -114,7 +172,7 @@ async def process_query(
         user_id: User identifier
         session_id: Conversation session ID
         user_role: User role for RBAC (admin, analyst, viewer)
-        conversation_history: Previous messages for context
+        conversation_history: Previous messages for context (validated at API boundary)
         
     Returns:
         Processing result dict
@@ -122,6 +180,9 @@ async def process_query(
     from app.core.client_registry import registry
     from app.services.conversation_router import ConversationRouter, IntentType
     from app.core.redis_client import redis_client
+    
+    # Validate conversation_history at API boundary (defensive check)
+    conversation_history = validate_conversation_history(conversation_history)
     
     # CRITICAL: Wrap routing in try-catch to prevent crashes on greetings/simple inputs
     routing_result = None
@@ -137,6 +198,7 @@ async def process_query(
             pass
         
         # Convert conversation_history to the format expected by route_with_context
+        # Note: conversation_history is already validated above
         formatted_history = None
         if conversation_history:
             formatted_history = [
@@ -196,6 +258,60 @@ async def process_query(
                 "conversational": True,
             },
         }
+
+    # Handle METADATA_QUERY intent (Schema QA)
+    if routing_result and routing_result.get("intent") == "metadata_query":
+        try:
+            from app.services.metadata_qa_service import MetadataQAService
+            
+            # Ensure we have schema context
+            if not schema_context:
+                from app.services.schema_service import SchemaService
+                schema_res = await SchemaService.get_database_schema(use_cache=True)
+                schema_context = schema_res.get("schema", {}) if schema_res.get("status") == "success" else {}
+
+            qa_result = await MetadataQAService.answer_metadata_question(user_query, schema_context)
+            
+            query_id = f"meta_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            return {
+                "status": "success",
+                "query_id": query_id,
+                "message": qa_result.get("answer"),
+                "intent": "metadata_query",
+                "is_conversational": True,
+                "sql_query": None,
+                "results": None,
+                "needs_approval": False,
+                "llm_metadata": {
+                    "intent": "metadata_query",
+                    "source": "MetadataQAService",
+                    "metadata": qa_result.get("metadata")
+                },
+            }
+        except Exception as e:
+            logger.error(f"Metadata QA failed: {e}")
+            # Fall through to standard processing if QA fails
+            pass
+
+    # Handle AMBIGUOUS intent (Clarification needed)
+    if routing_result and routing_result.get("intent") == "ambiguous":
+        query_id = f"clarify_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        return {
+            "status": "clarification_needed",
+            "query_id": query_id,
+            "message": routing_result.get("response") or "Could you valid clarify what data you're looking for?",
+            "intent": "ambiguous",
+            "is_conversational": True,
+            "sql_query": None,
+            "results": None,
+            "needs_approval": False,
+            "llm_metadata": {
+                "intent": "ambiguous",
+                "clarification_needed": True
+            },
+            "clarification_message": routing_result.get("response")
+        }
+
     from app.core.langfuse_client import (
         create_trace,
         get_langfuse_client,
@@ -204,6 +320,7 @@ async def process_query(
     )
     from app.core.structured_logging import clear_context, set_trace_id, set_user_context
     from app.core.config import settings
+    from app.services.diagnostic_service import record_query_pipeline_stage
     import time
     
     start_time = time.time()
@@ -230,6 +347,21 @@ async def process_query(
     trace_identifier = langfuse_trace_id or query_id
     set_trace_id(trace_identifier)
     set_user_context(user_id=user_id, session_id=session_id)
+    
+    # Record pipeline stage: User Input
+    now = datetime.now(timezone.utc)
+    await record_query_pipeline_stage(
+        query_id=query_id,
+        stage="user_input",
+        status="completed",
+        entered_at=now,
+        exited_at=now,
+        metadata={
+            "user_query": user_query,
+            "user_id": user_id,
+            "database_type": database_type
+        }
+    )
 
     # Stream lifecycle: received
     try:
@@ -289,7 +421,7 @@ async def process_query(
         "messages": [],
         "user_query": user_query,
         "intent": "",
-        "hypothesis": "",
+        "hypothesis": routing_result.get("enhanced_context", {}).get("enhanced_intent", "") if routing_result else "",
         "context": initial_context,
         "sql_query": "",
         "validation_result": {},
@@ -376,14 +508,35 @@ async def process_query(
             },
             metadata={"user_role": user_role},
         ) as orchestrator_span:
-            result = await orchestrator.ainvoke(initial_state, config)
-            orchestrator_span["output"] = {
-                "status": "completed",
-                "query_id": query_id,
-                "needs_approval": result.get("needs_approval") if isinstance(result, dict) else None,
-            }
+            try:
+                result = await orchestrator.ainvoke(initial_state, config)
+                
+                # CRITICAL: Log the type of result for debugging
+                logger.info(f"Orchestrator returned type: {type(result).__name__}")
+                
+                # CRITICAL: Ensure result is a dict
+                if not isinstance(result, dict):
+                    logger.error(f"Orchestrator returned non-dict result: {type(result)}, value: {result}")
+                    raise AttributeError(f"Orchestrator returned {type(result).__name__} instead of dict")
+                
+                orchestrator_span["output"] = {
+                    "status": "completed",
+                    "query_id": query_id,
+                    "needs_approval": result.get("needs_approval"),
+                }
+            except Exception as invoke_err:
+                logger.error(f"Orchestrator invocation failed: {invoke_err}", exc_info=True)
+                orchestrator_span["output"] = {
+                    "status": "error",
+                    "error": str(invoke_err),
+                }
+                raise
 
         # Validate and fix state
+        if not isinstance(result, dict):
+            logger.error(f"Orchestrator returned non-dict: {type(result).__name__}")
+            raise AttributeError(f"Expected dict from orchestrator, got {type(result).__name__}")
+            
         final_state = validate_and_fix_state(result)
         
         # Deep copy execution_result to prevent cleanup code from nullifying rows

@@ -401,7 +401,7 @@ class SQLValidator:
         
         dialect = dialect.lower()
         
-        if dialect in ["doris", "mysql"]:
+        if dialect in ["doris", "mysql", "postgres", "postgresql"]:
             # Check if already has LIMIT
             if "LIMIT" in query_upper:
                 logger.debug("Query already has LIMIT, skipping enforcement")

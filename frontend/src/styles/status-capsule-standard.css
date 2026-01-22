@@ -1,0 +1,263 @@
+/**
+ * Status Capsule Standardization
+ * Ensures all status indicators use consistent height, padding, and font-weight
+ * Addresses improvement: Status Capsule Misalignment
+ */
+
+/* ============================================
+   STANDARD STATUS CAPSULE DIMENSIONS
+   ============================================ */
+
+:root {
+  /* Size variants */
+  --status-height-sm: 20px;    /* 5 tailwind units */
+  --status-height-md: 24px;    /* 6 tailwind units */
+  --status-height-lg: 28px;    /* 7 tailwind units */
+  
+  /* Padding */
+  --status-padding-x-sm: 6px;  /* 1.5 tailwind units */
+  --status-padding-x-md: 8px;  /* 2 tailwind units */
+  --status-padding-x-lg: 12px; /* 3 tailwind units */
+  
+  --status-padding-y-sm: 2px;  /* 0.5 tailwind units */
+  --status-padding-y-md: 4px;  /* 1 tailwind units */
+  --status-padding-y-lg: 6px;  /* 1.5 tailwind units */
+  
+  /* Typography */
+  --status-font-size-sm: 10px;
+  --status-font-size-md: 11px;
+  --status-font-size-lg: 12px;
+  
+  --status-font-weight: 500;   /* Medium weight for all */
+  
+  /* Icon sizes */
+  --status-icon-sm: 10px;
+  --status-icon-md: 12px;
+  --status-icon-lg: 14px;
+  
+  /* Border radius */
+  --status-radius: 6px;
+  
+  /* Spacing */
+  --status-gap: 6px;
+}
+
+/* ============================================
+   BASE STATUS CAPSULE CLASS
+   ============================================ */
+
+.status-capsule {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--status-gap);
+  height: var(--status-height-md);
+  padding: var(--status-padding-y-md) var(--status-padding-x-md);
+  font-size: var(--status-font-size-md);
+  font-weight: var(--status-font-weight);
+  line-height: 1;
+  border-radius: var(--status-radius);
+  border: 1px solid;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+/* Size variants */
+.status-capsule-sm {
+  height: var(--status-height-sm);
+  padding: var(--status-padding-y-sm) var(--status-padding-x-sm);
+  font-size: var(--status-font-size-sm);
+}
+
+.status-capsule-lg {
+  height: var(--status-height-lg);
+  padding: var(--status-padding-y-lg) var(--status-padding-x-lg);
+  font-size: var(--status-font-size-lg);
+}
+
+/* Icon sizing */
+.status-capsule-sm .status-icon {
+  width: var(--status-icon-sm);
+  height: var(--status-icon-sm);
+}
+
+.status-capsule .status-icon {
+  width: var(--status-icon-md);
+  height: var(--status-icon-md);
+}
+
+.status-capsule-lg .status-icon {
+  width: var(--status-icon-lg);
+  height: var(--status-icon-lg);
+}
+
+/* ============================================
+   STATUS VARIANTS (Semantic Colors)
+   ============================================ */
+
+/* Success / Active / Healthy */
+.status-success {
+  color: rgb(52, 211, 153); /* emerald-400 */
+  background-color: rgba(16, 185, 129, 0.1); /* emerald-500/10 */
+  border-color: rgba(16, 185, 129, 0.3); /* emerald-500/30 */
+}
+
+.status-success:hover {
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+/* Warning / Degraded / Fallback */
+.status-warning {
+  color: rgb(251, 191, 36); /* amber-400 */
+  background-color: rgba(245, 158, 11, 0.1); /* amber-500/10 */
+  border-color: rgba(245, 158, 11, 0.3); /* amber-500/30 */
+}
+
+.status-warning:hover {
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+/* Error / Disconnected / Failed */
+.status-error {
+  color: rgb(248, 113, 113); /* red-400 */
+  background-color: rgba(239, 68, 68, 0.1); /* red-500/10 */
+  border-color: rgba(239, 68, 68, 0.3); /* red-500/30 */
+}
+
+.status-error:hover {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+/* Info / Loading / Syncing */
+.status-info {
+  color: rgb(96, 165, 250); /* blue-400 */
+  background-color: rgba(59, 130, 246, 0.1); /* blue-500/10 */
+  border-color: rgba(59, 130, 246, 0.3); /* blue-500/30 */
+}
+
+.status-info:hover {
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+/* Neutral / Unknown / Inactive */
+.status-neutral {
+  color: rgb(156, 163, 175); /* gray-400 */
+  background-color: rgba(107, 114, 128, 0.1); /* gray-500/10 */
+  border-color: rgba(107, 114, 128, 0.3); /* gray-500/30 */
+}
+
+.status-neutral:hover {
+  border-color: rgba(107, 114, 128, 0.5);
+}
+
+/* ============================================
+   STATUS INDICATOR DOT
+   ============================================ */
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot-sm {
+  width: 4px;
+  height: 4px;
+}
+
+.status-dot-lg {
+  width: 8px;
+  height: 8px;
+}
+
+/* Pulsing animation for active states */
+.status-dot-pulse {
+  animation: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* ============================================
+   LAYOUT HELPERS
+   ============================================ */
+
+/* Ensure consistent alignment in flex containers */
+.status-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Grid layout for multiple status capsules */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+
+/* Stack layout for vertical status lists */
+.status-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+/* ============================================
+   USAGE EXAMPLES
+   ============================================ */
+
+/*
+STANDARD USAGE:
+<div class="status-capsule status-success">
+  <span class="status-icon">✓</span>
+  <span>Active</span>
+</div>
+
+WITH SIZE VARIANT:
+<div class="status-capsule status-capsule-sm status-warning">
+  <span class="status-icon">⚠</span>
+  <span>Degraded</span>
+</div>
+
+WITH DOT INDICATOR:
+<div class="status-capsule status-info">
+  <span class="status-dot status-dot-pulse"></span>
+  <span>Loading</span>
+</div>
+
+IN CONTAINER:
+<div class="status-container">
+  <div class="status-capsule status-success">
+    <span>Database</span>
+  </div>
+  <div class="status-capsule status-success">
+    <span>Redis</span>
+  </div>
+</div>
+*/
+
+/* ============================================
+   MIGRATION GUIDE
+   ============================================ */
+
+/*
+BEFORE (Inconsistent):
+<div class="px-2 py-1 h-6 text-[11px]">Status</div>
+<div class="px-3 py-1.5 h-7 text-xs">Status</div>
+<div class="px-2 py-0.5 h-5 text-[10px]">Status</div>
+
+AFTER (Standardized):
+<div class="status-capsule status-capsule-md">Status</div>
+<div class="status-capsule status-capsule-lg">Status</div>
+<div class="status-capsule status-capsule-sm">Status</div>
+*/

@@ -286,10 +286,12 @@ class DorisConnectionManager:
         
         #  FIX: Add connection acquisition lock to prevent race conditions
         self._connection_lock = asyncio.Lock()
-        self._recovery_lock = asyncio.Lock()
+        self.pool_recovery_lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock() # New lock for race condition fix
+        self._connection_semaphore = asyncio.Semaphore(self.maxsize) # Semaphore for connection limits
         
-        #  FIX: Add connection acquisition queue to serialize requests
-        self._connection_semaphore = asyncio.Semaphore(value=20)  # Max concurrent acquisitions
+        # Track active queries for cancellation: query_id -> (connection, thread_id)
+        self.active_queries: Dict[str, Any] = {}
         
         # Database connection parameters from config.database
         self.pool_recovery_lock = self._recovery_lock  # Compatibility alias
@@ -357,13 +359,6 @@ class DorisConnectionManager:
             self.logger.error(f"Error finding available token: {e}")
             return ""
     
-    async def configure_for_token(self, token: str) -> tuple[bool, str]:
-        """Configure connection manager for token with new priority logic
-        
-        Priority: Token-bound DB config > .env config > error
-        
-        Args:
-            token: Authentication token to get database config for
             
         Returns:
             (success: bool, config_source: str): Result and which config was used
@@ -1056,8 +1051,8 @@ class DorisConnectionManager:
                         if self.pool:
                             try:
                                 self.pool.close()
-                            except:
-                                pass
+                            except Exception as close_err:
+                                self.logger.debug(f"Error closing pool during recovery: {close_err}")
                             self.pool = None
                     except Exception as e:
                         self.logger.error(f"Pool recovery error on attempt {attempt + 1}: {e}")
@@ -1267,7 +1262,7 @@ class DorisConnectionManager:
             return self.metrics
 
     async def execute_query(
-        self, session_id: str, sql: str, params: tuple | None = None, auth_context=None
+        self, session_id: str, sql: str, params: tuple | None = None, auth_context=None, query_id: str | None = None
     ) -> QueryResult:
         """Execute query - Simplified Strategy with automatic connection management
 
@@ -1301,6 +1296,21 @@ class DorisConnectionManager:
             # Always get fresh connection from pool (with configured database)
             connection = await self.get_connection(session_id)
 
+            # Register active query if ID provided
+            if query_id:
+                try:
+                    # connection.connection is the raw aiomysql connection which has thread_id
+                    thread_id = connection.connection.thread_id
+                    self.active_queries[query_id] = {
+                        "connection": connection,
+                        "thread_id": thread_id,
+                        "session_id": session_id,
+                        "start_time": datetime.utcnow()
+                    }
+                    self.logger.debug(f"Registered active query {query_id} (Thread ID: {thread_id})")
+                except Exception as e:
+                    self.logger.warning(f"Failed to register query {query_id} for cancellation: {e}")
+
             # Execute query
             result = await connection.execute(sql, params, auth_context)
 
@@ -1310,6 +1320,11 @@ class DorisConnectionManager:
             self.logger.error(f"Query execution failed for session {session_id}: {e}")
             raise
         finally:
+            # Unregister active query
+            if query_id and query_id in self.active_queries:
+                del self.active_queries[query_id]
+                self.logger.debug(f"Unregistered active query {query_id}")
+
             # Always release connection back to pool
             if connection:
                 await self.release_connection(session_id, connection)
@@ -1432,3 +1447,52 @@ class ConnectionPoolMonitor:
             report["recommendations"].append("No free connections available, consider increasing pool size")
         
         return report
+        return report
+
+    async def kill_query(self, query_id: str) -> bool:
+        """
+        Kill a running query by its ID
+        
+        Args:
+            query_id: Unique query identifier provided during execution
+            
+        Returns:
+            bool: True if kill command was issued successfully
+        """
+        if query_id not in self.active_queries:
+            self.logger.warning(f"Attempted to kill unknown query {query_id}")
+            return False
+            
+        query_info = self.active_queries.get(query_id)
+        if not query_info:
+            return False
+            
+        thread_id = query_info.get("thread_id")
+        if not thread_id:
+            self.logger.warning(f"No thread_id found for query {query_id}")
+            return False
+            
+        self.logger.info(f"Killing query {query_id} (Thread ID: {thread_id})...")
+        
+        # specific connection to issue KILL command
+        kill_conn = None
+        try:
+            # Get a fresh connection from the pool to execute KILL
+            # We cannot re-use the executing connection as it is busy
+            if self.pool:
+                kill_conn = await self.pool.acquire()
+                async with kill_conn.cursor() as cursor:
+                    # Execute KILL QUERY assuming permissions are sufficient
+                    # Or KILL CONNECTION to be sure
+                    await cursor.execute(f"KILL QUERY {thread_id}")
+                    self.logger.info(f"Successfully killed query {query_id} (Thread ID: {thread_id})")
+                return True
+            else:
+                self.logger.error("No connection pool available to kill query")
+                return False
+        except Exception as e:
+            self.logger.error(f"Failed to kill query {query_id}: {e}")
+            return False
+        finally:
+            if kill_conn and self.pool:
+                self.pool.release(kill_conn)

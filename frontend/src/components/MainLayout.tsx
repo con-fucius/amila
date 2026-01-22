@@ -1,5 +1,6 @@
 import React, { ReactNode, useState } from 'react'
 import { NavigationSidebar } from './NavigationSidebar'
+import { CommandPalette } from './CommandPalette'
 import { useIsLoading } from '@/stores/chatStore'
 
 interface MainLayoutProps {
@@ -54,6 +55,7 @@ export function MainLayout({ children }: MainLayoutProps) {
         onResizeMouseDown={handleResizeMouseDown}
         isProcessing={isProcessing}
       />
+      <CommandPalette />
       <main className="flex-1 overflow-hidden">
         {children}
       </main>

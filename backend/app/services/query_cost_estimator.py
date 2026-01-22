@@ -124,12 +124,23 @@ class QueryCostEstimator:
             warnings = []
             recommendations = []
             
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name)
+                try:
+                    return r[idx]
+                except (IndexError, TypeError):
+                    return None
+
             for row in rows:
-                operation = row[0] or ""
-                options = row[1] or ""
-                object_name = row[2] or ""
-                cost = float(row[3]) if row[3] else 0.0
-                cardinality = int(row[4]) if row[4] else 0
+                operation = get_val(row, 0, "operation") or ""
+                options = get_val(row, 1, "options") or ""
+                object_name = get_val(row, 2, "object_name") or ""
+                cost_val = get_val(row, 3, "cost")
+                card_val = get_val(row, 4, "cardinality")
+                
+                cost = float(cost_val) if cost_val else 0.0
+                cardinality = int(card_val) if card_val else 0
                 
                 # Accumulate total cost (take max cost from plan)
                 if cost > total_cost:
@@ -227,7 +238,11 @@ class QueryCostEstimator:
             
             if result.get("status") == "success":
                 rows = result.get("results", {}).get("rows", [])
-                return "\n".join([str(row[0]) for row in rows if row])
+                def get_first_value(r):
+                    if isinstance(r, dict):
+                        return next(iter(r.values())) if r else ""
+                    return r[0] if r else ""
+                return "\n".join([str(get_first_value(row)) for row in rows if row])
             
             return None
             

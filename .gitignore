@@ -27,6 +27,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+.temp_venv/
 
 # uv
 .uv/
@@ -48,6 +49,7 @@ yarn-error.log*
 .idea/
 *.swp
 *.swo
+.kiro/
 
 # Environment variables - CRITICAL: Never commit actual .env files
 .env
@@ -99,6 +101,8 @@ grafana_data/
 
 # SQLcl connections (contains credentials)
 .dbtools/connections.json
+.dbtools/connections/
+.dbtools/sqlcl/
 
 # Backup files
 *.backup

@@ -1,3 +1,6 @@
+@import './styles/button-hierarchy.css';
+@import './styles/status-capsule-standard.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -54,47 +57,103 @@
     @apply border-border;
     font-size: 11px !important;
   }
+
   body {
     @apply bg-background text-foreground;
     font-size: 11px !important;
     line-height: 1.4 !important;
   }
+
   html {
     font-size: 11px !important;
   }
-  
-  /* Override all text sizes to be much smaller */
-  h1 { font-size: 1.3rem !important; }
-  h2 { font-size: 1.15rem !important; }
-  h3 { font-size: 1.05rem !important; }
-  p, div, span, li, td, th { font-size: 11px !important; }
-  button { font-size: 11px !important; padding: 6px 12px !important; }
-  input, textarea, select { font-size: 11px !important; }
-  label { font-size: 11px !important; }
-  
+
+  /* Prevent flash of wrong theme colors during initialization */
+  html.dark,
+  html.dark body {
+    background-color: hsl(240 10% 3.9%);
+    color: hsl(0 0% 98%);
+  }
+
+  html:not(.dark),
+  html:not(.dark) body {
+    background-color: hsl(0 0% 100%);
+    color: hsl(240 10% 3.9%);
+  }
+
+  /* Override all text sizes to be consistently sized */
+  h1 {
+    font-size: 1.25rem !important;
+  }
+
+  h2 {
+    font-size: 1.15rem !important;
+  }
+
+  h3 {
+    font-size: 1.05rem !important;
+  }
+
+  p,
+  div,
+  span,
+  li,
+  td,
+  th {
+    font-size: 11px !important;
+  }
+
+  button:not(nav button):not(.nav-item-btn) {
+    font-size: 11px !important;
+    padding: 5px 10px !important;
+  }
+
+  /* Ensure consistent height for navigation items */
+  nav a {
+    min-height: 36px !important;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 11px !important;
+  }
+
+  label {
+    font-size: 11px !important;
+  }
+
   /* Dialog and modal text */
-  [role="dialog"] * { font-size: 11px !important; }
-  
+  [role="dialog"] * {
+    font-size: 11px !important;
+  }
+
   /* Code blocks slightly smaller */
-  code, pre { font-size: 10px !important; }
+  code,
+  pre {
+    font-size: 10px !important;
+  }
 
   /* Monaco editor compact font size */
-  .monaco-editor, .monaco-editor .mtk { font-size: 10px !important; }
+  .monaco-editor,
+  .monaco-editor .mtk {
+    font-size: 10px !important;
+  }
 
   /* Chat header subtitle - intentionally small label */
   .chat-header-subtitle {
-    font-size: 9px !important;
+    font-size: 10px !important;
     line-height: 1.1 !important;
   }
 
   /* Section headers and subtitles for Query Builder / Schema Browser */
   .section-header-subtitle {
-    font-size: 9px !important;
+    font-size: 10px !important;
     line-height: 1.1 !important;
   }
 
   .section-subtext {
-    font-size: 9px !important;
+    font-size: 10px !important;
     line-height: 1.2 !important;
   }
 

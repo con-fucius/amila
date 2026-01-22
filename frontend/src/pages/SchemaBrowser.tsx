@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog"
 import { apiService } from '@/services/apiService'
 import { useDatabaseType } from '@/stores/chatStore'
+import { useBackendHealth } from '@/hooks/useBackendHealth'
 
 interface ColumnInfo {
   name: string
@@ -54,6 +55,7 @@ export function SchemaBrowser() {
   const [showStatsWarning, setShowStatsWarning] = useState(false)
 
   const databaseType = useDatabaseType()
+  const { components } = useBackendHealth(10000)
 
   const fetchSchema = async () => {
     try {
@@ -184,7 +186,19 @@ export function SchemaBrowser() {
         </aside>
 
         {/* Center - Table Details */}
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-6 relative">
+          <div className="absolute top-6 right-6 z-10">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm">
+              <Database className="h-3.5 w-3.5 text-emerald-500" />
+              <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                {databaseType === 'oracle' ? 'Oracle Database' : 'Doris OLAP'}
+              </span>
+              <div className={`w-2 h-2 rounded-full ${(databaseType === 'oracle' && (components?.sqlcl_pool === 'active' || components?.sqlcl_pool === 'connected')) ||
+                (databaseType === 'doris' && (components?.doris_mcp === 'active' || components?.doris_mcp === 'connected'))
+                ? 'bg-green-500' : 'bg-amber-500'
+                }`} />
+            </div>
+          </div>
           {error && (
             <div className="mb-4">
               <Card className="border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/40">

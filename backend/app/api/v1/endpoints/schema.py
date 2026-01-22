@@ -48,7 +48,7 @@ async def get_schema(
     Args:
         connection_name: Database connection name
         use_cache: Whether to use cached schema (default: True)
-        database_type: Type of database (default: oracle)
+        database_type: Type of database (oracle, doris, postgres/postgresql)
         tables: Optional comma-separated list of tables to fetch
     
     Returns:
@@ -59,9 +59,13 @@ async def get_schema(
         
         table_list = [t.strip() for t in tables.split(",")] if tables else None
         
-        if database_type.lower() == "doris":
-            # Doris schema service might need similar update, but prioritizing Oracle for now as per HITL usage
+        db_type_lower = database_type.lower()
+        
+        if db_type_lower == "doris":
             result = await DorisSchemaService.get_database_schema()
+        elif db_type_lower in ["postgres", "postgresql"]:
+            from app.services.postgres_schema_service import PostgresSchemaService
+            result = await PostgresSchemaService.get_full_schema()
         else:
             result = await SchemaService.get_database_schema(
                 connection_name=connection_name,
@@ -72,7 +76,7 @@ async def get_schema(
         return SchemaResponse(
             status=result.get("status", "error"),
             source=result.get("source", "unknown"),
-            schema_data=result.get("schema", {}),
+            schema_data=result.get("schema", result.get("schema_data", {})),
         )
         
     except Exception as e:
@@ -179,6 +183,9 @@ async def get_table_stats(
         # 2. Get Schema (to know columns)
         if database_type.lower() == "doris":
             schema_result = await DorisSchemaService.get_database_schema()
+        elif database_type.lower() in ["postgres", "postgresql"]:
+            from app.services.postgres_schema_service import PostgresSchemaService
+            schema_result = await PostgresSchemaService.get_full_schema()
         else:
             schema_result = await SchemaService.get_database_schema(use_cache=True)
         

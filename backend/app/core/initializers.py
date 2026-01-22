@@ -10,8 +10,88 @@ from app.core.doris_client import doris_client
 from app.core.redis_client import redis_client
 from app.core.sqlcl_pool import SQLclProcessPool
 from app.core.mcp_client import create_mcp_client
+from app.core.postgres_client import postgres_client
 
 logger = logging.getLogger(__name__)
+
+async def init_postgres() -> Tuple[bool, Optional[str]]:
+    """
+    Initialize PostgreSQL client with connection pooling.
+    Uses direct psycopg3 connection pool for simplicity and performance.
+    """
+    from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
+    
+    if not settings.POSTGRES_ENABLED:
+        logger.info("PostgreSQL integration is disabled (POSTGRES_ENABLED=false)")
+        return False, "PostgreSQL disabled"
+    
+    try:
+        logger.info("Initializing PostgreSQL client with psycopg3 connection pool...")
+        
+        try:
+            import psycopg
+            import psycopg_pool
+            logger.info(f"psycopg version: {psycopg.__version__}")
+        except ImportError:
+            logger.error("psycopg3 not installed. Install with: uv pip install 'psycopg[binary,pool]'")
+            return False, "psycopg3 not installed"
+        
+        if not settings.POSTGRES_USER or not settings.POSTGRES_PASSWORD:
+            logger.error("PostgreSQL credentials not configured")
+            return False, "PostgreSQL credentials missing"
+        
+        await postgres_client.initialize()
+        registry.set_postgres_client(postgres_client)
+        
+        health = await postgres_client.health_check()
+        if health.get("healthy"):
+            logger.info(
+                f"PostgreSQL client initialized successfully "
+                f"(read_only={settings.POSTGRES_READ_ONLY}, "
+                f"pool_size={settings.POSTGRES_POOL_MIN_SIZE}-{settings.POSTGRES_POOL_MAX_SIZE})"
+            )
+            
+            degraded_mode_manager.update_component_status(
+                "postgres",
+                ComponentStatus.OPERATIONAL
+            )
+            
+            return True, None
+        else:
+            error_msg = health.get('error', 'Health check failed')
+            logger.error(f"PostgreSQL health check failed: {error_msg}")
+            
+            degraded_mode_manager.update_component_status(
+                "postgres",
+                ComponentStatus.DEGRADED,
+                degradation_reason=error_msg,
+                recovery_actions=[
+                    "Check PostgreSQL server is running",
+                    "Verify POSTGRES_HOST and POSTGRES_PORT configuration",
+                    "Check PostgreSQL credentials",
+                    "Review PostgreSQL server logs"
+                ]
+            )
+            
+            return False, error_msg
+            
+    except Exception as e:
+        logger.error(f"PostgreSQL initialization error: {e}", exc_info=True)
+        
+        degraded_mode_manager.update_component_status(
+            "postgres",
+            ComponentStatus.UNAVAILABLE,
+            degradation_reason=str(e),
+            recovery_actions=[
+                "Check PostgreSQL server is running",
+                "Verify POSTGRES_HOST and POSTGRES_PORT configuration",
+                "Check PostgreSQL credentials",
+                "Ensure psycopg3 is installed: uv pip install 'psycopg[binary,pool]'",
+                "Review PostgreSQL server logs"
+            ]
+        )
+        
+        return False, str(e)
 
 async def init_doris() -> Tuple[bool, Optional[str]]:
     if not settings.DORIS_MCP_ENABLED:
@@ -47,6 +127,8 @@ async def init_doris() -> Tuple[bool, Optional[str]]:
         return False, str(e)
 
 async def init_redis() -> Tuple[bool, Optional[str]]:
+    from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
+    
     try:
         logger.info("Connecting to Redis...")
         await redis_client.connect()
@@ -55,9 +137,33 @@ async def init_redis() -> Tuple[bool, Optional[str]]:
         await configure_redis_memory_policy()
         
         logger.info("Redis connection established")
+        
+        # Register as operational
+        degraded_mode_manager.update_component_status(
+            "redis",
+            ComponentStatus.OPERATIONAL,
+            fallback_active=False
+        )
+        
         return True, None
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
+        
+        # Register as degraded with fallback
+        degraded_mode_manager.update_component_status(
+            "redis",
+            ComponentStatus.DEGRADED,
+            degradation_reason=str(e),
+            fallback_active=True,
+            fallback_type="in_memory",
+            recovery_actions=[
+                "Check Redis server is running",
+                "Verify REDIS_HOST and REDIS_PORT configuration",
+                "Check network connectivity to Redis",
+                "Review Redis server logs"
+            ]
+        )
+        
         return False, str(e)
 
 
@@ -127,15 +233,37 @@ async def init_semantic_index() -> Tuple[bool, Optional[str]]:
         return False, error_msg
 
 async def init_graphiti() -> Tuple[bool, Optional[str]]:
+    from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
+    
     try:
         logger.info("Initializing Graphiti Knowledge Graph...")
         from app.core.graphiti_client import create_graphiti_client
         graphiti_client = await create_graphiti_client()
         registry.set_graphiti_client(graphiti_client)
         logger.info("Graphiti client initialized successfully")
+        
+        # Register as operational
+        degraded_mode_manager.update_component_status(
+            "graphiti",
+            ComponentStatus.OPERATIONAL
+        )
+        
         return True, None
     except Exception as e:
         logger.warning(f"Graphiti initialization failed: {e}")
+        
+        # Register as unavailable
+        degraded_mode_manager.update_component_status(
+            "graphiti",
+            ComponentStatus.UNAVAILABLE,
+            degradation_reason=str(e),
+            recovery_actions=[
+                "Check FalkorDB server is running",
+                "Verify FALKORDB_HOST and FALKORDB_PORT configuration",
+                "Review FalkorDB server logs"
+            ]
+        )
+        
         return False, str(e)
 
 async def init_sqlcl_pool() -> Tuple[bool, Optional[str]]:
@@ -205,29 +333,95 @@ async def init_orchestrator(app_state=None) -> Tuple[bool, Optional[str], Any]:
     try:
         logger.info("Initializing LangGraph orchestrator...")
         from app.orchestrator import create_query_orchestrator
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-        if not settings.LANGGRAPH_CHECKPOINT_DB:
-            logger.warning("LANGGRAPH_CHECKPOINT_DB not set, using in-memory checkpointer (NOT PERSISTENT)")
-            
-        logger.info(f"Initializing LangGraph checkpointer at {settings.LANGGRAPH_CHECKPOINT_DB}")
-        checkpointer_context = AsyncSqliteSaver.from_conn_string(settings.LANGGRAPH_CHECKPOINT_DB)
-        checkpointer = await checkpointer_context.__aenter__()
+        from app.core.langgraph_checkpointer_fallback import (
+            InMemoryCheckpointerContext,
+            ResilientCheckpointerWrapper
+        )
+        from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
         
-        # Verify connection immediately
+        checkpointer = None
+        checkpointer_context = None
+        is_degraded = False
+        
+        # Try SQLite checkpointer first
         try:
-            await checkpointer.alist({"configurable": {"thread_id": "test_connection"}})
-            logger.info("Checkpointer connection verified successfully")
-        except Exception as e:
-            logger.warning(f"Checkpointer connection test warning: {e}")
-
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            
+            if not settings.LANGGRAPH_CHECKPOINT_DB:
+                logger.warning("LANGGRAPH_CHECKPOINT_DB not set, using in-memory checkpointer (NOT PERSISTENT)")
+                raise ValueError("LANGGRAPH_CHECKPOINT_DB not configured")
+                
+            logger.info(f"Initializing LangGraph SQLite checkpointer at {settings.LANGGRAPH_CHECKPOINT_DB}")
+            checkpointer_context = AsyncSqliteSaver.from_conn_string(settings.LANGGRAPH_CHECKPOINT_DB)
+            sqlite_checkpointer = await checkpointer_context.__aenter__()
+            
+            # Verify connection immediately
+            try:
+                await sqlite_checkpointer.alist({"configurable": {"thread_id": "test_connection"}})
+                logger.info("SQLite checkpointer connection verified successfully")
+                
+                # Wrap with resilient wrapper for automatic fallback
+                checkpointer = ResilientCheckpointerWrapper(sqlite_checkpointer, enable_fallback=True)
+                logger.info("SQLite checkpointer wrapped with resilient fallback")
+                
+                # Register as operational
+                degraded_mode_manager.update_component_status(
+                    "langgraph_checkpointer",
+                    ComponentStatus.OPERATIONAL,
+                    fallback_active=False
+                )
+                
+            except Exception as e:
+                logger.warning(f"SQLite checkpointer connection test failed: {e}")
+                raise
+        
+        except Exception as sqlite_error:
+            logger.warning(f"SQLite checkpointer initialization failed: {sqlite_error}")
+            logger.info("Falling back to in-memory checkpointer")
+            
+            # Use in-memory fallback
+            checkpointer_context = InMemoryCheckpointerContext()
+            checkpointer = await checkpointer_context.__aenter__()
+            is_degraded = True
+            
+            # Register as degraded
+            degraded_mode_manager.update_component_status(
+                "langgraph_checkpointer",
+                ComponentStatus.DEGRADED,
+                degradation_reason=str(sqlite_error),
+                fallback_active=True,
+                fallback_type="in_memory",
+                recovery_actions=[
+                    "Check LANGGRAPH_CHECKPOINT_DB configuration",
+                    "Verify SQLite database file permissions",
+                    "Ensure disk space available"
+                ]
+            )
+        
+        # Create orchestrator with checkpointer
         orchestrator = await create_query_orchestrator(checkpointer)
         registry.set_query_orchestrator(orchestrator)
         registry.set_langgraph_checkpointer(checkpointer, checkpointer_context)
         
-        logger.info(f"LangGraph orchestrator initialized (cp_id={id(checkpointer)})")
+        if is_degraded:
+            logger.warning(
+                f"LangGraph orchestrator initialized with IN-MEMORY checkpointer (cp_id={id(checkpointer)}). "
+                "Query state will NOT persist across restarts."
+            )
+        else:
+            logger.info(f"LangGraph orchestrator initialized with SQLite checkpointer (cp_id={id(checkpointer)})")
+        
         return True, None, checkpointer_context
         
     except Exception as e:
         logger.error(f"Orchestrator init failed: {e}")
+        
+        # Register as unavailable
+        from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
+        degraded_mode_manager.update_component_status(
+            "langgraph_checkpointer",
+            ComponentStatus.UNAVAILABLE,
+            degradation_reason=str(e)
+        )
+        
         return False, str(e), None

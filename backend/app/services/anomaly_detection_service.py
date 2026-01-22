@@ -260,11 +260,19 @@ class AnomalyDetectionService:
         anomalies = []
         warnings = []
         
+        def get_val(r, idx, name):
+            if isinstance(r, dict):
+                return r.get(name)
+            try:
+                return r[idx]
+            except (IndexError, TypeError):
+                return None
+
         # Analyze each column
         for col_idx, col_name in enumerate(columns):
             try:
                 # Extract column values
-                values = [row[col_idx] if col_idx < len(row) else None for row in rows]
+                values = [get_val(row, col_idx, col_name) for row in rows]
                 
                 # Run z-score outlier detection for numeric columns
                 outlier_result = AnomalyDetectionService.detect_numeric_outliers(col_name, values)

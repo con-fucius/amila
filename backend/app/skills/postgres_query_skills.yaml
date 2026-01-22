@@ -1,0 +1,188 @@
+# PostgreSQL SQL Query Skills
+# Provides PostgreSQL-specific SQL patterns, dialect quirks, and performance optimizations
+
+name: postgres_query_skills
+version: "1.0"
+database_type: postgres
+enabled: true
+
+# SQL Dialect Rules
+dialect_rules:
+  pagination:
+    pattern: "LIMIT {n} OFFSET {offset}"
+    example: "SELECT * FROM customers LIMIT 10 OFFSET 20"
+    note: "Use LIMIT for pagination in PostgreSQL"
+    
+  null_handling:
+    function: "COALESCE"
+    pattern: "COALESCE({column}, {default})"
+    example: "COALESCE(discount, 0)"
+    alternatives: ["NULLIF"]
+    note: "COALESCE is standard SQL and preferred in PostgreSQL"
+    
+  current_datetime:
+    function: "NOW"
+    example: "WHERE order_date > NOW() - INTERVAL '30 days'"
+    note: "NOW() returns TIMESTAMP WITH TIME ZONE, use CURRENT_DATE for DATE only"
+    alternatives: ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"]
+    
+  string_concat:
+    operator: "||"
+    example: "first_name || ' ' || last_name"
+    note: "Use || for string concatenation, CONCAT() also available"
+    alternatives: ["CONCAT", "CONCAT_WS"]
+
+# Date/Time Patterns
+date_patterns:
+  extract_quarter:
+    expression: "EXTRACT(QUARTER FROM {date_column})"
+    example: "EXTRACT(QUARTER FROM order_date) AS quarter"
+    
+  extract_month:
+    expression: "EXTRACT(MONTH FROM {date_column})"
+    example: "EXTRACT(MONTH FROM order_date) AS month"
+    
+  extract_year:
+    expression: "EXTRACT(YEAR FROM {date_column})"
+    example: "EXTRACT(YEAR FROM order_date) AS year"
+    
+  date_format:
+    function: "TO_CHAR"
+    pattern: "TO_CHAR({date}, '{format}')"
+    common_formats:
+      - "YYYY-MM-DD"
+      - "DD-Mon-YYYY"
+      - "MM/DD/YYYY"
+      - "YYYY-MM-DD HH24:MI:SS"
+    
+  date_arithmetic:
+    pattern: "{date} + INTERVAL '{value} {unit}'"
+    example: "NOW() - INTERVAL '7 days'"
+    units: ["days", "months", "years", "hours", "minutes", "seconds"]
+
+# Performance Hints
+performance_hints:
+  - rule: "Always include WHERE clause on large tables"
+    reason: "Prevents full table scans"
+    
+  - rule: "Use indexed columns in WHERE clause first"
+    reason: "Improves query execution plan"
+    
+  - rule: "Avoid SELECT * in production queries"
+    reason: "Reduces network overhead and improves performance"
+    
+  - rule: "Use EXPLAIN ANALYZE to understand query plans"
+    pattern: "EXPLAIN ANALYZE {query}"
+    note: "Shows actual execution time and row counts"
+    
+  - rule: "Use CTEs (WITH clause) for complex queries"
+    reason: "Improves readability and can be optimized by planner"
+    
+  - rule: "Consider VACUUM and ANALYZE for performance"
+    note: "Regular maintenance improves query planning"
+
+# Anti-patterns (Don't Do)
+anti_patterns:
+  - pattern: "FETCH FIRST {n} ROWS ONLY"
+    reason: "While supported, LIMIT is more idiomatic in PostgreSQL"
+    fix: "Use LIMIT {n}"
+    
+  - pattern: "NVL({col}, {val})"
+    reason: "NVL is Oracle syntax"
+    fix: "Use COALESCE({col}, {val})"
+    
+  - pattern: "SYSDATE"
+    reason: "SYSDATE is Oracle syntax"
+    fix: "Use NOW() or CURRENT_TIMESTAMP"
+    
+  - pattern: "TO_NUMBER({col})"
+    reason: "TO_NUMBER is Oracle syntax"
+    fix: "Use CAST({col} AS NUMERIC) or {col}::NUMERIC"
+    
+  - pattern: "IFNULL({col}, {val})"
+    reason: "IFNULL is MySQL syntax"
+    fix: "Use COALESCE({col}, {val})"
+
+# PostgreSQL-Specific Features
+postgres_features:
+  array_operations:
+    description: "PostgreSQL supports native array types"
+    example: "SELECT ARRAY[1, 2, 3] AS numbers"
+    
+  json_operations:
+    description: "Native JSON and JSONB support"
+    examples:
+      - "SELECT data->>'name' FROM users"
+      - "SELECT data @> '{\"status\": \"active\"}' FROM records"
+    
+  full_text_search:
+    description: "Built-in full-text search capabilities"
+    example: "SELECT * FROM documents WHERE to_tsvector('english', content) @@ to_tsquery('search & term')"
+    
+  window_functions:
+    description: "Advanced window functions"
+    examples:
+      - "ROW_NUMBER() OVER (PARTITION BY category ORDER BY sales DESC)"
+      - "LAG(value) OVER (ORDER BY date)"
+      - "LEAD(value) OVER (ORDER BY date)"
+    
+  recursive_cte:
+    description: "Recursive Common Table Expressions"
+    example: |
+      WITH RECURSIVE hierarchy AS (
+        SELECT id, parent_id, name FROM categories WHERE parent_id IS NULL
+        UNION ALL
+        SELECT c.id, c.parent_id, c.name FROM categories c
+        INNER JOIN hierarchy h ON c.parent_id = h.id
+      )
+      SELECT * FROM hierarchy
+
+# Common Query Templates
+templates:
+  top_n_by_metric:
+    description: "Get top N records by a metric"
+    template: |
+      SELECT {columns}
+      FROM {table}
+      ORDER BY {metric} DESC
+      LIMIT {n}
+      
+  aggregation_by_period:
+    description: "Aggregate data by time period"
+    template: |
+      SELECT DATE_TRUNC('{period}', {date_column}) AS period,
+             {aggregations}
+      FROM {table}
+      WHERE {date_column} BETWEEN {start_date} AND {end_date}
+      GROUP BY DATE_TRUNC('{period}', {date_column})
+      ORDER BY period
+    periods: ["day", "week", "month", "quarter", "year"]
+    
+  upsert_pattern:
+    description: "Insert or update on conflict"
+    template: |
+      INSERT INTO {table} ({columns})
+      VALUES ({values})
+      ON CONFLICT ({conflict_columns})
+      DO UPDATE SET {update_assignments}
+
+# Type Casting
+type_casting:
+  preferred_syntax: "::"
+  example: "'123'::INTEGER"
+  alternative: "CAST('123' AS INTEGER)"
+  note: "PostgreSQL supports both CAST() and :: operator, :: is more concise"
+
+# Security Best Practices
+security:
+  - rule: "Always use parameterized queries"
+    reason: "Prevents SQL injection"
+    
+  - rule: "Use read-only transactions for queries"
+    pattern: "BEGIN TRANSACTION READ ONLY; {query}; COMMIT;"
+    
+  - rule: "Limit result sets with LIMIT"
+    reason: "Prevents resource exhaustion"
+    
+  - rule: "Use prepared statements for repeated queries"
+    reason: "Improves performance and security"

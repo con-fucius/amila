@@ -23,6 +23,7 @@ security = HTTPBearer()
 class Role(str, Enum):
     """User roles with hierarchical permissions"""
     ADMIN = "admin"          # Full system access
+    DEVELOPER = "developer"  # Development and debugging access
     ANALYST = "analyst"      # Query execution + schema read
     VIEWER = "viewer"        # Read-only query results
     GUEST = "guest"          # Limited demo access
@@ -71,6 +72,17 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.SCHEMA_READ,
         Permission.SYSTEM_HEALTH,
         Permission.SYSTEM_METRICS,
+    },
+    Role.DEVELOPER: {
+        # Developers have analyst permissions plus system config and diagnostics
+        Permission.QUERY_EXECUTE,
+        Permission.QUERY_VIEW,
+        Permission.QUERY_HISTORY,
+        Permission.QUERY_APPROVE,
+        Permission.SCHEMA_READ,
+        Permission.SYSTEM_HEALTH,
+        Permission.SYSTEM_METRICS,
+        Permission.SYSTEM_CONFIG,
     },
     Role.ADMIN: {
         # Admins have all permissions
@@ -255,7 +267,8 @@ def require_role(required_role: Role):
         Role.GUEST: 0,
         Role.VIEWER: 1,
         Role.ANALYST: 2,
-        Role.ADMIN: 3,
+        Role.DEVELOPER: 3,
+        Role.ADMIN: 4,
     }
     
     required_level = role_hierarchy.get(required_role, 0)
@@ -374,5 +387,29 @@ async def require_admin_role(user: dict = Depends(rbac_manager.get_current_user)
         raise HTTPException(
             status_code=403,
             detail="Admin role required"
+        )
+    return user
+
+
+async def require_developer_role(user: dict = Depends(rbac_manager.get_current_user)) -> dict:
+    """
+    Require developer role or higher
+    Convenience dependency for developer/diagnostic endpoints
+    """
+    role_hierarchy = {
+        Role.GUEST: 0,
+        Role.VIEWER: 1,
+        Role.ANALYST: 2,
+        Role.DEVELOPER: 3,
+        Role.ADMIN: 4,
+    }
+    
+    user_level = role_hierarchy.get(user["role"], 0)
+    required_level = role_hierarchy.get(Role.DEVELOPER, 3)
+    
+    if user_level < required_level:
+        raise HTTPException(
+            status_code=403,
+            detail="Developer role or higher required"
         )
     return user

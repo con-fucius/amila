@@ -106,36 +106,35 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                                         "relevance": "high"  # Can be enhanced with scoring
                                     })
             
-            # Schema enrichment - route based on database type
-            # Note: SchemaEnrichmentService uses Oracle MCP, so skip it for Doris
-            if db_type != "doris":
-                try:
-                    from app.services.schema_enrichment_service import SchemaEnrichmentService
-                    enrichment_service = SchemaEnrichmentService()
-                    
-                    enriched_schema = await enrichment_service.get_enriched_schema_context(
-                        user_query=state["user_query"],
-                        intent=state.get("intent", ""),
-                        include_samples=True,
-                        include_relationships=True,
-                        sample_limit=3
-                    )
-                    
-                    context["enriched_schema"] = enriched_schema
-                    context["sample_data"] = enriched_schema.get("samples", {})
-                    context["table_relationships"] = enriched_schema.get("relationships", [])
+            # Schema enrichment - database-aware
+            try:
+                from app.services.schema_enrichment_service import SchemaEnrichmentService
+                enrichment_service = SchemaEnrichmentService()
                 
-                    logger.info(f"Enriched schema context: {len(enriched_schema.get('tables', {}))} tables, "
-                               f"{len(enriched_schema.get('samples', {}))} samples, "
-                               f"{len(enriched_schema.get('relationships', []))} relationships")
-                except Exception as e:
-                    logger.warning(f"Schema enrichment failed, falling back to basic schema: {e}")
-            else:
-                logger.info(f"Skipping Oracle-based schema enrichment for Doris database")
+                enriched_schema = await enrichment_service.get_enriched_schema_context(
+                    user_query=state["user_query"],
+                    intent=state.get("intent", ""),
+                    include_samples=True,
+                    include_relationships=True,
+                    sample_limit=3,
+                    database_type=db_type,
+                    connection_name=state.get("context", {}).get("connection_name")
+                )
+                
+                context["enriched_schema"] = enriched_schema
+                context["sample_data"] = enriched_schema.get("samples", {})
+                context["table_relationships"] = enriched_schema.get("relationships", [])
+            
+                logger.info(f"Enriched schema context: {len(enriched_schema.get('tables', {}))} tables, "
+                           f"{len(enriched_schema.get('samples', {}))} samples, "
+                           f"{len(enriched_schema.get('relationships', []))} relationships")
+            except Exception as e:
+                logger.warning(f"Schema enrichment failed, falling back to basic schema: {e}")
             
             try:
                 from app.services.schema_service import SchemaService
                 from app.services.doris_schema_service import DorisSchemaService
+                from app.services.postgres_schema_service import PostgresSchemaService
                 
                 logger.info(f"Starting DYNAMIC schema exploration based on query keywords...")
                 
@@ -145,6 +144,10 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                         user_query=state["user_query"],
                         intent=state.get("intent", ""),
                         max_tables=15,
+                    )
+                elif db_type in ["postgres", "postgresql"]:
+                    dynamic_schema_result = await PostgresSchemaService.get_dynamic_schema(
+                        user_query=state["user_query"]
                     )
                 else:
                     dynamic_schema_result = await SchemaService.get_dynamic_schema(
@@ -187,6 +190,8 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                     try:
                         if db_type == "doris":
                             static_schema_result = await DorisSchemaService.get_database_schema()
+                        elif db_type in ["postgres", "postgresql"]:
+                            static_schema_result = await PostgresSchemaService.get_full_schema()
                         else:
                             static_schema_result = await SchemaService.get_database_schema(use_cache=True)
 
@@ -208,7 +213,13 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                 logger.error(f"Dynamic schema exploration error: {e}", exc_info=True)
                 logger.info(f"Falling back to static cached schema...")
                 try:
-                    static_schema_result = await SchemaService.get_database_schema(use_cache=True)
+                    if db_type == "doris":
+                        static_schema_result = await DorisSchemaService.get_database_schema()
+                    elif db_type in ["postgres", "postgresql"]:
+                        static_schema_result = await PostgresSchemaService.get_full_schema()
+                    else:
+                        static_schema_result = await SchemaService.get_database_schema(use_cache=True)
+                    
                     if static_schema_result.get("status") == "success":
                         schema_data = static_schema_result.get("schema", {})
                         dynamic_schema_tables = schema_data.get("tables", {}) or {}
@@ -260,7 +271,7 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                 try:
                     user_patterns = await graphiti_client.search(
                         query=f"user:{user_id} query patterns history",
-                        limit=5
+                        num_results=5
                     )
                     context["user_patterns"] = []
                     if user_patterns:

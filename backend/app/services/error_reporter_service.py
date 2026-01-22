@@ -131,9 +131,17 @@ class ErrorReporterService:
         """
         Report an error with standardized format
         
+        Args:
+            trace_id: Optional trace ID for correlation (will be validated)
+        
         Returns:
             AmilaError instance
         """
+        # Validate trace_id if provided
+        if trace_id:
+            from app.core.structured_logging import validate_and_fix_trace_id
+            trace_id = validate_and_fix_trace_id(trace_id)
+        
         # Build details dict
         error_details = details or {}
         

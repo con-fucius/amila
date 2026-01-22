@@ -116,9 +116,17 @@ class ReportGenerationService:
             if not rows:
                 continue
             
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name)
+                try:
+                    return r[idx]
+                except (IndexError, TypeError):
+                    return None
+
             # Find numeric columns for metrics
             for col_idx, col in enumerate(columns):
-                values = [row[col_idx] for row in rows if row[col_idx] is not None]
+                values = [get_val(row, col_idx, col) for row in rows if get_val(row, col_idx, col) is not None]
                 numeric_values = []
                 for v in values:
                     try:

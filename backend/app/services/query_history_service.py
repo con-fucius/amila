@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
 from app.core.redis_client import redis_client
+from app.core.structured_logging import get_iso_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class QueryHistoryService:
             "sql_query": sql_query,
             "result_summary": result_summary or {},
             "metadata": metadata or {},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": get_iso_timestamp(),
         }
         
         try:

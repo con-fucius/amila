@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.client_registry import registry
 from app.core.redis_client import redis_client
 from app.core.resilience import resilience_manager
+from app.core.structured_logging import get_iso_timestamp
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ async def readiness_check() -> Dict[str, Any]:
     status_code = 200 if all_ready else 503
     response = {
         "status": "ready" if all_ready else "not_ready",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "checks": checks
     }
     
@@ -132,7 +133,7 @@ async def liveness_check() -> Dict[str, Any]:
     """
     return {
         "status": "alive",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "service": settings.app_name,
         "version": settings.app_version,
     }
@@ -146,12 +147,17 @@ async def detailed_health_check() -> Dict[str, Any]:
     """
     start_time = time.time()
     
+    # Get degraded mode status
+    from app.core.degraded_mode_manager import degraded_mode_manager
+    degraded_status = degraded_mode_manager.get_system_status()
+    
     health_data = {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "healthy" if not degraded_status["is_degraded"] else degraded_status["degradation_level"],
+        "timestamp": get_iso_timestamp(),
         "service": settings.app_name,
         "version": settings.app_version,
         "environment": settings.environment,
+        "degraded_mode": degraded_status,
         "components": {},
         "metrics": {},
         "circuit_breakers": {}
@@ -176,14 +182,12 @@ async def detailed_health_check() -> Dict[str, Any]:
     
     # Redis Status
     try:
-        redis_ping = await redis_client.ping()
-        redis_info = await redis_client.info()
-        health_data["components"]["redis"] = {
-            "status": "connected",
-            "ping": redis_ping,
-            "version": redis_info.get("redis_version", "unknown"),
-            "used_memory": redis_info.get("used_memory_human", "unknown"),
-        }
+        redis_health = await redis_client.health_check()
+        health_data["components"]["redis"] = redis_health
+        
+        # Check if Redis is degraded (using fallback)
+        if redis_health.get("status") == "degraded":
+            health_data["status"] = "degraded"
     except Exception as e:
         health_data["components"]["redis"] = {
             "status": "disconnected",
@@ -219,6 +223,79 @@ async def detailed_health_check() -> Dict[str, Any]:
     health_data["components"]["orchestrator"] = {
         "status": "initialized" if orchestrator else "not_initialized"
     }
+    
+    # PostgreSQL Status (if enabled)
+    if settings.POSTGRES_ENABLED:
+        try:
+            from app.core.postgres_client import postgres_client
+            pg_health = await postgres_client.health_check()
+            health_data["components"]["postgres"] = pg_health
+            
+            if not pg_health.get("healthy"):
+                health_data["status"] = "degraded"
+        except Exception as e:
+            health_data["components"]["postgres"] = {
+                "status": "error",
+                "error": str(e)
+            }
+            health_data["status"] = "degraded"
+    else:
+        health_data["components"]["postgres"] = {
+            "status": "disabled"
+        }
+    
+    # Qlik Sense Status (if configured)
+    if hasattr(settings, "QLIK_BASE_URL") and settings.QLIK_BASE_URL:
+        try:
+            from app.services.qlik_service import create_qlik_client
+            qlik_client = create_qlik_client()
+            qlik_health = await qlik_client.health_check()
+            await qlik_client.close()
+            health_data["components"]["qlik"] = qlik_health
+            
+            if qlik_health.get("status") != "healthy":
+                health_data["status"] = "degraded"
+        except Exception as e:
+            health_data["components"]["qlik"] = {
+                "status": "error",
+                "error": str(e)
+            }
+    else:
+        health_data["components"]["qlik"] = {
+            "status": "not_configured"
+        }
+    
+    # Apache Superset Status (if configured)
+    if hasattr(settings, "SUPERSET_BASE_URL") and settings.SUPERSET_BASE_URL:
+        try:
+            from app.services.superset_service import create_superset_client
+            superset_client = create_superset_client()
+            superset_health = await superset_client.health_check()
+            await superset_client.close()
+            health_data["components"]["superset"] = superset_health
+            
+            if superset_health.get("status") != "healthy":
+                health_data["status"] = "degraded"
+        except Exception as e:
+            health_data["components"]["superset"] = {
+                "status": "error",
+                "error": str(e)
+            }
+    else:
+        health_data["components"]["superset"] = {
+            "status": "not_configured"
+        }
+    
+    # Doris MCP Status
+    doris_client = registry.get_doris_client()
+    if doris_client:
+        health_data["components"]["doris"] = {
+            "status": "connected" if doris_client.is_connected() else "disconnected"
+        }
+    else:
+        health_data["components"]["doris"] = {
+            "status": "not_initialized"
+        }
     
     # Circuit Breaker Status
     health_data["circuit_breakers"] = resilience_manager.get_all_status()
@@ -289,9 +366,57 @@ async def dependency_check() -> Dict[str, Any]:
         }
     
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "dependencies": dependencies
     }
+
+
+@router.get("/checkpoints")
+async def checkpoint_stats() -> Dict[str, Any]:
+    """
+    Get LangGraph checkpoint database statistics.
+    Useful for monitoring checkpoint growth.
+    """
+    # Implementation continues...
+
+
+@router.get("/degraded-mode")
+async def degraded_mode_status() -> Dict[str, Any]:
+    """
+    Get detailed degraded mode status.
+    Shows which components are degraded and what features are affected.
+    """
+    from app.core.degraded_mode_manager import degraded_mode_manager
+    
+    status = degraded_mode_manager.get_system_status()
+    
+    return {
+        "timestamp": get_iso_timestamp(),
+        **status
+    }
+
+
+@router.post("/degraded-mode/recover")
+async def attempt_recovery(component: str = None) -> Dict[str, Any]:
+    """
+    Attempt to recover degraded components.
+    
+    Args:
+        component: Specific component to recover (optional)
+    """
+    from app.core.degraded_mode_manager import degraded_mode_manager
+    
+    try:
+        await degraded_mode_manager.attempt_recovery(component)
+        
+        return {
+            "status": "recovery_initiated",
+            "component": component or "all",
+            "timestamp": get_iso_timestamp()
+        }
+    except Exception as e:
+        logger.error(f"Recovery attempt failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/checkpoints")
@@ -304,7 +429,7 @@ async def checkpoint_stats() -> Dict[str, Any]:
     
     stats = get_checkpoint_stats()
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "checkpoints": stats
     }
 
@@ -335,7 +460,7 @@ async def cleanup_checkpoints(
     )
     
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "cleanup_result": result
     }
 
@@ -349,7 +474,7 @@ async def database_health_check(type: str = "oracle") -> Dict[str, Any]:
     Used by frontend to validate database selection before allowing switch.
     
     Args:
-        type: Database type ("oracle" or "doris")
+        type: Database type ("oracle", "doris", or "postgres")
         
     Returns:
         Health status with latency information
@@ -360,7 +485,7 @@ async def database_health_check(type: str = "oracle") -> Dict[str, Any]:
     result = {
         "status": "unhealthy",
         "database_type": db_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": get_iso_timestamp(),
         "latency_ms": 0,
         "error": None,
     }
@@ -392,6 +517,20 @@ async def database_health_check(type: str = "oracle") -> Dict[str, Any]:
                 result["status"] = "healthy"
             else:
                 result["error"] = test_result.get("error", "Query failed")
+                
+        elif db_type in ["postgres", "postgresql"]:
+            # Test PostgreSQL
+            if not settings.POSTGRES_ENABLED:
+                result["error"] = "PostgreSQL integration not enabled"
+            else:
+                from app.core.postgres_client import postgres_client
+                health = await postgres_client.health_check()
+                if health["status"] == "healthy":
+                    result["status"] = "healthy"
+                    result["latency_ms"] = health.get("latency_ms", 0)
+                    result["pool"] = health.get("pool", {})
+                else:
+                    result["error"] = health.get("error", "Health check failed")
         else:
             result["error"] = f"Unknown database type: {db_type}"
             
@@ -405,3 +544,226 @@ async def database_health_check(type: str = "oracle") -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=result)
     
     return result
+
+
+
+@router.post("/redis/circuit-breaker/reset")
+async def reset_redis_circuit_breaker() -> Dict[str, Any]:
+    """
+    Manually reset Redis circuit breaker
+    
+    Admin endpoint to force circuit breaker back to CLOSED state.
+    Use when Redis has recovered but circuit breaker is still OPEN.
+    
+    Returns:
+        Status of reset operation
+    """
+    try:
+        redis_client.reset_circuit_breaker()
+        health_status = await redis_client.health_check()
+        
+        return {
+            "status": "success",
+            "message": "Redis circuit breaker reset successfully",
+            "timestamp": get_iso_timestamp(),
+            "redis_health": health_status
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset Redis circuit breaker: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"Failed to reset circuit breaker: {str(e)}",
+                "timestamp": get_iso_timestamp()
+            }
+        )
+
+
+@router.get("/redis/circuit-breaker/status")
+async def get_redis_circuit_breaker_status() -> Dict[str, Any]:
+    """
+    Get current Redis circuit breaker status
+    
+    Returns detailed information about:
+    - Circuit breaker state (CLOSED/OPEN/HALF_OPEN)
+    - Failure/success counts
+    - Last failure time
+    - Fallback cache statistics
+    - Operation statistics
+    """
+    try:
+        health_status = await redis_client.health_check()
+        
+        return {
+            "timestamp": get_iso_timestamp(),
+            "circuit_breaker": health_status.get("circuit_breaker", {}),
+            "redis_status": health_status.get("status", "unknown")
+        }
+    except Exception as e:
+        logger.error(f"Failed to get circuit breaker status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"Failed to get circuit breaker status: {str(e)}",
+                "timestamp": get_iso_timestamp()
+            }
+        )
+
+
+@router.get("/mcp-tools")
+async def get_mcp_tools_status() -> Dict[str, Any]:
+    """
+    Get real-time status of all MCP tools from both Oracle SQLcl and Doris MCP servers.
+    
+    Returns:
+        Dictionary with tool availability status for each MCP server
+    """
+    start_time = time.time()
+    
+    result = {
+        "timestamp": get_iso_timestamp(),
+        "servers": {}
+    }
+    
+    # Check Oracle SQLcl MCP Server
+    oracle_tools = {
+        "server_name": "Oracle SQLcl MCP",
+        "server_status": "unknown",
+        "tools": []
+    }
+    
+    sqlcl_pool = registry.get_sqlcl_pool()
+    mcp_client = registry.get_mcp_client()
+    
+    if sqlcl_pool and sqlcl_pool.initialized:
+        oracle_tools["server_status"] = "connected"
+        # Oracle SQLcl MCP tools
+        tool_names = ["list-connections", "connect", "disconnect", "run-sql", "run-sqlcl"]
+        for tool_name in tool_names:
+            oracle_tools["tools"].append({
+                "name": tool_name,
+                "status": "available",
+                "description": _get_tool_description("oracle", tool_name)
+            })
+    elif mcp_client and mcp_client._connected:
+        oracle_tools["server_status"] = "connected"
+        tool_names = ["list-connections", "connect", "disconnect", "run-sql", "run-sqlcl"]
+        for tool_name in tool_names:
+            oracle_tools["tools"].append({
+                "name": tool_name,
+                "status": "available",
+                "description": _get_tool_description("oracle", tool_name)
+            })
+    else:
+        oracle_tools["server_status"] = "disconnected"
+        tool_names = ["list-connections", "connect", "disconnect", "run-sql", "run-sqlcl"]
+        for tool_name in tool_names:
+            oracle_tools["tools"].append({
+                "name": tool_name,
+                "status": "unavailable",
+                "description": _get_tool_description("oracle", tool_name)
+            })
+    
+    result["servers"]["oracle"] = oracle_tools
+    
+    # Check Doris MCP Server
+    doris_tools = {
+        "server_name": "Apache Doris MCP",
+        "server_status": "unknown",
+        "tools": []
+    }
+    
+    doris_client = registry.get_doris_client()
+    
+    if doris_client and doris_client.is_connected():
+        doris_tools["server_status"] = "connected"
+        tool_names = [
+            "exec_query", "get_table_schema", "get_db_table_list", "get_db_list",
+            "get_table_comment", "get_table_column_comments", "get_table_indexes",
+            "get_recent_audit_logs", "get_catalog_list", "get_sql_explain",
+            "get_sql_profile", "get_table_data_size", "get_monitoring_metrics",
+            "get_memory_stats", "get_table_basic_info", "analyze_columns",
+            "analyze_table_storage", "trace_column_lineage", "monitor_data_freshness",
+            "analyze_data_access_patterns", "analyze_data_flow_dependencies",
+            "analyze_slow_queries_topn", "analyze_resource_growth_curves",
+            "exec_adbc_query", "get_adbc_connection_info"
+        ]
+        for tool_name in tool_names:
+            doris_tools["tools"].append({
+                "name": tool_name,
+                "status": "available",
+                "description": _get_tool_description("doris", tool_name)
+            })
+    else:
+        doris_tools["server_status"] = "disconnected"
+        tool_names = [
+            "exec_query", "get_table_schema", "get_db_table_list", "get_db_list",
+            "get_table_comment", "get_table_column_comments", "get_table_indexes",
+            "get_recent_audit_logs", "get_catalog_list", "get_sql_explain",
+            "get_sql_profile", "get_table_data_size", "get_monitoring_metrics",
+            "get_memory_stats", "get_table_basic_info", "analyze_columns",
+            "analyze_table_storage", "trace_column_lineage", "monitor_data_freshness",
+            "analyze_data_access_patterns", "analyze_data_flow_dependencies",
+            "analyze_slow_queries_topn", "analyze_resource_growth_curves",
+            "exec_adbc_query", "get_adbc_connection_info"
+        ]
+        for tool_name in tool_names:
+            doris_tools["tools"].append({
+                "name": tool_name,
+                "status": "unavailable",
+                "description": _get_tool_description("doris", tool_name)
+            })
+    
+    result["servers"]["doris"] = doris_tools
+    
+    # Add response time
+    result["response_time_ms"] = round((time.time() - start_time) * 1000, 2)
+    
+    return result
+
+
+def _get_tool_description(server_type: str, tool_name: str) -> str:
+    """Get tool description for display"""
+    oracle_descriptions = {
+        "list-connections": "List available Oracle connections",
+        "connect": "Connect to an Oracle database",
+        "disconnect": "Disconnect from current database",
+        "run-sql": "Execute SQL statements",
+        "run-sqlcl": "Execute SQLcl commands"
+    }
+    
+    doris_descriptions = {
+        "exec_query": "Execute SQL queries with catalog federation",
+        "get_table_schema": "Get detailed table schema",
+        "get_db_table_list": "List tables in a database",
+        "get_db_list": "List databases in a catalog",
+        "get_table_comment": "Get table comments",
+        "get_table_column_comments": "Get column comments",
+        "get_table_indexes": "Get table indexes",
+        "get_recent_audit_logs": "Get recent audit logs",
+        "get_catalog_list": "List all available catalogs",
+        "get_sql_explain": "Get query execution plan",
+        "get_sql_profile": "Get query performance profile",
+        "get_table_data_size": "Get table data size",
+        "get_monitoring_metrics": "Get cluster monitoring metrics",
+        "get_memory_stats": "Get memory statistics",
+        "get_table_basic_info": "Get basic table information",
+        "analyze_columns": "Analyze column statistics",
+        "analyze_table_storage": "Analyze table storage",
+        "trace_column_lineage": "Trace column lineage",
+        "monitor_data_freshness": "Monitor data freshness",
+        "analyze_data_access_patterns": "Analyze data access patterns",
+        "analyze_data_flow_dependencies": "Analyze data flow dependencies",
+        "analyze_slow_queries_topn": "Analyze top N slow queries",
+        "analyze_resource_growth_curves": "Analyze resource growth",
+        "exec_adbc_query": "Execute query via ADBC",
+        "get_adbc_connection_info": "Get ADBC connection info"
+    }
+    
+    if server_type == "oracle":
+        return oracle_descriptions.get(tool_name, "")
+    else:
+        return doris_descriptions.get(tool_name, "")
+

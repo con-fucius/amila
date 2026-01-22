@@ -26,6 +26,8 @@ class IntentType(str, Enum):
     CLARIFICATION = "clarification"  # Follow-up clarification
     DATA_QUERY = "data_query"  # Actual SQL query needed
     REFINEMENT = "refinement"  # Refine previous query
+    METADATA_QUERY = "metadata_query"  # Questions about schema/data definitions
+    AMBIGUOUS = "ambiguous"  # Ambiguous intent requiring clarification
     UNKNOWN = "unknown"
 
 
@@ -40,22 +42,28 @@ class ConversationRouter:
     - Refinements (modify previous query)
     """
     
-    # Greeting patterns
+    # Greeting patterns - expanded for better coverage
     GREETING_PATTERNS = [
         r"^(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings)\b",
         r"^(what'?s\s*up|sup|yo)\b",
+        r"^(hi+|hey+|hello+)\s*[!.]*$",  # hi!, hiii, heyyy
+        r"^(good\s*day|g'?day)\b",
+        r"^(hola|bonjour|ciao|namaste)\b",  # Common international greetings
     ]
     
     # Farewell patterns
     FAREWELL_PATTERNS = [
         r"^(bye|goodbye|see\s*you|later|take\s*care|ciao)\b",
         r"^(good\s*night|have\s*a\s*good\s*(day|one))\b",
+        r"^(cheers|peace|adios|au\s*revoir)\b",
     ]
     
     # Thanks patterns
     THANKS_PATTERNS = [
         r"^(thanks?|thank\s*you|thx|ty|appreciate)\b",
         r"(thanks?\s*(a\s*lot|so\s*much|very\s*much))",
+        r"^(cheers|ta|much\s*appreciated)\b",
+        r"(that'?s?\s*(great|helpful|awesome|perfect))",
     ]
     
     # Help patterns
@@ -63,6 +71,61 @@ class ConversationRouter:
         r"^(help|how\s*do\s*i|what\s*can\s*you\s*do|capabilities)\b",
         r"(show\s*me\s*how|guide\s*me|tutorial)",
         r"^(what\s*are\s*you|who\s*are\s*you)\b",
+        r"^(how\s*does\s*this\s*work|what\s*is\s*this)\b",
+    ]
+    
+    # General conversational patterns (non-data queries)
+    CONVERSATIONAL_PATTERNS = [
+        r"^(how\s*are\s*you|how'?s\s*it\s*going|how\s*do\s*you\s*do)\b",
+        r"^(nice\s*to\s*meet\s*you|pleased\s*to\s*meet\s*you)\b",
+        r"^(i'?m\s*(good|fine|great|okay|well|doing\s*well))\b",
+        r"^(that'?s?\s*(cool|nice|great|awesome|interesting))\b",
+        r"^(ok|okay|alright|sure|got\s*it|understood|i\s*see)\b",
+        r"^(yes|no|maybe|perhaps|definitely|absolutely)\s*[!.]*$",
+        r"^(wow|cool|nice|great|awesome|amazing|excellent)\s*[!.]*$",
+        r"^(lol|haha|hehe|:[\)\(]|xd)\s*$",
+        r"^(sorry|my\s*bad|oops|apologies)\b",
+        r"^(no\s*problem|no\s*worries|all\s*good|it'?s?\s*fine)\b",
+        r"^(what\s*do\s*you\s*think|your\s*thoughts)\b",
+        r"^(tell\s*me\s*(about\s*yourself|more))\b",
+        r"^(can\s*you\s*help\s*me)\s*[?!.]*$",  # Generic help without specific query
+        r"^(i\s*need\s*help)\s*[?!.]*$",
+        r"^(testing|test|just\s*testing)\b",
+        # Extended conversational patterns for longer messages
+        r"^(i\s*just\s*wanted\s*to\s*(say|check|see|ask))\b",
+        r"^(just\s*(checking|saying|asking|wondering))\b",
+        r"^(hope\s*(you'?re?|everything|all)\s*(is\s*)?(good|well|fine|okay))\b",
+        r"^(good\s*to\s*(see|hear|know|meet))\b",
+        r"^(looking\s*forward\s*to)\b",
+        r"^(have\s*a\s*(good|great|nice|wonderful))\b",
+        r"^(it'?s?\s*(nice|good|great)\s*to\s*(be|meet|see|talk))\b",
+        r"^(glad\s*to\s*(be|meet|see|help))\b",
+        r"^(pleasure\s*to\s*(meet|help|assist))\b",
+        r"(how\s*can\s*i\s*help\s*you|what\s*can\s*i\s*do\s*for\s*you)",
+        r"^(i\s*appreciate\s*(it|that|your|the))\b",
+        r"^(sounds\s*(good|great|fine|perfect|awesome))\b",
+        r"^(perfect|wonderful|fantastic|brilliant)\s*[!.]*$",
+        r"^(let\s*me\s*know\s*if)\b",
+        r"^(feel\s*free\s*to)\b",
+        r"^(don'?t\s*hesitate\s*to)\b",
+    ]
+    
+    # Negative indicators - phrases that suggest NOT a data query
+    NON_DATA_INDICATORS = [
+        r"^(i\s*just\s*wanted\s*to)",
+        r"^(just\s*saying|just\s*checking|just\s*wondering)",
+        r"(nice\s*to\s*meet|good\s*to\s*see|glad\s*to)",
+        r"(hope\s*you|hope\s*everything|hope\s*all)",
+        r"(have\s*a\s*good|have\s*a\s*great|have\s*a\s*nice)",
+        r"(looking\s*forward)",
+        r"(take\s*care|see\s*you|talk\s*soon)",
+        r"(appreciate\s*it|appreciate\s*your|appreciate\s*the)",
+        r"(sounds\s*good|sounds\s*great|sounds\s*fine)",
+        r"(no\s*worries|no\s*problem|all\s*good)",
+        r"(let\s*me\s*know|feel\s*free|don'?t\s*hesitate)",
+        r"^(i\s*am\s*(here|ready|available|happy)\s*to)",
+        r"^(ready\s*when\s*you\s*are)",
+        r"^(whenever\s*you'?re?\s*ready)",
     ]
     
     # Meta question patterns (about the system)
@@ -72,6 +135,14 @@ class ConversationRouter:
         r"(can\s*you\s*(export|save|download))",
         r"(how\s*to\s*(use|export|filter|sort))",
         r"(what\s*format|which\s*format)",
+    ]
+
+    # Metadata/Schema question patterns
+    METADATA_PATTERNS = [
+        r"^(what|which)\s*(tables?|columns?|fields?)\s*(are|do|can)\b",
+        r"^(describe|explain|define)\s+(table|column|field)\b",
+        r"what\s*does\s*(column|field)\s*.*\s*mean",
+        r"schema\s*of\s*",
     ]
     
     # Refinement patterns (modify previous query)
@@ -145,6 +216,7 @@ Just type your question naturally and I'll generate the SQL and show you the res
             return IntentType.UNKNOWN, 0.0
         
         text = user_input.strip().lower()
+        word_count = len(text.split())
         
         # Check greeting patterns
         for pattern in cls.GREETING_PATTERNS:
@@ -166,10 +238,20 @@ Just type your question naturally and I'll generate the SQL and show you the res
             if re.search(pattern, text, re.IGNORECASE):
                 return IntentType.HELP, 0.9
         
+        # Check general conversational patterns (non-data queries)
+        for pattern in cls.CONVERSATIONAL_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return IntentType.GREETING, 0.9  # Treat as greeting for response
+        
         # Check meta question patterns
         for pattern in cls.META_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
                 return IntentType.META_QUESTION, 0.85
+
+        # Check metadata/schema patterns
+        for pattern in cls.METADATA_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return IntentType.METADATA_QUERY, 0.85
         
         # Check refinement patterns (needs conversation history)
         if conversation_history and len(conversation_history) > 0:
@@ -177,19 +259,51 @@ Just type your question naturally and I'll generate the SQL and show you the res
                 if re.search(pattern, text, re.IGNORECASE):
                     return IntentType.REFINEMENT, 0.85
         
+        # Check for non-data indicators first (conversational phrases)
+        non_data_score = 0
+        for pattern in cls.NON_DATA_INDICATORS:
+            if re.search(pattern, text, re.IGNORECASE):
+                non_data_score += 1
+        
+        # Strong non-data indicators override data query classification
+        if non_data_score >= 1:
+            return IntentType.GREETING, 0.85
+        
         # Check data query indicators
         data_score = 0
         for pattern in cls.DATA_QUERY_INDICATORS:
             if re.search(pattern, text, re.IGNORECASE):
                 data_score += 1
         
+        # Strong data query indicators - need at least 2 matches for confidence
         if data_score >= 2:
             return IntentType.DATA_QUERY, min(0.5 + data_score * 0.1, 0.95)
-        elif data_score == 1:
+        elif data_score == 1 and word_count >= 3:
+            # Single indicator with enough context
             return IntentType.DATA_QUERY, 0.6
         
-        # Default: if message is long enough, assume it's a data query
-        if len(text.split()) >= 4:
+        # Short messages without data indicators are likely conversational
+        if word_count <= 3 and data_score == 0:
+            # Check if it looks like a question about data
+            if re.search(r'\?$', text):
+                # Questions might be data queries, but short ones are often conversational
+                if word_count <= 2:
+                    return IntentType.HELP, 0.6
+            return IntentType.UNKNOWN, 0.4
+        
+        # Medium-length messages need stronger signals to be data queries
+        if word_count >= 4 and word_count <= 6 and data_score == 0:
+            # Check for question words that suggest data queries
+            if re.search(r'^(how\s*many|what\s*is\s*the|show\s*me|list|get|find)\b', text):
+                return IntentType.DATA_QUERY, 0.6
+            return IntentType.UNKNOWN, 0.4
+        
+        # Longer messages with some data context
+        if word_count >= 7 and data_score >= 1:
+            return IntentType.DATA_QUERY, 0.7
+        
+        # Default: longer messages might be data queries but with lower confidence
+        if word_count >= 5:
             return IntentType.DATA_QUERY, 0.5
         
         return IntentType.UNKNOWN, 0.3
@@ -257,6 +371,85 @@ Just type your question naturally and I'll generate the SQL and show you the res
         
         return result
     
+    @classmethod
+    async def enhance_query_contextually(
+        cls,
+        user_input: str,
+        conversation_history: List[Dict[str, str]],
+        schema_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Enhance a refinement query by merging it with previous context using LLM.
+        
+        SAFEGUARD: Preserves original input and strictly validates the enhancement.
+        
+        Args:
+            user_input: User's current input
+            conversation_history: History
+            schema_context: Schema info
+            
+        Returns:
+            Dict with 'original_input', 'enhanced_intent', 'method'
+        """
+        try:
+            from app.orchestrator.llm_config import get_llm
+            llm = get_llm()
+            
+            if not llm or not conversation_history:
+                return {
+                    "original_input": user_input,
+                    "enhanced_intent": cls.enhance_refinement_query(
+                        user_input, 
+                        conversation_history[-1]["content"] if conversation_history else ""
+                    ),
+                    "method": "fallback_concatenation"
+                }
+
+            # Get recent context (last user query and assistant response)
+            recent_history = conversation_history[-3:] # Last 3 messages including current? No, history passed in is previous.
+            
+            prompt = f"""You are a query understanding assistant.
+Your task is to merge the User's "Current Input" with the "Previous Context" to create a Standalone Query Intent.
+
+Rules:
+1. PRESERVE INTENT: Do not change the target metric or entity unless the user explicitly asks.
+2. MERGE CONSTRAINTS: If user says "filter by region", apply that to the previous subject.
+3. BE CONSERVATIVE: If the input is unrelated (e.g., "Hi"), do not merge. Return "UNRELATED".
+4. OUTPUT format: Just the standalone query string. No explanations.
+
+Previous Context:
+{chr(10).join([f"{m.get('role')}: {m.get('content')}" for m in recent_history])}
+
+Current Input: "{user_input}"
+
+Standalone Query Intent:"""
+
+            response = await llm.ainvoke(prompt)
+            enhanced_text = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            
+            # Basic validation
+            if "UNRELATED" in enhanced_text:
+                return {
+                    "original_input": user_input, 
+                    "enhanced_intent": user_input, 
+                    "method": "none_unrelated"
+                }
+                
+            return {
+                "original_input": user_input,
+                "enhanced_intent": enhanced_text,
+                "method": "llm_enhancement",
+                "context_used": True
+            }
+
+        except Exception as e:
+            logger.error(f"Context enhancement failed: {e}")
+            return {
+                "original_input": user_input,
+                "enhanced_intent": user_input,
+                "method": "error_fallback"
+            }
+
     @classmethod
     def enhance_refinement_query(
         cls,
@@ -407,17 +600,19 @@ A) GREETING - Hello, hi, hey, good morning, etc.
 B) FAREWELL - Goodbye, bye, see you, etc.
 C) THANKS - Thank you, thanks, appreciate it, etc.
 D) HELP - Questions about how to use the system
-E) META_QUESTION - Questions about system capabilities
+E) META_QUESTION - Questions about system capabilities (not data/schema)
 F) DATA_QUERY - Request for data that needs SQL
 G) REFINEMENT - Modification of a previous query (e.g., "now filter by...", "also show...")
-H) UNKNOWN - Cannot determine
+H) METADATA_QUERY - Questions about table/column definitions, schema, or meanings
+I) AMBIGUOUS - Vague, unclear, or could be multiple things (needs clarification)
+J) UNKNOWN - Cannot determine
 
 User input: "{user_input}"
 
 {f"Recent conversation:{chr(10)}{history_str}" if history_str else ""}
 {schema_str}
 
-Respond with ONLY the letter (A-H) and confidence (0-100), like: "F 85"
+Respond with ONLY the letter (A-J) and confidence (0-100), like: "F 85"
 """
             
             response = await llm.ainvoke(prompt)
@@ -440,7 +635,10 @@ Respond with ONLY the letter (A-H) and confidence (0-100), like: "F 85"
                     'E': IntentType.META_QUESTION,
                     'F': IntentType.DATA_QUERY,
                     'G': IntentType.REFINEMENT,
-                    'H': IntentType.UNKNOWN,
+                    'G': IntentType.REFINEMENT,
+                    'H': IntentType.METADATA_QUERY,
+                    'I': IntentType.AMBIGUOUS,
+                    'J': IntentType.UNKNOWN,
                 }
                 
                 intent = intent_map.get(letter, IntentType.UNKNOWN)
@@ -511,9 +709,25 @@ Respond with ONLY the letter (A-H) and confidence (0-100), like: "F 85"
         elif intent == IntentType.META_QUESTION:
             result["response"] = llm_response or cls.get_response(intent)
             result["requires_sql"] = False
+        elif intent == IntentType.METADATA_QUERY:
+            result["requires_sql"] = False
+            # Processing handled by MetadataQAService via processor.py
+        elif intent == IntentType.AMBIGUOUS:
+            result["requires_sql"] = False
+            result["response"] = "I'm not sure what you mean. Could you please clarify which data or table you're interested in?"
         elif intent in [IntentType.DATA_QUERY, IntentType.REFINEMENT]:
             result["requires_sql"] = True
             result["is_refinement"] = intent == IntentType.REFINEMENT
+            
+            # Apply Contextual Enhancement for Refinements
+            if intent == IntentType.REFINEMENT and use_llm:
+                enhancement = await cls.enhance_query_contextually(
+                    user_input,
+                    conversation_history or [],
+                    schema_context
+                )
+                result["enhanced_context"] = enhancement
+                logger.info(f"Enhanced refinement: '{user_input}' -> '{enhancement.get('enhanced_intent')}'")
         else:
             # Unknown - default to SQL if confident enough
             result["requires_sql"] = confidence >= 0.4

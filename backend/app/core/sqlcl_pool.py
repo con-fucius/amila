@@ -14,6 +14,7 @@ from enum import Enum
 from app.core.mcp_client import SQLclMCPClient, MCPRequest, MCPResponse
 from app.core.resilience import CircuitBreaker, CircuitBreakerConfig, resilience_manager
 from app.core.config import settings
+from app.core.exceptions import MCPException
 
 logger = logging.getLogger(__name__)
 
@@ -185,16 +186,31 @@ class SQLclProcessPool:
             
         Yields:
             SQLclMCPClient: Available client
+            
+        Raises:
+            MCPException: If pool is not initialized, shutting down, or circuit breaker is open
         """
         if not self.initialized:
-            raise RuntimeError("Pool not initialized")
+            raise MCPException(
+                "SQLcl pool not initialized",
+                details={"pool_status": "not_initialized"}
+            )
         
         if self.shutting_down:
-            raise RuntimeError("Pool is shutting down")
+            raise MCPException(
+                "SQLcl pool is shutting down",
+                details={"pool_status": "shutting_down"}
+            )
         
         # Check circuit breaker
-        if not self.circuit_breaker.can_execute():
-            raise RuntimeError("SQLcl pool circuit breaker is OPEN")
+        if not await self.circuit_breaker.can_execute():
+            raise MCPException(
+                "SQLcl pool circuit breaker is OPEN - service temporarily unavailable",
+                details={
+                    "pool_status": "circuit_breaker_open",
+                    "circuit_breaker_status": self.circuit_breaker.get_status()
+                }
+            )
         
         process: Optional[PooledProcess] = None
         
@@ -210,7 +226,14 @@ class SQLclProcessPool:
             except asyncio.TimeoutError:
                 logger.error(f"Timeout waiting for available process (pool exhausted)")
                 await self.circuit_breaker.record_failure()
-                raise RuntimeError("Pool exhausted: no available processes")
+                raise MCPException(
+                    "Pool exhausted: no available processes",
+                    details={
+                        "pool_size": self.pool_size,
+                        "active_requests": self.active_requests,
+                        "timeout": timeout
+                    }
+                )
             
             # Mark as busy
             process.state = ProcessState.BUSY

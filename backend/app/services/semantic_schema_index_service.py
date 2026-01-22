@@ -40,7 +40,12 @@ class _EmbeddingClient:
         if self.provider == "gemini":
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-            self._client = GoogleGenerativeAIEmbeddings(model=self.model, google_api_key=settings.GOOGLE_API_KEY)
+            # Gemini models must start with models/
+            model_name = self.model
+            if not model_name.startswith("models/"):
+                model_name = f"models/{model_name}"
+            
+            self._client = GoogleGenerativeAIEmbeddings(model=model_name, google_api_key=settings.GOOGLE_API_KEY)
         elif self.provider == "bedrock":
             from langchain_aws import BedrockEmbeddings
 

@@ -1,6 +1,12 @@
 """
 Audit Trail System
 Tracks all user actions for security, compliance, and debugging
+
+Security Features:
+- Application-level encryption for sensitive fields
+- Immutable audit logs with 90-day retention
+- Structured logging with correlation IDs
+- Field-level encryption for PII and sensitive data
 """
 
 import logging
@@ -11,8 +17,11 @@ from enum import Enum
 from dataclasses import dataclass, asdict
 import json
 
+from app.utils.json_encoder import CustomJSONEncoder
 from app.core.redis_client import redis_client
 from app.core.config import settings
+from app.core.encryption import get_encryption_service
+from app.models.internal_models import AuditEntryData, safe_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +40,7 @@ class AuditAction(str, Enum):
     QUERY_APPROVE = "query.approve"
     QUERY_REJECT = "query.reject"
     QUERY_VIEW = "query.view"
+    QUERY_CANCEL = "query.cancel"
     
     # Schema operations
     SCHEMA_VIEW = "schema.view"
@@ -40,6 +50,10 @@ class AuditAction(str, Enum):
     HEALTH_CHECK = "system.health_check"
     CONFIG_VIEW = "system.config_view"
     CONFIG_UPDATE = "system.config_update"
+    
+    # Agent operations
+    AGENT_INTERACTION = "agent.interaction"
+    AGENT_DECISION = "agent.decision"
     
     # Admin operations
     USER_CREATE = "admin.user_create"
@@ -79,7 +93,7 @@ class AuditEntry:
     
     def to_json(self) -> str:
         """Convert to JSON string"""
-        return json.dumps(self.to_dict())
+        return json.dumps(self.to_dict(), cls=CustomJSONEncoder)
 
 
 class AuditLogger:
@@ -89,6 +103,44 @@ class AuditLogger:
         self.logger = logging.getLogger("audit")
         self.redis_prefix = "audit:"
         self.retention_days = 90  # Keep audit logs for 90 days
+    
+    async def _decrypt_and_parse_entry(self, key: str, entry_json: Any) -> Optional[AuditEntry]:
+        """
+        Helper method to decrypt and parse an audit entry
+        
+        Args:
+            key: Redis key for the entry
+            entry_json: Raw entry data from Redis
+            
+        Returns:
+            Decrypted AuditEntry or None if parsing fails
+        """
+        encryption_service = get_encryption_service()
+        
+        try:
+            # Validate with Pydantic model
+            if isinstance(entry_json, str):
+                entry_data = safe_parse_json(entry_json, AuditEntryData, default=None, log_errors=True)
+                if entry_data:
+                    # Decrypt sensitive fields
+                    decrypted_dict = encryption_service.decrypt_audit_entry(entry_data.model_dump())
+                    return AuditEntry(**decrypted_dict)
+                else:
+                    # Fallback to direct parsing if validation fails
+                    logger.warning(f"Audit entry validation failed for {key}, attempting direct parse")
+                    from app.models.internal_models import safe_parse_json_dict
+                    entry_dict = safe_parse_json_dict(entry_json, default={}, log_errors=False)
+                    if entry_dict:
+                        decrypted_dict = encryption_service.decrypt_audit_entry(entry_dict)
+                        return AuditEntry(**decrypted_dict)
+                    return None
+            else:
+                # Already a dict from Redis
+                decrypted_dict = encryption_service.decrypt_audit_entry(entry_json)
+                return AuditEntry(**decrypted_dict)
+        except Exception as e:
+            logger.error(f"Failed to parse audit entry {key}: {e}")
+            return None
     
     async def log(
         self,
@@ -163,15 +215,20 @@ class AuditLogger:
             logger.error(f"Failed to store audit entry in Redis: {e}")
     
     async def _store_in_redis(self, entry: AuditEntry):
-        """Store audit entry in Redis"""
+        """Store audit entry in Redis with encryption for sensitive fields"""
         # Generate unique key
         entry_key = f"{self.redis_prefix}{entry.timestamp}:{entry.user}:{entry.action}"
         
-        # Store entry
+        # Convert to dict and encrypt sensitive fields
+        entry_dict = entry.to_dict()
+        encryption_service = get_encryption_service()
+        encrypted_entry = encryption_service.encrypt_audit_entry(entry_dict)
+        
+        # Store encrypted entry
         await redis_client.setex(
             entry_key,
             self.retention_days * 24 * 60 * 60,  # TTL in seconds
-            entry.to_json()
+            json.dumps(encrypted_entry, cls=CustomJSONEncoder)
         )
         
         # Add to user's audit trail (sorted set)
@@ -216,17 +273,14 @@ class AuditLogger:
             offset + limit - 1
         )
         
-        # Fetch entries
+        # Fetch and decrypt entries
         entries = []
         for key in entry_keys:
-            try:
-                entry_json = await redis_client.get(key)
-                if entry_json:
-                    entry_dict = json.loads(entry_json)
-                    entries.append(AuditEntry(**entry_dict))
-            except Exception as e:
-                logger.error(f"Failed to parse audit entry {key}: {e}")
-                continue
+            entry_json = await redis_client.get(key)
+            if entry_json:
+                entry = await self._decrypt_and_parse_entry(key, entry_json)
+                if entry:
+                    entries.append(entry)
         
         return entries
     
@@ -256,17 +310,14 @@ class AuditLogger:
             offset + limit - 1
         )
         
-        # Fetch entries
+        # Fetch and decrypt entries
         entries = []
         for key in entry_keys:
-            try:
-                entry_json = await redis_client.get(key)
-                if entry_json:
-                    entry_dict = json.loads(entry_json)
-                    entries.append(AuditEntry(**entry_dict))
-            except Exception as e:
-                logger.error(f"Failed to parse audit entry {key}: {e}")
-                continue
+            entry_json = await redis_client.get(key)
+            if entry_json:
+                entry = await self._decrypt_and_parse_entry(key, entry_json)
+                if entry:
+                    entries.append(entry)
         
         return entries
     
@@ -293,17 +344,14 @@ class AuditLogger:
         # Sort by timestamp (from key)
         entry_keys.sort(reverse=True)
         
-        # Fetch entries
+        # Fetch and decrypt entries
         entries = []
         for key in entry_keys[:limit]:
-            try:
-                entry_json = await redis_client.get(key)
-                if entry_json:
-                    entry_dict = json.loads(entry_json)
-                    entries.append(AuditEntry(**entry_dict))
-            except Exception as e:
-                logger.error(f"Failed to parse audit entry {key}: {e}")
-                continue
+            entry_json = await redis_client.get(key)
+            if entry_json:
+                entry = await self._decrypt_and_parse_entry(key, entry_json)
+                if entry:
+                    entries.append(entry)
         
         return entries
     
@@ -449,4 +497,40 @@ async def audit_sse_access(
         resource_id=query_id,
         details={"stream_type": "query_state"},
         ip_address=ip_address,
+    )
+
+
+async def log_audit_event(
+    event_type: str,
+    user_id: str,
+    details: Optional[Dict[str, Any]] = None,
+    severity: str = "info",
+    resource: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    correlation_id: Optional[str] = None
+):
+    """
+    General purpose audit logging function (convenience wrapper).
+    Used across multiple services.
+    """
+    # Map string severity to Enum
+    sev_enum = AuditSeverity.INFO
+    if severity.lower() == "warning":
+        sev_enum = AuditSeverity.WARNING
+    elif severity.lower() == "error":
+        sev_enum = AuditSeverity.ERROR
+    elif severity.lower() == "critical":
+        sev_enum = AuditSeverity.CRITICAL
+        
+    await audit_logger.log(
+        action=AuditAction.AGENT_INTERACTION, # Default action type for generic events
+        user=user_id,
+        severity=sev_enum,
+        resource=resource or "generic",
+        resource_id=resource_id,
+        details={
+            "original_event_type": event_type,
+            **(details or {})
+        },
+        correlation_id=correlation_id
     )

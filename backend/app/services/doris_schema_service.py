@@ -8,6 +8,7 @@ import re
 
 from app.core.client_registry import registry
 from app.core.config import settings
+from app.core.exceptions import MCPException
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,10 @@ class DorisSchemaService:
             # Get Doris MCP client
             doris_client = registry.get_doris_client()
             if not doris_client:
-                raise RuntimeError("Doris MCP client not available")
+                raise MCPException(
+                    "Doris MCP client not available",
+                    details={"client_available": False}
+                )
             
             # Optional health guard if client exposes is_healthy property
             if hasattr(doris_client, "is_healthy") and not doris_client.is_healthy:
@@ -222,7 +226,10 @@ class DorisSchemaService:
         try:
             doris_client = registry.get_doris_client()
             if not doris_client:
-                raise RuntimeError("Doris MCP client not available")
+                raise MCPException(
+                    "Doris MCP client not available",
+                    details={"client_available": False}
+                )
             
             # List all tables
             tool_result = await doris_client.call_tool(

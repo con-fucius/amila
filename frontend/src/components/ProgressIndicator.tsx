@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Loader2, XCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader } from './ui/card'
 import { Button } from './ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible'
@@ -36,6 +36,9 @@ interface ProgressIndicatorProps {
     distinctValues?: number
   }
   visible?: boolean
+  queryId?: string
+  onCancel?: (queryId: string) => void
+  cancelling?: boolean
 }
 
 export function ProgressIndicator({
@@ -44,7 +47,10 @@ export function ProgressIndicator({
   thinkingSteps,
   schemaData,
   intermediateData,
-  visible = true
+  visible = true,
+  queryId,
+  onCancel,
+  cancelling = false
 }: ProgressIndicatorProps) {
   const [isExpanded, setIsExpanded] = useState(false) // Collapsed by default
 
@@ -57,6 +63,12 @@ export function ProgressIndicator({
   const completedSteps = safeSteps.filter(s => s.status === 'completed').length
   const totalSteps = safeSteps.length
   const progress = totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 0
+
+  const handleCancel = () => {
+    if (queryId && onCancel && !cancelling) {
+      onCancel(queryId)
+    }
+  }
 
   return (
     <Card className="border-blue-200 bg-blue-50">
@@ -93,26 +105,39 @@ export function ProgressIndicator({
               </div>
               <div>
                 <div className="text-sm font-semibold text-gray-800">
-                  {currentState}
+                  {cancelling ? 'Cancelling query...' : currentState}
                 </div>
                 <div className="text-xs text-gray-600">
                   {completedSteps} of {totalSteps} steps completed
                 </div>
               </div>
             </div>
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" size="sm">
-                {isExpanded ? (
-                  <>
-                    Hide Details <ChevronUp className="ml-1 h-4 w-4" />
-                  </>
-                ) : (
-                  <>
-                    Show Details <ChevronDown className="ml-1 h-4 w-4" />
-                  </>
-                )}
-              </Button>
-            </CollapsibleTrigger>
+            <div className="flex items-center gap-2">
+              {queryId && onCancel && !cancelling && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCancel}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                >
+                  <XCircle className="mr-1 h-4 w-4" />
+                  Cancel Query
+                </Button>
+              )}
+              <CollapsibleTrigger asChild>
+                <Button variant="ghost" size="sm">
+                  {isExpanded ? (
+                    <>
+                      Hide Details <ChevronUp className="ml-1 h-4 w-4" />
+                    </>
+                  ) : (
+                    <>
+                      Show Details <ChevronDown className="ml-1 h-4 w-4" />
+                    </>
+                  )}
+                </Button>
+              </CollapsibleTrigger>
+            </div>
           </div>
         </CardHeader>
 

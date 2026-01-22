@@ -222,7 +222,7 @@ class ExternalServiceException(BaseAppException):
     def __init__(
         self,
         message: str,
-        service_name: str,
+        service_name: str = "unknown",
         details: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None
     ):

@@ -16,6 +16,8 @@ from typing import Dict, Any, Optional, Callable, TypeVar
 from functools import wraps
 from datetime import datetime, timezone
 
+from app.utils.json_encoder import CustomJSONEncoder
+
 logger = logging.getLogger(__name__)
 
 # Feature flags - all disabled by default for safety
@@ -143,7 +145,7 @@ class CachingMiddleware:
             redis = registry.get_redis_client()
             if redis:
                 import json
-                await redis.setex(f"llm_cache:{key}", ttl, json.dumps(value))
+                await redis.setex(f"llm_cache:{key}", ttl, json.dumps(value, cls=CustomJSONEncoder))
                 return
         except Exception as e:
             logger.warning(f"[Cache] Redis set failed: {e}")

@@ -114,15 +114,11 @@ export function Login() {
           {/* Test credentials hint */}
           {import.meta.env.DEV && (
             <div className="mt-6 pt-6 border-t border-gray-700">
-              <p className="text-xs text-gray-500 mb-2 text-center font-medium">Test Accounts</p>
+              <p className="text-xs text-gray-500 mb-2 text-center font-medium">Development Account</p>
               <div className="space-y-1.5 text-xs text-gray-400">
                 <div className="flex items-center justify-between px-3 py-1.5 rounded bg-gray-700/30">
                   <span>Admin:</span>
                   <code className="text-emerald-400">admin / adminpassword</code>
-                </div>
-                <div className="flex items-center justify-between px-3 py-1.5 rounded bg-gray-700/30">
-                  <span>Tester:</span>
-                  <code className="text-emerald-400">tester / testerpassword</code>
                 </div>
               </div>
             </div>

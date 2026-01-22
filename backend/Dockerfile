@@ -1,19 +1,9 @@
-# Multi-stage build for BI Agent Backend with MCP Servers
-# Stage 0: UV Image Source (Configurable for robustness)
-ARG UV_VERSION=0.9.17
-ARG UV_REGISTRY=ghcr.io
-FROM ${UV_REGISTRY}/astral-sh/uv:${UV_VERSION} AS uv_source
-
 # Stage 1: Builder - Install dependencies using uv
 # Using Docker Hub (more accessible in corporate networks than ghcr.io)
 FROM python:3.12-slim-bookworm AS builder
 
-# Install curl (required for uv installer) and uv
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv using configured source
-COPY --from=uv_source /uv /uvx /bin/
+# Install uv via pip to avoid ghcr.io DNS issues
+RUN pip install uv
 
 
 # Set environment variables for uv with retry settings for unreliable networks

@@ -51,13 +51,19 @@ async def await_approval_node(state: QueryState) -> QueryState:
     
     state["current_stage"] = "await_approval"
     
+    # Record pipeline stage entry
+    from app.services.diagnostic_service import record_query_pipeline_stage
+    
+    query_id = state.get("query_id", "unknown")
+    stage_start = datetime.now(timezone.utc)
+    
     # Track node execution
     await update_node_history(state, "await_approval", "in-progress", thinking_steps=[
         {
             "id": "approval-check",
             "content": "Checking approval status",
             "status": "in-progress",
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": stage_start.isoformat()
         }
     ])
     
@@ -73,92 +79,112 @@ async def await_approval_node(state: QueryState) -> QueryState:
     ) as span:
         span.setdefault("output", {})
         
-        query_id = state.get("query_id", "unknown")
-        
-        # Check if approval was granted
-        if state.get("approved"):
-            logger.info(f"Query {query_id} approved, proceeding to execution")
-            
-            # Add thinking step for approval
-            if "llm_metadata" not in state or not isinstance(state["llm_metadata"], dict):
-                state["llm_metadata"] = {}
-            if "thinking_steps" not in state["llm_metadata"]:
-                state["llm_metadata"]["thinking_steps"] = []
-            
-            state["llm_metadata"]["thinking_steps"].append({
-                "content": "Query approved by user, proceeding to execution",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "stage": "await_approval"
-            })
-            
-            # Determine next action based on database type
-            db_type = (state.get("database_type") or "oracle").lower()
-            sql_query = state.get("sql_query", "")
-            sql_upper = sql_query.upper()
-            
-            # Skip probe for non-Oracle or queries that don't work well with wrapping
-            skip_probe = (
-                db_type != "oracle" or
-                "GROUP BY" in sql_upper or
-                "FETCH FIRST" in sql_upper or
-                "OFFSET" in sql_upper or
-                "UNION" in sql_upper
-            )
-            
-            if skip_probe:
-                state["next_action"] = "execute"
-                logger.info(f"Skipping probe (db_type={db_type}, skip_probe={skip_probe})")
-            else:
-                state["next_action"] = "probe_sql"
-            
-            # Clear approval flags for next iteration
-            state["needs_approval"] = False
-            
-            span["output"].update({
-                "status": "approved",
-                "next_action": state["next_action"],
-            })
-            
-            # Emit SSE event
-            if ExecState:
-                await emit_state_event(state, ExecState.APPROVED, {
-                    "sql": state.get("sql_query"),
-                    "message": "Query approved, executing...",
+        try:
+            # Check if approval was granted
+            if state.get("approved"):
+                logger.info(f"Query {query_id} approved, proceeding to execution")
+                
+                # Record approval
+                stage_end = datetime.now(timezone.utc)
+                await record_query_pipeline_stage(
+                    query_id=query_id,
+                    stage="human_approval",
+                    status="completed",
+                    entered_at=stage_start,
+                    exited_at=stage_end,
+                    metadata={
+                        "approved": True,
+                        "approver": state.get("user_id")
+                    }
+                )
+                
+                # Determine next action based on database type
+                db_type = (state.get("database_type") or "oracle").lower()
+                sql_query = state.get("sql_query", "")
+                sql_upper = sql_query.upper()
+                
+                # Skip probe for non-Oracle or queries that don't work well with wrapping
+                skip_probe = (
+                    db_type != "oracle" or
+                    "GROUP BY" in sql_upper or
+                    "FETCH FIRST" in sql_upper or
+                    "OFFSET" in sql_upper or
+                    "UNION" in sql_upper
+                )
+                
+                if skip_probe:
+                    state["next_action"] = "execute"
+                    logger.info(f"Skipping probe (db_type={db_type}, skip_probe={skip_probe})")
+                else:
+                    state["next_action"] = "probe_sql"
+                
+                # Clear approval flags for next iteration
+                state["needs_approval"] = False
+                
+                span["output"].update({
+                    "status": "approved",
+                    "next_action": state["next_action"],
                 })
-            
-            await update_node_history(state, "await_approval", "completed", thinking_steps=[
-                {
-                    "id": "approval-granted",
-                    "content": "User approved the query",
-                    "status": "completed",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-            ])
-            
-            return state
-        
-        # Check if explicitly rejected (error field set)
-        if state.get("error") and "rejected" in state.get("error", "").lower():
-            logger.info(f"Query {query_id} rejected by user: {state.get('error')}")
-            
-            state["next_action"] = "rejected"
-            
-            span["output"].update({
-                "status": "rejected",
-                "reason": state.get("error"),
-            })
-            span["level"] = "WARNING"
-            
-            await update_node_history(state, "await_approval", "completed", thinking_steps=[
-                {
-                    "id": "approval-rejected",
-                    "content": f"User rejected the query: {state.get('error')}",
-                    "status": "completed",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-            ])
-            
-            return state
+                
+                # Emit SSE event
+                if ExecState:
+                    await emit_state_event(state, ExecState.APPROVED, {
+                        "sql": state.get("sql_query"),
+                        "message": "Query approved, executing...",
+                    })
+                
+                await update_node_history(state, "await_approval", "completed", thinking_steps=[
+                    {
+                        "id": "approval-granted",
+                        "content": "User approved the query",
+                        "status": "completed",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                ])
+                
+                return state
+
+            # Check if explicitly rejected (error field set)
+            if state.get("error") and "rejected" in state.get("error", "").lower():
+                logger.info(f"Query {query_id} rejected by user: {state.get('error')}")
+                
+                # Record rejection
+                stage_end = datetime.now(timezone.utc)
+                await record_query_pipeline_stage(
+                    query_id=query_id,
+                    stage="human_approval",
+                    status="failed",
+                    entered_at=stage_start,
+                    exited_at=stage_end,
+                    error_details=f"Query rejected by user: {state.get('error')}"
+                )
+                
+                state["next_action"] = "rejected"
+                
+                span["output"].update({
+                    "status": "rejected",
+                    "reason": state.get("error"),
+                })
+                span["level"] = "WARNING"
+                
+                await update_node_history(state, "await_approval", "completed", thinking_steps=[
+                    {
+                        "id": "approval-rejected",
+                        "content": f"User rejected the query: {state.get('error')}",
+                        "status": "completed",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                ])
+                
+                return state
+
+        except Exception as e:
+            logger.error(f"Error recording/processing approval stage: {e}")
+            # Fallback if recording fails but we have an approved state
+            if state.get("approved"):
+                state["next_action"] = "execute"
+                state["needs_approval"] = False
+                return state
         
         # If we reach here without approval, something went wrong
         # This shouldn't happen in normal flow - the graph should have been

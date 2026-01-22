@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 
 from app.core.client_registry import registry
+from app.core.exceptions import MCPException
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,10 @@ ORDER BY COLUMN_ID
             from app.core.config import settings
             mcp_client = registry.get_mcp_client()
             if not mcp_client:
-                raise RuntimeError("MCP client not available")
+                raise MCPException(
+                    "MCP client not available",
+                    details={"client_available": False}
+                )
             
             conn = connection_name or settings.oracle_default_connection
             
@@ -199,15 +203,27 @@ ORDER BY COLUMN_ID
                     "did_you_mean": f"Did you mean: {', '.join(suggestions)}?" if suggestions else None
                 }
             
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name) or r.get(name.upper())
+                try:
+                    return r[idx]
+                except (IndexError, TypeError):
+                    return None
+
             # Build schema for this table
             schema_data = {"tables": {}, "views": {}}
             columns = []
             
             for row in rows:
-                col_name = row[1]  # COLUMN_NAME
-                data_type = row[2]  # DATA_TYPE
-                nullable = row[3] == "Y"  # NULLABLE
+                col_name = get_val(row, 1, "COLUMN_NAME")
+                data_type = get_val(row, 2, "DATA_TYPE")
+                nullable_val = get_val(row, 3, "NULLABLE")
+                nullable = nullable_val == "Y"
                 
+                if not col_name:
+                    continue
+                    
                 # Check if column needs quoting
                 needs_quoting = col_name != col_name.upper() or not col_name.replace('_', '').isalnum()
                 
@@ -268,7 +284,13 @@ WHERE OWNER = USER AND TABLE_NAME NOT LIKE 'BIN$%' AND TABLE_NAME NOT LIKE 'SYS_
                 return []
             
             rows = result.get("results", {}).get("rows", [])
-            all_tables = [row[0] for row in rows if row]
+            
+            def get_row_val(r, idx):
+                if isinstance(r, dict):
+                    return next(iter(r.values()))
+                return r[idx]
+                
+            all_tables = [get_row_val(row, 0) for row in rows if row]
             
             # Generate suggestions using fuzzy matching
             suggestions = generate_did_you_mean_suggestions(table_name, all_tables, max_suggestions=3)
@@ -319,7 +341,13 @@ WHERE OWNER = USER AND TABLE_NAME = '{table_name.upper()}'
                 return []
             
             rows = result.get("results", {}).get("rows", [])
-            all_columns = [row[0] for row in rows if row]
+            
+            def get_row_val(r, idx):
+                if isinstance(r, dict):
+                    return next(iter(r.values()))
+                return r[idx]
+                
+            all_columns = [get_row_val(row, 0) for row in rows if row]
             
             # Generate suggestions using fuzzy matching
             suggestions = generate_did_you_mean_suggestions(column_name, all_columns, max_suggestions=3)
@@ -435,7 +463,10 @@ WHERE OWNER = USER AND TABLE_NAME = '{table_name.upper()}'
         from app.core.config import settings
         mcp_client = registry.get_mcp_client()
         if not mcp_client:
-            raise RuntimeError("MCP client not available")
+            raise MCPException(
+                "MCP client not available",
+                details={"client_available": False}
+            )
         
         try:
             conn = connection_name or settings.oracle_default_connection
@@ -464,7 +495,10 @@ ORDER BY TABLE_NAME, COLUMN_ID
             
             if result.get("status") != "success":
                 logger.error(f"Schema query failed: {result.get('message')}")
-                raise RuntimeError(f"Schema query failed: {result.get('message')}")
+                raise MCPException(
+                    f"Schema query failed: {result.get('message')}",
+                    details={"result": result}
+                )
             
             rows = result.get("results", {}).get("rows", [])
             
@@ -473,17 +507,29 @@ ORDER BY TABLE_NAME, COLUMN_ID
                 logger.warning(f"No schema found for requested tables: {table_names}")
             elif not rows:
                 logger.error(f"No schema data returned from ALL_TAB_COLUMNS")
-                # raise RuntimeError("No schema data found") # Don't raise, return empty
+                # Don't raise MCPException, return empty schema instead
             
             # Build schema_data from rows
             schema_data = {"tables": {}, "views": {}}
             
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name) or r.get(name.upper())
+                try:
+                    return r[idx]
+                except (IndexError, TypeError):
+                    return None
+
             for row in rows:
-                table_name = row[0]
-                column_name = row[1]
-                data_type = row[2]
-                nullable = row[3] == "Y"
+                table_name = get_val(row, 0, "TABLE_NAME")
+                column_name = get_val(row, 1, "COLUMN_NAME")
+                data_type = get_val(row, 2, "DATA_TYPE")
+                nullable_val = get_val(row, 3, "NULLABLE")
+                nullable = nullable_val == "Y"
                 
+                if not table_name or not column_name:
+                    continue
+                    
                 if table_name not in schema_data["tables"]:
                     schema_data["tables"][table_name] = []
                 

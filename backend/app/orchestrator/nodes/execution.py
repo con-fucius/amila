@@ -40,9 +40,15 @@ async def execute_query_node(state: QueryState) -> QueryState:
 
     state["current_stage"] = "execute"
     
+    # Record pipeline stage entry
+    from app.services.diagnostic_service import record_query_pipeline_stage
+    
+    query_id = state.get("query_id", "unknown")
+    stage_start = datetime.now(timezone.utc)
+    
     # Track node execution
     await update_node_history(state, "execute", "in-progress", thinking_steps=[
-        {"id": "step-1", "content": "Executing SQL query on database", "status": "in-progress", "timestamp": datetime.now(timezone.utc).isoformat()}
+        {"id": "step-1", "content": "Executing SQL query on database", "status": "in-progress", "timestamp": stage_start.isoformat()}
     ])
 
     async with langfuse_span(
@@ -55,7 +61,39 @@ async def execute_query_node(state: QueryState) -> QueryState:
         metadata={"stage": "execute"},
     ) as span:
         span.setdefault("output", {})
-        result = await _execute_query_node_inner(state, span)
+        
+        try:
+            result = await _execute_query_node_inner(state, span)
+            
+            # Record completion
+            stage_end = datetime.now(timezone.utc)
+            execution_result = result.get("execution_result", {})
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="execution",
+                status="completed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                metadata={
+                    "row_count": execution_result.get("row_count", 0),
+                    "execution_time_ms": execution_result.get("execution_time_ms"),
+                    "database_type": state.get("database_type")
+                }
+            )
+            
+        except Exception as e:
+            # Record failure
+            stage_end = datetime.now(timezone.utc)
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="execution",
+                status="failed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                error_details=str(e)
+            )
+            raise
+        
         span["output"]["next_action"] = result.get("next_action")
         return result
 

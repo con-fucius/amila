@@ -799,6 +799,7 @@ No parameters required. Returns connection status, configuration, and diagnostic
                         "catalog_name": {"type": "string", "description": "Catalog name"},
                         "max_rows": {"type": "integer", "description": "Maximum number of rows to return", "default": 100},
                         "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
+                        "query_id": {"type": "string", "description": "Optional query ID for cancellation"},
                     },
                     "required": ["sql"],
                 },
@@ -1357,6 +1358,22 @@ No parameters required. Returns connection status, configuration, and diagnostic
                     "properties": {},
                 },
             ),
+            Tool(
+                name="kill_query",
+                description="""[Function Description]: Kill a running query by its Query ID.
+
+[Parameter Content]:
+
+- query_id (string) [Required] - The ID of the query to kill.
+""",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query_id": {"type": "string", "description": "Query ID to kill"},
+                    },
+                    "required": ["query_id"],
+                },
+            ),
         ]
         
         return tools
@@ -1429,6 +1446,8 @@ No parameters required. Returns connection status, configuration, and diagnostic
                 result = await self._analyze_slow_queries_topn_tool(arguments)
             elif name == "analyze_resource_growth_curves":
                 result = await self._analyze_resource_growth_curves_tool(arguments)
+            elif name == "kill_query":
+                result = await self._kill_query_tool(arguments)
             # ADBC Query Tools
             elif name == "exec_adbc_query":
                 result = await self._exec_adbc_query_tool(arguments)
@@ -1436,7 +1455,7 @@ No parameters required. Returns connection status, configuration, and diagnostic
                 result = await self._get_adbc_connection_info_tool(arguments)
             else:
                 raise ValueError(f"Unknown tool: {name}")
-            
+
             execution_time = time.time() - start_time
             
             # Add execution information
@@ -1467,10 +1486,11 @@ No parameters required. Returns connection status, configuration, and diagnostic
         catalog_name = arguments.get("catalog_name")
         max_rows = arguments.get("max_rows", 100)
         timeout = arguments.get("timeout", 30)
+        query_id = arguments.get("query_id")
         
         # Delegate to metadata extractor for processing
         return await self.metadata_extractor.exec_query_for_mcp(
-            sql, db_name, catalog_name, max_rows, timeout
+            sql, db_name, catalog_name, max_rows, timeout, query_id
         )
     
     async def _get_table_schema_tool(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1915,3 +1935,19 @@ No parameters required. Returns connection status, configuration, and diagnostic
         """ADBC connection information tool routing"""
         # Delegate to ADBC query tools for processing
         return await self.adbc_query_tools.get_adbc_connection_info()
+
+    async def _kill_query_tool(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Tool to kill a running query"""
+        query_id = arguments.get("query_id")
+        if not query_id:
+            return {"success": False, "error": "Missing query_id parameter"}
+            
+        try:
+            success = await self.connection_manager.kill_query(query_id)
+            if success:
+                return {"success": True, "message": f"Query {query_id} kill signal sent successfully"}
+            else:
+                return {"success": False, "error": f"Failed to kill query {query_id} (not found or already finished)"}
+        except Exception as e:
+            logger.error(f"Error killing query {query_id}: {e}")
+            return {"success": False, "error": f"Error killing query: {str(e)}"}

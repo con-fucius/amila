@@ -93,12 +93,17 @@ class SkillsLoaderService:
         Load database-specific skills
         
         Args:
-            database_type: "oracle" or "doris"
+            database_type: "oracle", "doris", or "postgres"/"postgresql"
             
         Returns:
             Database-specific skill configuration
         """
-        skill_name = f"{database_type.lower()}_query_skills"
+        # Normalize postgresql to postgres
+        db_type = database_type.lower()
+        if db_type == "postgresql":
+            db_type = "postgres"
+        
+        skill_name = f"{db_type}_query_skills"
         return cls.load_skill(skill_name)
     
     @classmethod
@@ -112,12 +117,17 @@ class SkillsLoaderService:
         Get SQL dialect hints for prompt enhancement
         
         Args:
-            database_type: "oracle" or "doris"
+            database_type: "oracle", "doris", or "postgres"/"postgresql"
             
         Returns:
             Formatted string with dialect rules for LLM prompt
         """
-        skills = cls.load_database_skills(database_type)
+        # Normalize postgresql to postgres
+        db_type = database_type.lower()
+        if db_type == "postgresql":
+            db_type = "postgres"
+        
+        skills = cls.load_database_skills(db_type)
         if not skills:
             return ""
         
@@ -126,7 +136,7 @@ class SkillsLoaderService:
         # Add dialect rules
         dialect_rules = skills.get("dialect_rules", {})
         if dialect_rules:
-            hints.append(f"=== {database_type.upper()} SQL DIALECT RULES ===")
+            hints.append(f"=== {db_type.upper()} SQL DIALECT RULES ===")
             for rule_name, rule_data in dialect_rules.items():
                 if isinstance(rule_data, dict):
                     pattern = rule_data.get("pattern") or rule_data.get("function", "")

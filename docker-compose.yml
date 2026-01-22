@@ -41,6 +41,18 @@ services:
       - DORIS_DB_USER=${DORIS_DB_USER:-root}
       - DORIS_DB_PASSWORD=${DORIS_DB_PASSWORD:-}
       - DORIS_DB_DATABASE=${DORIS_DB_DATABASE:-information_schema}
+      - POSTGRES_ENABLED=${POSTGRES_ENABLED:-false}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DATABASE=${POSTGRES_DATABASE:-postgres}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_READ_ONLY=${POSTGRES_READ_ONLY:-true}
+      - QLIK_BASE_URL=${QLIK_BASE_URL:-}
+      - QLIK_AUTH_USER=${QLIK_AUTH_USER:-}
+      - SUPERSET_BASE_URL=${SUPERSET_BASE_URL:-}
+      - SUPERSET_USERNAME=${SUPERSET_USERNAME:-}
+      - SUPERSET_PASSWORD=${SUPERSET_PASSWORD:-}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-redispass123}
@@ -223,11 +235,32 @@ services:
       retries: 10
       start_period: 120s
 
+  # PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: bi-agent-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DATABASE:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bi-agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - full
+
   # Celery Worker
   celery-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: bi-agent-backend:${VERSION:-1.0.0-alpha}
     container_name: bi-agent-celery-worker
     command: ["python", "-m", "celery", "-A", "app.core.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
     env_file:
@@ -251,9 +284,7 @@ services:
 
   # Flower (Celery monitoring)
   flower:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: bi-agent-backend:${VERSION:-1.0.0-alpha}
     container_name: bi-agent-flower
     command: ["python", "-m", "celery", "-A", "app.core.celery_app", "flower", "--port=5555"]
     ports:
@@ -309,3 +340,5 @@ volumes:
     name: bi-agent-grafana-data
   backend_data:
     name: bi-agent-backend-data
+  postgres_data:
+    name: bi-agent-postgres-data

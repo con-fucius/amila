@@ -32,7 +32,8 @@ Write-Host ""
 # Function to start backend
 function Start-Backend {
     Write-Host "Starting Backend..." -ForegroundColor Yellow
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd backend; python main.py" -WindowStyle Normal
+    # Using virtual environment
+    Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd backend; .\.venv\Scripts\activate; python main.py" -WindowStyle Normal
 }
 
 # Function to start frontend

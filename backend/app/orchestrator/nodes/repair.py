@@ -162,9 +162,10 @@ async def _repair_sql_node_inner(state: QueryState, span: dict) -> QueryState:
 
     logger.info(f"Using LLM for generic SQL repair...")
     llm = get_llm()
-
+    db_name = "PostgreSQL" if db_type in ["postgres", "postgresql"] else ("Doris" if db_type == "doris" else "Oracle")
+    
     repair_prompt = f"""
-You are an Oracle SQL specialist. The previous SQL failed with this Oracle error:
+You are an {db_name} SQL specialist. The previous SQL failed with this error:
 ---
 {error_text}
 ---
@@ -174,11 +175,12 @@ Original user request:
 Database schema (use only these tables/columns):
 {str(schema_context)[:4000]}
 
-Repair the SQL to a valid Oracle 12c+ query that fulfills the user request. Rules:
+Repair the SQL to a valid {db_name} query that fulfills the user request. Rules:
 - Prefer a single WITH (CTE) query as needed; ensure each CTE has a full SELECT body.
-- Use TRUNC(TO_DATE(DATE,'DD/MM/YYYY'),'Q') for quarters if DATE exists; else derive from MONTH with CEIL(MONTH/3).
+- Use {"TO_CHAR(date_column, 'Q')" if db_type in ["postgres", "postgresql", "doris", "oracle"] else "appropriate quarter function"} for quarters.
 - If table not found, check if it exists in schema above and use exact name.
 - Quote reserved words like DATE, USER, LEVEL.
+- Use {"LIMIT n (NOT FETCH FIRST)" if db_type in ["postgres", "postgresql", "doris"] else "FETCH FIRST n ROWS ONLY"} for row limiting.
 - Return ONLY the SQL. No markdown, no commentary.
 """
     

@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 import json
 
+from app.utils.json_encoder import CustomJSONEncoder
+from app.core.structured_logging import get_iso_timestamp
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,8 +44,8 @@ class QueryMetadata:
     user_id: str
     username: str
     session_id: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=get_iso_timestamp)
+    updated_at: str = field(default_factory=get_iso_timestamp)
     status: str = "received"
     database_type: Optional[str] = None
     trace_id: Optional[str] = None
@@ -78,7 +81,7 @@ class QueryStateEvent:
     def to_sse_message(self) -> str:
         """Convert to SSE message format"""
         data = asdict(self)
-        return f"data: {json.dumps(data)}\n\n"
+        return f"data: {json.dumps(data, cls=CustomJSONEncoder)}\n\n"
 class QueryStateManager:
     """
     Manages query execution states and enables SSE streaming
@@ -140,11 +143,16 @@ class QueryStateManager:
             username: Username for display/logging
             session_id: Optional session identifier
             database_type: Database type (oracle/doris)
-            trace_id: Optional trace ID for observability
+            trace_id: Optional trace ID for observability (will be validated)
             
         Returns:
             QueryMetadata object
         """
+        # Validate trace_id if provided
+        if trace_id:
+            from app.core.structured_logging import validate_and_fix_trace_id
+            trace_id = validate_and_fix_trace_id(trace_id)
+        
         async with self._metadata_lock:
             metadata = QueryMetadata(
                 query_id=query_id,
@@ -201,7 +209,7 @@ class QueryStateManager:
         async with self._metadata_lock:
             if query_id in self._query_metadata:
                 self._query_metadata[query_id].status = new_state.value
-                self._query_metadata[query_id].updated_at = datetime.now(timezone.utc).isoformat()
+                self._query_metadata[query_id].updated_at = get_iso_timestamp()
         
         # Create state change event
         # Attach trace_id if provided in metadata
@@ -245,7 +253,7 @@ class QueryStateManager:
         event = QueryStateEvent(
             query_id=query_id,
             state=new_state,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=get_iso_timestamp(),
             metadata=meta,
             thinking_steps=meta.get("thinking_steps"),
             todo_items=meta.get("todo_items"),
@@ -318,7 +326,7 @@ class QueryStateManager:
                 initial_event = QueryStateEvent(
                     query_id=query_id,
                     state=current_state,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=get_iso_timestamp(),
                     metadata={"initial": True}
                 )
                 yield initial_event.to_sse_message()

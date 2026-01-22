@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 trace_propagator = TraceContextTextMapPropagator()
 
+# Import SessionManager for zombie query killing
+from .session_manager import session_manager
+
 
 class MCPError(Exception):
     """Base exception for MCP-related errors"""
@@ -517,13 +520,14 @@ class SQLclMCPClient:
             return {"status": "connected", "connection_name": connection_name}
         return await self.connect_database(connection_name)
 
-    async def execute_sql(self, sql: str, connection_name: Optional[str] = None) -> Dict[str, Any]:
+    async def execute_sql(self, sql: str, connection_name: Optional[str] = None, query_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Execute SQL query with audit logging
+        Execute SQL query with audit logging and cancellation support
         
         Args:
             sql: SQL query to execute
             connection_name: Optional connection name (uses current if not specified)
+            query_id: Optional unique query identifier for cancellation tracking
             
         Returns:
             Dictionary with query results or error
@@ -541,10 +545,161 @@ class SQLclMCPClient:
         if ensured.get("status") != "connected":
             return {"status": "error", "message": ensured.get("message", "Failed to connect"), "sql": sql}
         
-        # Add LLM audit marker
-        audit_sql = f"/* LLM in use - BI Agent MVP */ {sql}"
+        # Add LLM audit marker and session tagging for V$SESSION tracking
+        # MODULE and ACTION help identify the query in V$SESSION for database-level kill
+        module_tag = f"BI_Agent_{query_id[:12] if query_id else 'unknown'}"
+        action_tag = f"Query_{int(time.time())}"
         
+        # Set MODULE and ACTION for V$SESSION tracking
+        session_tag_sql = f"""
+BEGIN
+    DBMS_APPLICATION_INFO.SET_MODULE(module_name => '{module_tag}', action_name => '{action_tag}');
+END;
+/
+"""
+        
+        audit_sql = f"/* LLM in use - BI Agent MVP - Query ID: {query_id or 'N/A'} */ {sql}"
+        
+        # Register for cancellation if query_id provided
+        if query_id:
+            async def cancel_handler():
+                """
+                Cancel handler for Oracle queries with database-level kill.
+                
+                Strategy:
+                1. Try database-level kill using V$SESSION (graceful)
+                2. Fall back to process termination if database kill fails
+                """
+                logger.warning(f"Cancelling Oracle query {query_id[:8]}... - attempting database-level kill")
+                
+                # Try database-level kill first (graceful)
+                try:
+                    # Query V$SESSION to find the session using MODULE tag
+                    find_session_sql = f"""
+SELECT sid, serial#, status
+FROM v$session
+WHERE module = '{module_tag}'
+AND status = 'ACTIVE'
+"""
+                    
+                    # Execute query to find session (use a separate quick call)
+                    session_info_response = await self._send_request(
+                        MCPRequest(
+                            method="tools/call",
+                            params={
+                                "name": "run-sql",
+                                "arguments": {
+                                    "sql": find_session_sql,
+                                    "connection": conn_name
+                                }
+                            }
+                        ),
+                        timeout=5  # Quick timeout for session lookup
+                    )
+                    
+                    if session_info_response and not session_info_response.is_error():
+                        # Parse session info
+                        session_data = self._parse_sql_results(session_info_response.result, find_session_sql)
+                        
+                        if session_data.get("status") == "success":
+                            results = session_data.get("results", {})
+                            rows = results.get("rows", [])
+                            
+                            if rows and len(rows) > 0:
+                                # Found the session - kill it
+                                sid = rows[0][0]
+                                serial = rows[0][1]
+                                
+                                kill_sql = f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE"
+                                logger.info(f"Killing Oracle session {sid},{serial} for query {query_id[:8]}...")
+                                
+                                kill_response = await self._send_request(
+                                    MCPRequest(
+                                        method="tools/call",
+                                        params={
+                                            "name": "run-sql",
+                                            "arguments": {
+                                                "sql": kill_sql,
+                                                "connection": conn_name
+                                            }
+                                        }
+                                    ),
+                                    timeout=10
+                                )
+                                
+                                if kill_response and not kill_response.is_error():
+                                    logger.info(f"Successfully killed Oracle session for query {query_id[:8]}...")
+                                    return
+                                else:
+                                    logger.warning(f"Database kill failed, falling back to process termination")
+                            else:
+                                logger.warning(f"No active session found with MODULE={module_tag}, falling back to process termination")
+                        else:
+                            logger.warning(f"Failed to query V$SESSION, falling back to process termination")
+                    else:
+                        logger.warning(f"Failed to find session info, falling back to process termination")
+                        
+                except Exception as e:
+                    logger.error(f"Database-level kill failed: {e}, falling back to process termination")
+                
+                # Fallback: Terminate SQLcl process
+                logger.warning(f"Falling back to process termination for query {query_id[:8]}...")
+                if self.process:
+                    try:
+                        # Terminate process - this will abort the running SQL
+                        self.process.terminate()
+                        logger.info(f"SQLcl process terminated for query {query_id[:8]}...")
+                        
+                        # Give it a moment to terminate gracefully
+                        await asyncio.sleep(0.5)
+                        
+                        # Force kill if still running
+                        if self.process.poll() is None:
+                            self.process.kill()
+                            logger.warning(f"SQLcl process force-killed for query {query_id[:8]}...")
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to terminate SQLcl process for query {query_id[:8]}...: {e}")
+            
+            session_manager.register_query(
+                query_id, 
+                {
+                    'type': 'oracle', 
+                    'connection': conn_name, 
+                    'pid': self.process.pid if self.process else None,
+                    'sql_preview': sql[:100],
+                    'module': module_tag,
+                    'action': action_tag,
+                    'registered_at': time.time()
+                }, 
+                cancel_handler
+            )
+
         try:
+            # Set session tags first
+            if query_id:
+                try:
+                    tag_response = await self._send_request(
+                        MCPRequest(
+                            method="tools/call",
+                            params={
+                                "name": "run-sql",
+                                "arguments": {
+                                    "sql": session_tag_sql,
+                                    "connection": conn_name
+                                }
+                            }
+                        ),
+                        timeout=5  # Quick timeout for session tagging
+                    )
+                    if tag_response and not tag_response.is_error():
+                        logger.debug(f"Session tags set for query {query_id[:8]}...")
+                    else:
+                        logger.warning(f"Failed to set session tags, continuing anyway")
+                except Exception as tag_err:
+                    logger.warning(f"Session tagging failed: {tag_err}, continuing anyway")
+            
+            # Execute the actual query
             response = await self._send_request(
                 MCPRequest(
                     method="tools/call",
@@ -580,6 +735,9 @@ class SQLclMCPClient:
                 "error_type": type(e).__name__,
                 "sql": sql
             }
+        finally:
+            if query_id:
+                session_manager.unregister_query(query_id)
     
     async def execute_sqlcl_command(self, command: str, connection_name: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -650,12 +808,23 @@ class SQLclMCPClient:
                     json.dumps(result, indent=2),
                 )
             
+            if result and (result.get("isError") or "error" in result):
+                error_msg = "Unknown MCP result error"
+                if "content" in result and isinstance(result["content"], list) and result["content"]:
+                    error_msg = result["content"][0].get("text", error_msg)
+                return {"status": "error", "message": str(error_msg), "sql": sql}
+
             if result and "content" in result:
                 content = result["content"]
                 if isinstance(content, list) and len(content) > 0:
                     text_payload = content[0].get("text", "").strip()
 
                     if text_payload:
+                        # Detect common error headers that might be treated as CSV headers
+                        err_prefixes = ["ERROR", "ORA-", "PLS-", "SP2-"]
+                        if any(text_payload.startswith(p) for p in err_prefixes):
+                            first_line = text_payload.splitlines()[0]
+                            return {"status": "error", "message": first_line, "sql": sql}
                         # Detect ORA- errors early
                         if "ORA-" in text_payload:
                             # Try to extract the first ORA- line

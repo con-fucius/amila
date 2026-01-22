@@ -1,0 +1,192 @@
+/**
+ * Button Hierarchy Standardization
+ * Establishes clear Primary > Secondary > Tertiary hierarchy
+ * Addresses improvement: Button Hierarchy Mismatch
+ */
+
+/* ============================================
+   PRIMARY BUTTONS (Filled)
+   Use for: Main actions (Run Query, Submit, Save)
+   ============================================ */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 border border-transparent rounded-lg shadow-sm transition-all duration-200;
+  @apply hover:bg-blue-700 hover:shadow-md;
+  @apply focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2;
+  @apply active:bg-blue-800 active:scale-95;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600 disabled:hover:shadow-sm;
+}
+
+.btn-primary-lg {
+  @apply btn-primary px-6 py-3 text-base;
+}
+
+.btn-primary-sm {
+  @apply btn-primary px-3 py-1.5 text-xs;
+}
+
+/* Primary Variants */
+.btn-primary-success {
+  @apply btn-primary bg-green-600 hover:bg-green-700 focus:ring-green-500 active:bg-green-800;
+}
+
+.btn-primary-danger {
+  @apply btn-primary bg-red-600 hover:bg-red-700 focus:ring-red-500 active:bg-red-800;
+}
+
+/* ============================================
+   SECONDARY BUTTONS (Outline)
+   Use for: Alternative actions (Export, Visualize, Cancel)
+   ============================================ */
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-700 bg-white border-2 border-gray-300 rounded-lg transition-all duration-200;
+  @apply hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900;
+  @apply focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2;
+  @apply active:bg-gray-100 active:scale-95;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:border-gray-300;
+}
+
+.btn-secondary-lg {
+  @apply btn-secondary px-6 py-3 text-base;
+}
+
+.btn-secondary-sm {
+  @apply btn-secondary px-3 py-1.5 text-xs;
+}
+
+/* Secondary Variants */
+.btn-secondary-blue {
+  @apply btn-secondary text-blue-700 border-blue-300 hover:bg-blue-50 hover:border-blue-400 focus:ring-blue-400;
+}
+
+.btn-secondary-green {
+  @apply btn-secondary text-green-700 border-green-300 hover:bg-green-50 hover:border-green-400 focus:ring-green-400;
+}
+
+.btn-secondary-red {
+  @apply btn-secondary text-red-700 border-red-300 hover:bg-red-50 hover:border-red-400 focus:ring-red-400;
+}
+
+/* ============================================
+   TERTIARY BUTTONS (Ghost)
+   Use for: Low-priority actions (View Details, More Options)
+   ============================================ */
+.btn-tertiary {
+  @apply inline-flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 bg-transparent border border-transparent rounded-lg transition-all duration-200;
+  @apply hover:bg-gray-100 hover:text-gray-900;
+  @apply focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-2;
+  @apply active:bg-gray-200 active:scale-95;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent;
+}
+
+.btn-tertiary-lg {
+  @apply btn-tertiary px-4 py-2.5 text-base;
+}
+
+.btn-tertiary-sm {
+  @apply btn-tertiary px-2 py-1 text-xs;
+}
+
+/* Tertiary Variants */
+.btn-tertiary-blue {
+  @apply btn-tertiary text-blue-600 hover:bg-blue-50 hover:text-blue-700 focus:ring-blue-300;
+}
+
+.btn-tertiary-red {
+  @apply btn-tertiary text-red-600 hover:bg-red-50 hover:text-red-700 focus:ring-red-300;
+}
+
+/* ============================================
+   ICON BUTTONS
+   Use for: Icon-only actions (Close, Menu, Settings)
+   ============================================ */
+.btn-icon {
+  @apply inline-flex items-center justify-center p-2 text-gray-600 bg-transparent border border-transparent rounded-lg transition-all duration-200;
+  @apply hover:bg-gray-100 hover:text-gray-900;
+  @apply focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-2;
+  @apply active:bg-gray-200 active:scale-95;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-icon-lg {
+  @apply btn-icon p-3;
+}
+
+.btn-icon-sm {
+  @apply btn-icon p-1.5;
+}
+
+/* ============================================
+   BUTTON GROUPS
+   Use for: Related actions (Toolbar, Action Bar)
+   ============================================ */
+.btn-group {
+  @apply inline-flex items-center gap-2;
+}
+
+.btn-group-tight {
+  @apply inline-flex items-center;
+}
+
+.btn-group-tight > button:not(:first-child) {
+  @apply -ml-px rounded-l-none;
+}
+
+.btn-group-tight > button:not(:last-child) {
+  @apply rounded-r-none;
+}
+
+/* ============================================
+   LOADING STATE
+   ============================================ */
+.btn-loading {
+  @apply relative pointer-events-none;
+}
+
+.btn-loading::after {
+  content: '';
+  @apply absolute inset-0 flex items-center justify-center;
+  @apply bg-inherit rounded-lg;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 1 1-6.219-8.56'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================
+   USAGE EXAMPLES & GUIDELINES
+   ============================================ */
+
+/*
+HIERARCHY RULES:
+1. Only ONE primary button per view/section
+2. Secondary buttons for alternative actions
+3. Tertiary buttons for low-priority actions
+4. Icon buttons for utility actions
+
+CORRECT USAGE:
+<div class="btn-group">
+  <button class="btn-primary">Run Query</button>
+  <button class="btn-secondary">Export</button>
+  <button class="btn-tertiary">View Details</button>
+</div>
+
+INCORRECT USAGE (Multiple primaries):
+<div class="btn-group">
+  <button class="btn-primary">Run Query</button>
+  <button class="btn-primary">Export</button>  ❌ Should be secondary
+</div>
+
+CONTEXT-SPECIFIC PRIMARIES:
+- Query Editor: "Run Query" (primary), "Export" (secondary)
+- Approval Dialog: "Approve" (primary-success), "Reject" (secondary-red)
+- Settings: "Save Changes" (primary), "Cancel" (secondary)
+*/

@@ -1,13 +1,14 @@
 import json
 import logging
 import asyncio
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from typing import Dict, Any, Optional, List
 
 import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from app.core.config import settings
+from app.core.session_manager import session_manager # Import session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -239,12 +240,51 @@ class DorisMCPClient:
                 "exception_type": exc_type,
             }
 
-    async def execute_sql(self, sql: str) -> Dict[str, Any]:
+    async def execute_sql(self, sql: str, query_id: Optional[str] = None) -> Dict[str, Any]:
         """Execute SQL via Doris exec_query tool and normalize result for orchestrator."""
-        tool_result = await self.call_tool(
-            self.exec_query_tool,
-            {"sql": sql, "max_rows": 1000, "timeout": 60},
-        )
+        
+        # Register for cancellation if query_id provided
+        if query_id:
+            async def cancel_handler():
+                """
+                Cancel handler for Doris queries.
+                Uses the Doris MCP kill_query tool to cancel the running query.
+                """
+                logger.warning(f"Cancelling Doris query {query_id[:8]}... - sending kill signal")
+                try:
+                    # Use Doris MCP kill_query tool
+                    kill_result = await self.call_tool("kill_query", {"query_id": query_id})
+                    
+                    if kill_result.get("status") == "success":
+                        logger.info(f"Successfully killed Doris query {query_id[:8]}...")
+                    else:
+                        logger.warning(f"Kill query returned non-success: {kill_result.get('error', 'Unknown error')}")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to kill Doris query {query_id[:8]}...: {e}")
+            
+            session_manager.register_query(
+                query_id, 
+                {
+                    'type': 'doris', 
+                    'sql_preview': sql[:100],
+                    'registered_at': datetime.now(timezone.utc).isoformat()
+                }, 
+                cancel_handler
+            )
+
+        try:
+            tool_args = {"sql": sql, "max_rows": 1000, "timeout": 60}
+            if query_id:
+                tool_args["query_id"] = query_id
+
+            tool_result = await self.call_tool(
+                self.exec_query_tool,
+                tool_args,
+            )
+        finally:
+            if query_id:
+                session_manager.unregister_query(query_id)
 
         if tool_result.get("status") != "success":
             return {

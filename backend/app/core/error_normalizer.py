@@ -359,23 +359,181 @@ class DorisErrorNormalizer:
             return error_msg or "An error occurred while querying Doris database"
 
 
-def normalize_database_error(database_type: str, error_response: Dict[str, Any]) -> NormalizedError:
+class PostgreSQLErrorNormalizer:
+    """
+    Normalizes PostgreSQL errors from psycopg3 exceptions
+    Handles PostgreSQL-specific error codes and patterns
+    """
+    
+    POSTGRES_ERROR_MAP = {
+        "42P01": (ErrorCategory.INVALID_IDENTIFIER, False, "Table does not exist"),
+        "42703": (ErrorCategory.INVALID_IDENTIFIER, False, "Column does not exist"),
+        "42883": (ErrorCategory.INVALID_IDENTIFIER, False, "Function does not exist"),
+        "42P02": (ErrorCategory.INVALID_IDENTIFIER, False, "Parameter does not exist"),
+        
+        "42601": (ErrorCategory.SYNTAX_ERROR, False, "Syntax error"),
+        "42804": (ErrorCategory.SYNTAX_ERROR, False, "Datatype mismatch"),
+        "42P18": (ErrorCategory.SYNTAX_ERROR, False, "Indeterminate datatype"),
+        
+        "42501": (ErrorCategory.PERMISSION_DENIED, False, "Insufficient privilege"),
+        "28P01": (ErrorCategory.PERMISSION_DENIED, False, "Invalid password"),
+        "28000": (ErrorCategory.PERMISSION_DENIED, False, "Invalid authorization specification"),
+        
+        "08000": (ErrorCategory.CONNECTION_ERROR, True, "Connection exception"),
+        "08003": (ErrorCategory.CONNECTION_ERROR, True, "Connection does not exist"),
+        "08006": (ErrorCategory.CONNECTION_ERROR, True, "Connection failure"),
+        "08001": (ErrorCategory.CONNECTION_ERROR, True, "Unable to establish connection"),
+        "08004": (ErrorCategory.CONNECTION_ERROR, True, "Server rejected connection"),
+        "08007": (ErrorCategory.CONNECTION_ERROR, True, "Transaction resolution unknown"),
+        
+        "57014": (ErrorCategory.TIMEOUT, True, "Query canceled"),
+        "57P01": (ErrorCategory.TIMEOUT, True, "Admin shutdown"),
+        "57P02": (ErrorCategory.TIMEOUT, True, "Crash shutdown"),
+        "57P03": (ErrorCategory.TIMEOUT, True, "Cannot connect now"),
+        
+        "53000": (ErrorCategory.RESOURCE_EXHAUSTED, True, "Insufficient resources"),
+        "53100": (ErrorCategory.RESOURCE_EXHAUSTED, True, "Disk full"),
+        "53200": (ErrorCategory.RESOURCE_EXHAUSTED, True, "Out of memory"),
+        "53300": (ErrorCategory.RESOURCE_EXHAUSTED, True, "Too many connections"),
+        
+        "23000": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Integrity constraint violation"),
+        "23001": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Restrict violation"),
+        "23502": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Not null violation"),
+        "23503": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Foreign key violation"),
+        "23505": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Unique violation"),
+        "23514": (ErrorCategory.CONSTRAINT_VIOLATION, False, "Check violation"),
+    }
+    
+    @staticmethod
+    def normalize(error: Exception) -> NormalizedError:
+        """
+        Normalize PostgreSQL error from psycopg3 exception
+        
+        Args:
+            error: Exception from psycopg3
+            
+        Returns:
+            NormalizedError instance
+        """
+        error_msg = str(error)
+        error_code = None
+        
+        try:
+            import psycopg.errors
+            
+            if hasattr(error, 'sqlstate'):
+                error_code = error.sqlstate
+            elif hasattr(error, 'pgcode'):
+                error_code = error.pgcode
+            
+            if error_code and error_code in PostgreSQLErrorNormalizer.POSTGRES_ERROR_MAP:
+                category, should_retry, description = PostgreSQLErrorNormalizer.POSTGRES_ERROR_MAP[error_code]
+                user_message = f"PostgreSQL Error {error_code}: {description}"
+            else:
+                category, should_retry = PostgreSQLErrorNormalizer._classify_unknown_error(error, error_msg)
+                user_message = error_msg
+                
+        except ImportError:
+            category, should_retry = PostgreSQLErrorNormalizer._classify_unknown_error(error, error_msg)
+            user_message = error_msg
+        
+        retry_strategy = RetryStrategy(
+            should_retry=should_retry,
+            max_attempts=3 if should_retry else 1,
+            backoff_base=2.0,
+            backoff_cap=10.0,
+            is_transient=should_retry
+        )
+        
+        return NormalizedError(
+            category=category,
+            error_code=error_code,
+            message=error_msg,
+            original_error=error,
+            retry_strategy=retry_strategy,
+            user_message=user_message,
+            metadata={
+                "database_type": "postgres",
+                "error_code": error_code,
+                "error_type": type(error).__name__
+            }
+        )
+    
+    @staticmethod
+    def _classify_unknown_error(error: Exception, error_msg: str) -> Tuple[ErrorCategory, bool]:
+        """Classify unknown PostgreSQL errors based on exception type and message"""
+        error_lower = error_msg.lower()
+        error_type = type(error).__name__
+        
+        try:
+            import psycopg.errors
+            
+            if isinstance(error, psycopg.errors.OperationalError):
+                if any(p in error_lower for p in ["connection", "connect", "server"]):
+                    return ErrorCategory.CONNECTION_ERROR, True
+                if any(p in error_lower for p in ["timeout", "canceled"]):
+                    return ErrorCategory.TIMEOUT, True
+                return ErrorCategory.CONNECTION_ERROR, True
+            
+            if isinstance(error, psycopg.errors.ProgrammingError):
+                return ErrorCategory.SYNTAX_ERROR, False
+            
+            if isinstance(error, psycopg.errors.IntegrityError):
+                return ErrorCategory.CONSTRAINT_VIOLATION, False
+            
+            if isinstance(error, psycopg.errors.InsufficientPrivilege):
+                return ErrorCategory.PERMISSION_DENIED, False
+            
+            if isinstance(error, psycopg.errors.QueryCanceled):
+                return ErrorCategory.TIMEOUT, True
+                
+        except ImportError:
+            pass
+        
+        if any(p in error_lower for p in ["connection", "connect failed", "refused"]):
+            return ErrorCategory.CONNECTION_ERROR, True
+        
+        if any(p in error_lower for p in ["timeout", "canceled", "timed out"]):
+            return ErrorCategory.TIMEOUT, True
+        
+        if any(p in error_lower for p in ["syntax", "parse", "invalid sql"]):
+            return ErrorCategory.SYNTAX_ERROR, False
+        
+        if any(p in error_lower for p in ["permission", "privilege", "access denied"]):
+            return ErrorCategory.PERMISSION_DENIED, False
+        
+        if any(p in error_lower for p in ["table", "column", "does not exist", "not found"]):
+            return ErrorCategory.INVALID_IDENTIFIER, False
+        
+        return ErrorCategory.UNKNOWN, False
+
+
+def normalize_database_error(database_type: str, error_response: Any) -> NormalizedError:
     """
     Unified error normalization entry point
     
     Args:
-        database_type: "oracle" or "doris"
-        error_response: Raw error response from database client
+        database_type: "oracle", "doris", or "postgres"/"postgresql"
+        error_response: Raw error response from database client (dict or Exception)
         
     Returns:
         NormalizedError instance
     """
-    if database_type.lower() == "oracle":
+    db_type_lower = database_type.lower()
+    
+    if db_type_lower == "oracle":
+        if not isinstance(error_response, dict):
+            error_response = {"message": str(error_response)}
         return OracleErrorNormalizer.normalize(error_response)
-    elif database_type.lower() == "doris":
+    elif db_type_lower == "doris":
+        if not isinstance(error_response, dict):
+            error_response = {"message": str(error_response)}
         return DorisErrorNormalizer.normalize(error_response)
+    elif db_type_lower in ["postgres", "postgresql"]:
+        if isinstance(error_response, dict):
+            error_response = Exception(error_response.get("message", str(error_response)))
+        return PostgreSQLErrorNormalizer.normalize(error_response)
     else:
-        # Fallback for unknown database types
         logger.warning(f"Unknown database type for error normalization: {database_type}")
         return NormalizedError(
             category=ErrorCategory.UNKNOWN,

@@ -14,7 +14,7 @@ import time
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.core.error_handler import setup_error_handling
-from app.core.security_middleware import CSPMiddleware, CSRFMiddleware
+from app.core.security_middleware import CSPMiddleware, CSRFMiddleware, HMACMiddleware
 from app.core.logging_middleware import RequestLoggingMiddleware
 from app.api.v1.router import api_router
 from app.core.lifespan import lifespan
@@ -53,11 +53,14 @@ def create_application() -> FastAPI:
     # 1. Content Security Policy (CSP) & Security Headers
     app.add_middleware(CSPMiddleware)
     
-    # 2. CSRF Protection (disabled in development)
-    if not settings.is_development:
-        app.add_middleware(CSRFMiddleware)
+    # 2. CSRF Protection (enabled with warnings in development, enforced in production)
+    app.add_middleware(CSRFMiddleware)
     
-    # 3. Trusted Host Protection (production only)
+    
+    # 3. HMAC Request Signing (before CSRF/CORS to reject invalid requests early)
+    app.add_middleware(HMACMiddleware)
+
+    # 4. Trusted Host Protection (production only)
     if not settings.is_development:
         app.add_middleware(
             TrustedHostMiddleware,
@@ -65,20 +68,28 @@ def create_application() -> FastAPI:
         )
     
     # 4. CORS middleware
-    # In development, merge common dev origins to avoid front-end origin mismatches
-    dev_origins = [
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://localhost:3000",
-    ]
-    allowed_origins = settings.cors_origins
-    if getattr(settings, "is_development", False):
-        try:
-            # settings.cors_origins may be tuple/list; dedupe while preserving type
-            allowed_origins = list({*allowed_origins, *dev_origins})
-        except Exception:
-            allowed_origins = dev_origins
+    # Production: Use explicit origins only
+    # Development: Merge common dev origins for convenience
+    if settings.environment == "production":
+        # Production: Strict CORS with explicit origins
+        allowed_origins = settings.cors_origins
+        logger.info(f"Production CORS: {len(allowed_origins)} explicit origins configured")
+    else:
+        # Development: Merge dev origins for convenience
+        dev_origins = [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+        ]
+        allowed_origins = settings.cors_origins
+        if getattr(settings, "is_development", False):
+            try:
+                # settings.cors_origins may be tuple/list; dedupe while preserving type
+                allowed_origins = list({*allowed_origins, *dev_origins})
+                logger.info(f"Development CORS: {len(allowed_origins)} origins (including dev defaults)")
+            except Exception:
+                allowed_origins = dev_origins
 
     app.add_middleware(
         CORSMiddleware,

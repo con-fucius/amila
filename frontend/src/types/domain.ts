@@ -1,4 +1,4 @@
-export type DatabaseType = 'oracle' | 'doris'
+export type DatabaseType = 'oracle' | 'doris' | 'postgres' | 'qlik' | 'superset'
 
 export type ToolCallStatus = 'pending' | 'approved' | 'rejected' | 'completed' | 'error'
 

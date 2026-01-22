@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 from app.core.rbac import rbac_manager, Role
+from app.core.structured_logging import get_iso_timestamp
 from app.services.error_reporter_service import (
     ErrorReporterService,
     ErrorLayer,
@@ -136,7 +137,7 @@ async def get_recent_errors(
             "status": "success",
             "count": len(errors),
             "errors": errors,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": get_iso_timestamp(),
         }
         
     except ValueError as e:

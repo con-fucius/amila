@@ -1,11 +1,10 @@
-import { MessageSquare, Database, Code2, Menu, Plus, User, Settings, AlertTriangle } from 'lucide-react'
-import { useState, useContext, useEffect, useCallback } from 'react'
+import { MessageSquare, Database, Code2, Menu, Plus, User, Settings, AlertTriangle, MoreHorizontal } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { cn } from '@/utils/cn'
 import { useChatActions, useChats, useCurrentChatId, useDatabaseType, useMessages, type DatabaseType } from '@/stores/chatStore'
 import { useBackendHealth } from '@/hooks/useBackendHealth'
-import { ColorModeContext } from '@/App'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,16 +40,9 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
   const databaseType = useDatabaseType()
   const messages = useMessages()
   const { components, recheckHealth } = useBackendHealth(5000)
-  const colorMode = useContext(ColorModeContext)
-  const isDark = colorMode.mode === 'dark'
   const [userProfile, setUserProfile] = useState<{ username: string; role: string } | null>(null)
   const [showSwitchWarning, setShowSwitchWarning] = useState(false)
   const [pendingDbSwitch, setPendingDbSwitch] = useState<DatabaseType | null>(null)
-
-  const toggleDark = () => {
-    colorMode.toggleColorMode()
-    document.documentElement.classList.toggle('dark', colorMode.mode !== 'dark')
-  }
 
   // Check if the target database is healthy before allowing switch
   const isDatabaseHealthy = useCallback((targetDb: DatabaseType): boolean => {
@@ -177,21 +169,22 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               key={item.name}
               to={item.href}
               className={cn(
-                'flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all',
+                'flex items-center transition-all relative group',
+                isCollapsed ? 'justify-center w-10 h-10 mx-auto rounded-lg' : 'gap-3 px-3 py-2.5 rounded-lg w-full',
                 isActive
                   ? 'bg-gradient-to-r from-emerald-500 to-green-600 text-white shadow-lg'
-                  : 'hover:bg-gray-700 text-gray-300'
+                  : 'bg-gray-800/50 hover:bg-gray-700 text-gray-300'
               )}
             >
               <Icon className="h-5 w-5 flex-shrink-0" />
               {!isCollapsed && (
-                <div className="flex items-center justify-between w-full">
-                  <span className="text-sm font-medium">{item.name}</span>
+                <div className="flex items-center justify-between w-full min-w-0">
+                  <span className="text-sm font-medium truncate">{item.name}</span>
                   {item.name === 'Chat' && (
                     <button
                       type="button"
                       onClick={(e) => { e.preventDefault(); const id = createChat('New chat'); switchChat(id); navigate('/') }}
-                      className="ml-2 p-1 rounded hover:bg-gray-600"
+                      className="ml-2 p-1 rounded hover:bg-gray-600 flex-shrink-0"
                       title="New Chat"
                     >
                       <Plus className="h-4 w-4" />
@@ -208,8 +201,8 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
       {/* Chats List */}
       {!isCollapsed && (
         <div className="px-3 mt-2">
-          <div className="flex items-center justify-between text-[11px] text-gray-300 mb-1">
-            <span>Chats</span>
+          <div className="flex items-center justify-between text-[11px] text-gray-400 mb-1">
+            <span className="font-semibold tracking-wide">Chats</span>
             <button className="p-1 hover:bg-gray-700 rounded" onClick={() => { const id = createChat('New chat'); switchChat(id) }} title="New chat">
               <Plus className="w-3 h-3" />
             </button>
@@ -235,10 +228,10 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
                   <DropdownMenuTrigger asChild>
                     <button
                       type="button"
-                      className="px-1 rounded hover:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                      className="px-1 py-1 rounded hover:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-emerald-400 text-gray-400 hover:text-white transition-colors"
                       aria-label="Chat actions"
                     >
-                      - - -
+                      <MoreHorizontal className="w-4 h-4" />
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent
@@ -271,102 +264,82 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
       {/* Footer */}
       {!isCollapsed && (
         <div className="absolute bottom-0 left-0 right-0 border-t border-gray-700 pt-5 pb-6 px-4 space-y-6 bg-gradient-to-b from-gray-900/95 to-gray-950">
-          <div className="text-[11px] text-gray-300 space-y-5">
-            {/* Database Selector */}
-            <div>
-              <div className="mb-2 font-semibold text-[11px] tracking-wide text-gray-400 flex items-center gap-1">
-                <Database className="w-3 h-3" />
-                <span>Database</span>
-                {isProcessing && <span className="text-yellow-400 text-[9px]">(locked)</span>}
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => !isProcessing && handleDatabaseChange('oracle')}
-                  disabled={isProcessing || !isDatabaseHealthy('oracle')}
-                  title={
-                    isProcessing
-                      ? 'Cannot switch database while processing'
-                      : !isDatabaseHealthy('oracle')
-                        ? 'Oracle database unavailable'
-                        : 'Switch to Oracle'
-                  }
-                  className={cn(
-                    'flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-all border relative',
-                    databaseType === 'oracle'
-                      ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
-                      : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700',
-                    (isProcessing || !isDatabaseHealthy('oracle')) && 'opacity-50 cursor-not-allowed'
-                  )}
-                >
-                  Oracle
-                  <span className={cn(
-                    'absolute top-1 right-1 w-1.5 h-1.5 rounded-full',
-                    isDatabaseHealthy('oracle') ? 'bg-green-400' : 'bg-red-400'
-                  )} />
-                </button>
-                <button
-                  onClick={() => !isProcessing && handleDatabaseChange('doris')}
-                  disabled={isProcessing || !isDatabaseHealthy('doris')}
-                  title={
-                    isProcessing
-                      ? 'Cannot switch database while processing'
-                      : !isDatabaseHealthy('doris')
-                        ? 'Doris database unavailable'
-                        : 'Switch to Doris'
-                  }
-                  className={cn(
-                    'flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-all border relative',
-                    databaseType === 'doris'
-                      ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
-                      : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700',
-                    (isProcessing || !isDatabaseHealthy('doris')) && 'opacity-50 cursor-not-allowed'
-                  )}
-                >
-                  Doris
-                  <span className={cn(
-                    'absolute top-1 right-1 w-1.5 h-1.5 rounded-full',
-                    isDatabaseHealthy('doris') ? 'bg-green-400' : 'bg-red-400'
-                  )} />
-                </button>
-              </div>
+          <div className="mt-4">
+            <SystemHealthMonitor components={components} />
+          </div>
+
+          {/* Database Selector (at bottom) */}
+          <div className="mt-4 pt-4 border-t border-gray-800/50">
+            <div className="mb-2 font-semibold text-[11px] tracking-wide text-gray-400 flex items-center gap-1">
+              <span>Database</span>
+              {isProcessing && <span className="text-yellow-400 text-[9px]">(locked)</span>}
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Settings className="w-3 h-3" />
-                <span>Settings</span>
-              </div>
-            </div>
-            <button
-              onClick={toggleDark}
-              className="sidebar-theme-toggle w-full text-left text-sm px-3 py-2.5 rounded-lg bg-gray-800/70 hover:bg-gray-700 transition-colors border border-gray-600 shadow-sm"
-            >
-              {isDark ? 'Dark' : 'Light'}
-            </button>
-            <div className="mt-4">
-              <SystemHealthMonitor components={components} />
+            <div className="flex p-1 bg-gray-900/50 rounded-lg border border-gray-700 relative">
+              <button
+                onClick={() => !isProcessing && handleDatabaseChange('oracle')}
+                disabled={isProcessing || !isDatabaseHealthy('oracle')}
+                className={cn(
+                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
+                  databaseType === 'oracle'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200',
+                  (isProcessing || !isDatabaseHealthy('oracle')) && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                Oracle
+                <span className={cn(
+                  'w-1.5 h-1.5 rounded-full',
+                  isDatabaseHealthy('oracle') ? 'bg-green-500' : 'bg-red-500'
+                )} />
+              </button>
+              <button
+                onClick={() => !isProcessing && handleDatabaseChange('doris')}
+                disabled={isProcessing || !isDatabaseHealthy('doris')}
+                className={cn(
+                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
+                  databaseType === 'doris'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200',
+                  (isProcessing || !isDatabaseHealthy('doris')) && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                Doris
+                <span className={cn(
+                  'w-1.5 h-1.5 rounded-full',
+                  isDatabaseHealthy('doris') ? 'bg-green-500' : 'bg-red-500'
+                )} />
+              </button>
+              <button
+                onClick={() => !isProcessing && handleDatabaseChange('postgres')}
+                disabled={isProcessing || !isDatabaseHealthy('postgres')}
+                className={cn(
+                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
+                  databaseType === 'postgres'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200',
+                  (isProcessing || !isDatabaseHealthy('postgres')) && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                Postgres
+                <span className={cn(
+                  'w-1.5 h-1.5 rounded-full',
+                  isDatabaseHealthy('postgres') ? 'bg-green-500' : 'bg-red-500'
+                )} />
+              </button>
             </div>
           </div>
-          <button
-            onClick={() => navigate('/account')}
-            className="flex items-center justify-between pt-2 text-xs text-gray-300 w-full hover:bg-gray-700/50 rounded-lg p-2 -m-2 transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-r from-emerald-500 to-green-600 flex items-center justify-center text-white">
-                <User className="w-4 h-4" />
-              </div>
-              <div className="leading-tight text-left">
-                <div className="font-medium text-[12px]">{userProfile?.username || 'admin'}</div>
-                <div className="text-[11px] text-gray-400">{userProfile?.role || 'Analyst'}</div>
-              </div>
-            </div>
-          </button>
         </div>
       )}
 
       {/* Minimized Footer - shows icons when sidebar is collapsed */}
       {isCollapsed && (
         <div className="absolute bottom-0 left-0 right-0 border-t border-gray-700 py-3 px-2 space-y-2 bg-gradient-to-b from-gray-900/95 to-gray-950">
+          {/* System health indicator */}
+          <div className="flex justify-center flex-col items-center gap-2">
+            <SystemHealthMonitor components={components} collapsed={true} />
+          </div>
+
           {/* Database indicator */}
           <div className="flex justify-center">
             <button
@@ -381,37 +354,19 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               <Database className="w-4 h-4" />
               <span className={cn(
                 'absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full',
-                isDatabaseHealthy(databaseType) ? 'bg-green-400' : 'bg-red-400'
+                isDatabaseHealthy(databaseType) ? 'bg-green-500' : 'bg-red-500'
               )} />
             </button>
           </div>
 
-          {/* System health indicator */}
-          <div className="flex justify-center flex-col items-center gap-2">
-            <SystemHealthMonitor components={components} collapsed={true} />
-          </div>
-
-          {/* Settings/Theme toggle */}
+          {/* Settings link */}
           <div className="flex justify-center">
             <button
-              onClick={toggleDark}
-              className="p-2 rounded-lg bg-gray-800/70 text-gray-400 hover:bg-gray-700 transition-all"
-              title={`Theme: ${isDark ? 'Dark' : 'Light'}`}
+              onClick={() => navigate('/settings')}
+              className="p-2 rounded-lg bg-gray-800/70 text-gray-400 hover:bg-gray-700 hover:text-white transition-all"
+              title="Settings"
             >
               <Settings className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* User account */}
-          <div className="flex justify-center">
-            <button
-              onClick={() => navigate('/account')}
-              className="p-1 rounded-lg hover:bg-gray-700/50 transition-all"
-              title={userProfile?.username || 'Account'}
-            >
-              <div className="w-7 h-7 rounded-full bg-gradient-to-r from-emerald-500 to-green-600 flex items-center justify-center text-white">
-                <User className="w-3.5 h-3.5" />
-              </div>
             </button>
           </div>
         </div>

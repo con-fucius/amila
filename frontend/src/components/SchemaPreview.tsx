@@ -1,7 +1,7 @@
-import { Table, Database, Eye, ChevronDown, ChevronRight } from 'lucide-react'
+import { Table, Database, Eye, ChevronDown, ChevronRight, Layers } from 'lucide-react'
+import { StatusCapsule } from './StatusCapsule'
 import { useState } from 'react'
 import { Card, CardContent } from './ui/card'
-import { Badge } from './ui/badge'
 import { cn } from '@/utils/cn'
 
 interface TableSchema {
@@ -45,15 +45,20 @@ export function SchemaPreview({ schemas, visible = true }: SchemaPreviewProps) {
         <div className="flex items-center gap-2 mb-3">
           <Database className="h-4 w-4 text-purple-600" />
           <span className="font-semibold text-purple-900 text-sm">Schema Exploration</span>
-          <Badge variant="outline" className="text-xs">
-            {schemas.length} {schemas.length === 1 ? 'table' : 'tables'} inspected
-          </Badge>
+          <span className="font-semibold text-purple-900 text-sm">Schema Exploration</span>
+          <StatusCapsule
+            status="active"
+            label={`${schemas.length} ${schemas.length === 1 ? 'table' : 'tables'} inspected`}
+            icon={Layers}
+            size="sm"
+            className="bg-purple-100 text-purple-700 border-purple-200"
+          />
         </div>
 
         <div className="space-y-2">
           {schemas.map((schema) => {
             const isExpanded = expandedTables.has(schema.tableName)
-            
+
             return (
               <div key={schema.tableName} className="border border-purple-200 rounded-lg bg-white">
                 <button
@@ -68,13 +73,22 @@ export function SchemaPreview({ schemas, visible = true }: SchemaPreviewProps) {
                     )}
                     <Table className="h-4 w-4 text-purple-600" />
                     <span className="font-medium text-sm text-gray-800">{schema.tableName}</span>
-                    <Badge variant="secondary" className="text-xs">
-                      {schema.columns.length} columns
-                    </Badge>
+                    <span className="font-medium text-sm text-gray-800">{schema.tableName}</span>
+                    <StatusCapsule
+                      status="info"
+                      label={`${schema.columns.length} columns`}
+                      showLabel={true}
+                      size="sm"
+                      className="h-5 px-1.5 bg-gray-100 text-gray-600 border-gray-200"
+                    />
                     {schema.rowCount && (
-                      <Badge variant="outline" className="text-xs">
-                        ~{schema.rowCount.toLocaleString()} rows
-                      </Badge>
+                      <StatusCapsule
+                        status="success"
+                        label={`~${schema.rowCount.toLocaleString()} rows`}
+                        showLabel={true}
+                        size="sm"
+                        className="h-5 px-1.5 bg-green-50 text-green-700 border-green-200"
+                      />
                     )}
                   </div>
                   <Eye className="h-4 w-4 text-gray-400" />

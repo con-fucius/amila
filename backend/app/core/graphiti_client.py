@@ -4,6 +4,7 @@ Provides unified interface for temporal knowledge graph operations using Graphit
 Supports both Google Gemini (dev) and AWS Bedrock (production) LLM providers
 """
 
+import asyncio
 import os
 import logging
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
@@ -313,44 +314,53 @@ class GraphitiClient:
     async def health_check(self) -> Dict[str, Any]:
         """
         Perform an active health check by running a lightweight Cypher query.
+        
+        Returns:
+            Dict with status ('connected', 'inactive', 'error') and optional message/latency_ms
         """
         if not self._driver:
-             return {"status": "inactive", "message": "Driver not initialized"}
+            return {"status": "inactive", "message": "Driver not initialized"}
 
         try:
-            # Simple query that doesn't touch graph data
+            start_time = datetime.now()
+            
             async with asyncio.timeout(5.0):
-                # FalkorDB driver's execute_query is async?
-                # Based on usage in graphiti-core, it seems likely, but let's double check.
-                # Actually, FalkorDB python client might be sync or async depending on the driver.
-                # The codebase uses `graphiti_core.driver.falkordb_driver.FalkorDriver`.
-                # Let's assume the driver wrapper handles it or it's fast enough.
-                # We'll try to execute a simple RETURN 1.
+                # Access the underlying FalkorDB graph client from the driver
+                # The FalkorDriver wraps a FalkorDB Graph object
+                if hasattr(self._driver, '_graph') and self._driver._graph is not None:
+                    # Execute a simple Cypher query that returns immediately
+                    # RETURN 1 is the lightest possible query
+                    result = await asyncio.to_thread(
+                        self._driver._graph.ro_query,
+                        "RETURN 1 AS health_check"
+                    )
+                    
+                    latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+                    
+                    # Verify we got a valid result
+                    if result and hasattr(result, 'result_set') and len(result.result_set) > 0:
+                        return {
+                            "status": "connected",
+                            "latency_ms": round(latency_ms, 2),
+                            "message": "Cypher RETURN 1 probe successful"
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": "Cypher query returned no results"
+                        }
+                else:
+                    # Fallback: driver exists but graph not accessible
+                    # Try to check if driver has any connectivity method
+                    return {
+                        "status": "connected",
+                        "message": "Driver initialized (graph probe unavailable)"
+                    }
                 
-                # Check if we can run a raw query via the driver
-                if hasattr(self._driver, 'query'):
-                    # Native driver usually has .query()
-                    # But Graphiti wrapper might abstract it.
-                    # Let's try to inspect what _driver is effectively.
-                    # It is `graphiti_core.driver.falkordb_driver.FalkorDriver`.
-                    # Let's try to just check if connection is alive if possible, 
-                    # or run a query if we can access the inner client.
-                    pass
-
-                # Safest bet with Graphiti wrapper is to trust it or try a simple search if low cost.
-                # But search might be an overkill.
-                # Let's try to access the underlying redis connection from the driver if possible.
-                # self._driver.client is usually the redis client in falkordb-py.
-                
-                # For now, let's return connected if initialized, as Graphiti/FalkorDB 
-                # doesn't expose a simple async ping easily without digging into private attrs.
-                # Wait, earlier I saw `redis_client` being used separately.
-                # Maybe we rely on the Redis health check for the underlying transport 
-                # and just check if we are initialized here.
-                
-                return {"status": "connected"}
-                
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": "Health check timed out after 5s"}
         except Exception as e:
+            logger.warning(f"Graphiti health check failed: {e}")
             return {"status": "error", "message": str(e)}
 
     async def close(self) -> None:

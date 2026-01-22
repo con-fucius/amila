@@ -31,6 +31,16 @@ class AppSettings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256", pattern=r"^(HS256|HS384|HS512|RS256|RS384|RS512)$", description="JWT algorithm")
     jwt_expire_hours: int = Field(default=8, ge=1, le=168, description="JWT expiration hours (1-168)")
     refresh_token_expire_days: int = Field(default=30, ge=1, le=365, description="Refresh token expiration days (1-365)")
+    
+    # Encryption Settings (Application-Level)
+    ENCRYPTION_KEY: str = Field(
+        default="CHANGE_ME_IN_PRODUCTION",
+        min_length=16,
+        description="Encryption key for sensitive data (min 16 characters, 32+ recommended)"
+    )
+
+    # Request Signing
+    hmac_secret_key: str = Field(default="dev_hmac_secret_change_in_prod_backend_123", min_length=32, description="HMAC secret key for request signing")
 
     # Authentication Rate Limiting
     auth_rate_limit_max_attempts: int = Field(default=5, ge=1, le=20, description="Max authentication attempts per window")
@@ -68,6 +78,19 @@ class AppSettings(BaseSettings):
     DORIS_DB_USER: str = Field(default="root", description="Doris Database User")
     DORIS_DB_PASSWORD: str = Field(default="", description="Doris Database Password")
     DORIS_DB_DATABASE: str = Field(default="demo", description="Doris Database Name")
+    
+    # PostgreSQL Configuration
+    POSTGRES_ENABLED: bool = Field(default=False, description="Enable PostgreSQL integration")
+    POSTGRES_HOST: str = Field(default="localhost", description="PostgreSQL host")
+    POSTGRES_PORT: int = Field(default=5432, ge=1, le=65535, description="PostgreSQL port")
+    POSTGRES_DATABASE: str = Field(default="postgres", description="PostgreSQL database name")
+    POSTGRES_USER: Optional[str] = Field(default=None, description="PostgreSQL username")
+    POSTGRES_PASSWORD: Optional[str] = Field(default=None, description="PostgreSQL password")
+    POSTGRES_POOL_MIN_SIZE: int = Field(default=2, ge=1, le=20, description="PostgreSQL pool minimum size")
+    POSTGRES_POOL_MAX_SIZE: int = Field(default=10, ge=1, le=100, description="PostgreSQL pool maximum size")
+    POSTGRES_POOL_TIMEOUT: int = Field(default=30, ge=5, le=300, description="PostgreSQL pool connection timeout")
+    POSTGRES_QUERY_TIMEOUT: int = Field(default=600, ge=30, le=3600, description="PostgreSQL query timeout")
+    POSTGRES_READ_ONLY: bool = Field(default=True, description="Enforce read-only transactions for PostgreSQL")
     
     # SQLcl Configuration for STDIO MCP
     sqlcl_path: str = Field(default="sql", min_length=1, max_length=255, description="Path to SQLcl executable")
@@ -113,6 +136,10 @@ class AppSettings(BaseSettings):
     # Google Gemini Configuration (Development/Testing)
     GOOGLE_API_KEY: Optional[str] = Field(default=None, description="Google Gemini API key for development")
 
+    # Mistral AI Configuration
+    MISTRAL_API_KEY: Optional[str] = Field(default=None, description="Mistral AI API key")
+    MISTRAL_MODEL: str = Field(default="mistral-large-latest", description="Mistral AI model name")
+
     # FalkorDB Configuration (Graph Database for Graphiti)
     FALKORDB_HOST: str = Field(default="localhost", description="FalkorDB host")
     FALKORDB_PORT: int = Field(default=6380, ge=1, le=65535, description="FalkorDB port (mapped from 6379)")
@@ -125,13 +152,13 @@ class AppSettings(BaseSettings):
     GRAPHITI_LLM_PROVIDER: str = Field(default="gemini", pattern=r"^(gemini|bedrock)$", description="Graphiti LLM provider")
     GRAPHITI_LLM_MODEL: str = Field(default="gemini-2.5-flash-lite", description="Graphiti LLM model name")
     GRAPHITI_EMBEDDING_PROVIDER: str = Field(default="gemini", pattern=r"^(gemini|bedrock)$", description="Graphiti embedding provider")
-    GRAPHITI_EMBEDDING_MODEL: str = Field(default="gemini-embedding-001", description="Graphiti embedding model")
+    GRAPHITI_EMBEDDING_MODEL: str = Field(default="text-embedding-004", description="Graphiti embedding model")
     GRAPHITI_EMBEDDING_DIMENSIONS: int = Field(default=768, ge=128, le=3072, description="Graphiti embedding dimensions")
 
     # Query Orchestrator Configuration (separate from Graphiti)
     QUERY_LLM_PROVIDER: str = Field(
         default="gemini",
-        pattern=r"^(gemini|bedrock|qwen|openrouter)$",
+        pattern=r"^(gemini|bedrock|qwen|openrouter|mistral)$",
         description="LLM provider for the query orchestrator"
     )
     QUERY_LLM_MODEL: Optional[str] = Field(
@@ -177,6 +204,16 @@ class AppSettings(BaseSettings):
     LANGFUSE_SECRET_KEY: Optional[str] = Field(default=None, description="Langfuse secret API key")
     LANGFUSE_HOST: str = Field(default="https://cloud.langfuse.com", description="Langfuse host URL")
     LANGFUSE_ENABLED: bool = Field(default=False, description="Enable Langfuse tracing")
+    
+    # Qlik Sense Configuration
+    QLIK_BASE_URL: Optional[str] = Field(default=None, description="Qlik Sense server base URL (e.g., https://qlik-server:4242)")
+    QLIK_AUTH_USER: Optional[str] = Field(default=None, description="Qlik auth user (e.g., UserDirectory=INTERNAL;UserId=sa_repository)")
+    QLIK_XRFKEY: Optional[str] = Field(default=None, description="Qlik Xrfkey for CSRF protection (16 characters)")
+    
+    # Apache Superset Configuration
+    SUPERSET_BASE_URL: Optional[str] = Field(default=None, description="Apache Superset server base URL (e.g., http://superset:8088)")
+    SUPERSET_USERNAME: Optional[str] = Field(default=None, description="Superset username")
+    SUPERSET_PASSWORD: Optional[str] = Field(default=None, description="Superset password")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -258,14 +295,47 @@ class AppSettings(BaseSettings):
 
     def _validate_configuration(self):
         """Perform comprehensive configuration validation"""
-        # Check for port conflicts
         self._validate_port_conflicts()
-
-        # Validate required secrets based on environment
         self._validate_secrets()
-
-        # Environment-specific validations
         self._validate_environment_specific()
+        self._validate_qlik_configuration()
+        self._validate_superset_configuration()
+        self._validate_postgres_configuration()
+    
+    def _validate_qlik_configuration(self):
+        """Validate Qlik Sense configuration"""
+        if self.QLIK_BASE_URL and not self.QLIK_AUTH_USER:
+            logging.warning(
+                "QLIK_BASE_URL is set but QLIK_AUTH_USER is missing. "
+                "Qlik integration may not work properly."
+            )
+        
+        if self.QLIK_XRFKEY and len(self.QLIK_XRFKEY) != 16:
+            raise ValueError("QLIK_XRFKEY must be exactly 16 characters")
+    
+    def _validate_superset_configuration(self):
+        """Validate Apache Superset configuration"""
+        if self.SUPERSET_BASE_URL:
+            if not self.SUPERSET_USERNAME or not self.SUPERSET_PASSWORD:
+                logging.warning(
+                    "SUPERSET_BASE_URL is set but credentials are missing. "
+                    "Superset integration may not work properly."
+                )
+    
+    def _validate_postgres_configuration(self):
+        """Validate PostgreSQL configuration"""
+        if self.POSTGRES_ENABLED:
+            if not self.POSTGRES_USER or not self.POSTGRES_PASSWORD:
+                logging.warning(
+                    "PostgreSQL is enabled but credentials are missing. "
+                    "PostgreSQL integration may not work properly."
+                )
+            
+            if self.POSTGRES_POOL_MIN_SIZE > self.POSTGRES_POOL_MAX_SIZE:
+                raise ValueError(
+                    f"POSTGRES_POOL_MIN_SIZE ({self.POSTGRES_POOL_MIN_SIZE}) "
+                    f"cannot be greater than POSTGRES_POOL_MAX_SIZE ({self.POSTGRES_POOL_MAX_SIZE})"
+                )
 
     def _validate_port_conflicts(self):
         """Check for port conflicts between services"""
@@ -378,12 +448,6 @@ class AppSettings(BaseSettings):
                 "hashed_password": pwd_context.hash("adminpassword"),
                 "disabled": False,
                 "role": "admin"
-            },
-            "tester": {
-                "username": "tester",
-                "hashed_password": pwd_context.hash("testerpassword"),
-                "disabled": False,
-                "role": "analyst"
             }
         }
 

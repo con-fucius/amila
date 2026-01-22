@@ -173,10 +173,6 @@ export function ReportGenerator({ queryResults, userQueries, title, className = 
             Preview Report
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => handleGenerate('html')}>
-            <Download className="h-3 w-3 mr-2" />
-            HTML Report
-          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => handleGenerate('pdf')}>
             <Download className="h-3 w-3 mr-2" />
             PDF Report
@@ -235,11 +231,11 @@ export function ReportGenerator({ queryResults, userQueries, title, className = 
 
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="outline" onClick={() => setShowPreview(false)}>
-              Close
+              Back
             </Button>
-            <Button onClick={() => handleGenerate('html')} disabled={loading}>
+            <Button onClick={() => handleGenerate('pdf')} disabled={loading}>
               <Download className="h-4 w-4 mr-2" />
-              Download HTML
+              Download PDF
             </Button>
           </div>
         </DialogContent>

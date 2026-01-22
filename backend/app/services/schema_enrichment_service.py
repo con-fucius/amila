@@ -32,6 +32,8 @@ class SchemaEnrichmentService:
         include_samples: bool = True,
         include_relationships: bool = True,
         sample_limit: int = 3,
+        database_type: str = "oracle",
+        connection_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get enriched schema context based on query intent
@@ -42,17 +44,23 @@ class SchemaEnrichmentService:
             include_samples: Include sample rows for better column inference
             include_relationships: Include table relationships
             sample_limit: Max rows to fetch per table
+            database_type: "oracle", "doris", or "postgres"
+            connection_name: Database connection name
             
         Returns:
             Enriched schema context with tables, samples, and relationships
         """
-        logger.info(f"Extracting enriched schema context...")
+        logger.info(f"Extracting enriched schema context for {database_type}...")
         
-        from app.services.schema_service import SchemaService
-        schema_result = await SchemaService.get_database_schema(use_cache=True)
+        from app.services.database_router import DatabaseRouter
+        schema_result = await DatabaseRouter.get_database_schema(
+            database_type=database_type,
+            connection_name=connection_name,
+            use_cache=True
+        )
         
         if schema_result.get("status") != "success":
-            logger.error(f"Failed to retrieve base schema")
+            logger.error(f"Failed to retrieve base schema for {database_type}")
             return {"tables": {}, "samples": {}, "relationships": [], "error": "Schema unavailable"}
         
         schema_data = schema_result.get("schema", {})
@@ -62,7 +70,11 @@ class SchemaEnrichmentService:
         missing = [t for t in mentioned_tables if t not in (schema_data.get("tables", {}) or {})]
         if missing:
             logger.info(f"Refreshing schema live for missing tables: {missing}")
-            fresh = await SchemaService.get_database_schema(use_cache=False)
+            fresh = await DatabaseRouter.get_database_schema(
+                database_type=database_type,
+                connection_name=connection_name,
+                use_cache=False
+            )
             if fresh.get("status") == "success":
                 schema_data = fresh.get("schema", {})
                 mentioned_tables = self._extract_table_hints(user_query, intent, schema_data)
@@ -77,6 +89,7 @@ class SchemaEnrichmentService:
             "metadata": {
                 "enriched_at": datetime.utcnow().isoformat(),
                 "tables_analyzed": len(mentioned_tables),
+                "database_type": database_type
             }
         }
         
@@ -93,16 +106,26 @@ class SchemaEnrichmentService:
         if include_samples and mentioned_tables:
             samples = await self._fetch_sample_data(
                 mentioned_tables[:5],  # Limit to 5 tables to avoid token overflow
-                limit=sample_limit
+                limit=sample_limit,
+                database_type=database_type,
+                connection_name=connection_name
             )
             enriched_context["samples"] = samples
         
         if include_relationships and len(mentioned_tables) > 1:
-            relationships = await self._detect_table_relationships(
-                mentioned_tables,
-                schema_data
-            )
-            enriched_context["relationships"] = relationships
+            if database_type == "oracle":
+                relationships = await self._detect_table_relationships(
+                    mentioned_tables,
+                    schema_data
+                )
+                enriched_context["relationships"] = relationships
+            else:
+                # Basic relationship detection for non-Oracle
+                relationships = await self._detect_table_relationships_generic(
+                    mentioned_tables,
+                    schema_data
+                )
+                enriched_context["relationships"] = relationships
         
         logger.info(
             f"Enriched context: {len(enriched_context['tables'])} tables, "
@@ -181,70 +204,124 @@ class SchemaEnrichmentService:
     async def _fetch_sample_data(
         self,
         table_names: List[str],
-        limit: int = 5
+        limit: int = 5,
+        database_type: str = "oracle",
+        connection_name: Optional[str] = None
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Fetch sample rows from specified tables with Redis caching
         
         Args:
             table_names: List of table names
-            limit: Max rows per table (default 5 for better inference)
+            limit: Max rows per table
+            database_type: "oracle", "doris", or "postgres"
+            connection_name: Connection name
             
         Returns:
             Dict mapping table names to sample rows
         """
-        logger.info(f"Fetching sample data from {len(table_names)} tables...")
+        logger.info(f"Fetching sample data from {len(table_names)} tables ({database_type})...")
         
         samples = {}
-        mcp_client = registry.get_mcp_client()
         from app.core.config import settings
         from app.core.redis_client import redis_client
         
-        if not mcp_client:
-            logger.warning("MCP client not available, skipping sample data")
-            return samples
-        
         for table_name in table_names:
-            cache_key = f"sample_data:{table_name}:{limit}"
+            cache_key = f"sample_data:{database_type}:{table_name}:{limit}"
             
             try:
                 cached_samples = await redis_client.get(cache_key)
                 if cached_samples:
                     samples[table_name] = cached_samples
-                    logger.debug(f"Retrieved {len(cached_samples)} sample rows from Redis cache for {table_name}")
+                    logger.debug(f"Retrieved {len(cached_samples)} sample rows from cache for {table_name}")
                     continue
             except Exception as e:
-                logger.debug(f"Redis cache miss for {table_name}: {e}")
+                logger.debug(f"Cache miss for {table_name}: {e}")
             
             if cache_key in self._sample_cache:
                 samples[table_name] = self._sample_cache[cache_key]
                 continue
             
             try:
-                sql = f"SELECT * FROM {table_name} FETCH FIRST {limit} ROWS ONLY"
-                result = await mcp_client.execute_sql(sql, connection_name=settings.oracle_default_connection)
+                if database_type == "postgres":
+                    from app.core.postgres_client import postgres_client
+                    sql = f"SELECT * FROM {table_name} LIMIT {limit}"
+                    result = await postgres_client.execute_query(
+                        sql=sql,
+                        user_id="system",
+                        request_id="enrichment"
+                    )
+                    if result.get("status") == "success":
+                        rows = result.get("rows", [])
+                        samples[table_name] = rows
+                elif database_type == "doris":
+                    from app.core.client_registry import registry
+                    mcp_client = registry.get_mcp_client()
+                    sql = f"SELECT * FROM {table_name} LIMIT {limit}"
+                    result = await mcp_client.execute_sql(sql, connection_name="doris_default")
+                    if result.get("status") == "success":
+                        rows = result.get("results", {}).get("rows", [])
+                        samples[table_name] = rows
+                else: # Oracle
+                    from app.core.client_registry import registry
+                    mcp_client = registry.get_mcp_client()
+                    sql = f"SELECT * FROM {table_name} FETCH FIRST {limit} ROWS ONLY"
+                    conn = connection_name or settings.oracle_default_connection
+                    result = await mcp_client.execute_sql(sql, connection_name=conn)
+                    if result.get("status") == "success":
+                        rows = result.get("results", {}).get("rows", [])
+                        samples[table_name] = rows
                 
-                if result.get("status") == "success":
-                    results_block = result.get("results", {}) or {}
-                    rows = results_block.get("rows", [])
-                    samples[table_name] = rows
+                if table_name in samples:
+                    rows = samples[table_name]
                     self._sample_cache[cache_key] = rows
-                    
                     try:
                         await redis_client.set(cache_key, rows, ttl=1800)
-                        logger.debug(f"Cached {len(rows)} sample rows in Redis for {table_name}")
                     except Exception as e:
-                        logger.debug(f"Failed to cache samples in Redis: {e}")
-                    
+                        logger.debug(f"Failed to cache samples: {e}")
                     logger.debug(f"Fetched {len(rows)} sample rows from {table_name}")
-                else:
-                    logger.warning(f"Failed to fetch samples from {table_name}: {result.get('message')}")
             
             except Exception as e:
                 logger.warning(f"Error fetching samples from {table_name}: {e}")
-                # Continue with other tables even if one fails
         
         return samples
+
+    async def _detect_table_relationships_generic(
+        self,
+        table_names: List[str],
+        schema_data: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """
+        Generic relationship detection based on column name patterns
+        """
+        relationships = []
+        tables = schema_data.get("tables", {})
+        
+        for i, table1 in enumerate(table_names):
+            if table1 not in tables:
+                continue
+            
+            cols1 = [c.get('name', '').upper() for c in tables[table1]]
+            
+            for table2 in table_names[i+1:]:
+                if table2 not in tables:
+                    continue
+                
+                cols2 = [c.get('name', '').upper() for c in tables[table2]]
+                
+                # Check for shared column names
+                common = set(cols1).intersection(set(cols2))
+                for col in common:
+                    if col.endswith("_ID") or col == "ID" or col.endswith("_KEY"):
+                        relationships.append({
+                            "type": "shared_column",
+                            "table1": table1,
+                            "table2": table2,
+                            "column": col,
+                            "join_hint": f"{table1}.{col} = {table2}.{col}"
+                        })
+        
+        return relationships
     
     async def _detect_table_relationships(
         self,

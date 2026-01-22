@@ -47,6 +47,8 @@ class QueryRequest:
     parameters: dict[str, Any] | None = None
     timeout: int | None = None
     cache_enabled: bool = True
+    query_id: str | None = None # Added query_id for tracking
+
 
 
 @dataclass
@@ -440,13 +442,26 @@ class DorisQueryExecutor:
         if query_request.timeout:
             try:
                 result = await asyncio.wait_for(
-                    self.connection_manager.execute_query(query_request.session_id, optimized_sql, query_request.parameters, auth_context),
+                    self.connection_manager.execute_query(
+                        query_request.session_id, 
+                        optimized_sql, 
+                        query_request.parameters, 
+                        auth_context,
+                        query_request.query_id  # Pass query_id
+                    ),
                     timeout=query_request.timeout
                 )
             except asyncio.TimeoutError:
                 raise Exception(f"Query timeout after {query_request.timeout} seconds")
         else:
-            result = await self.connection_manager.execute_query(query_request.session_id, optimized_sql, query_request.parameters, auth_context)
+            result = await self.connection_manager.execute_query(
+                query_request.session_id, 
+                optimized_sql, 
+                query_request.parameters, 
+                auth_context,
+                query_request.query_id  # Pass query_id
+            )
+
 
         return result
 
@@ -547,7 +562,8 @@ class DorisQueryExecutor:
         timeout: int = 30,
         session_id: str = "mcp_session",
         user_id: str = "mcp_user",
-        auth_context = None  # FIX for Issue #62 Bug 1: Accept auth_context with token
+        auth_context = None,  # FIX for Issue #62 Bug 1: Accept auth_context with token
+        query_id: str | None = None # Add optional query_id
     ) -> Dict[str, Any]:
         """Execute SQL query for MCP interface - unified method
 
@@ -639,7 +655,8 @@ class DorisQueryExecutor:
                     session_id=session_id,
                     user_id=user_id,
                     timeout=timeout,
-                    cache_enabled=False  # Disable cache for MCP calls to ensure fresh data
+                    cache_enabled=False,  # Disable cache for MCP calls to ensure fresh data
+                    query_id=query_id
                 )
                 
                 # Execute query with retry logic
@@ -904,6 +921,7 @@ async def execute_sql_query(sql: str, connection_manager: DorisConnectionManager
         session_id = kwargs.get("session_id", "mcp_session")
         user_id = kwargs.get("user_id", "mcp_user")
         auth_context = kwargs.get("auth_context", None)  # FIX: Extract auth_context
+        query_id = kwargs.get("query_id", None) # Add query_id extraction
 
         # The execute_sql_for_mcp method now includes security validation
         result = await executor.execute_sql_for_mcp(
@@ -912,7 +930,8 @@ async def execute_sql_query(sql: str, connection_manager: DorisConnectionManager
             timeout=timeout,
             session_id=session_id,
             user_id=user_id,
-            auth_context=auth_context  # FIX: Pass auth_context with token
+            auth_context=auth_context,  # FIX: Pass auth_context with token
+            query_id=query_id # Pass query_id
         )
 
         # FIX for Issue #58 Problem 2: Do NOT close executor here

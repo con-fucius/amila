@@ -29,6 +29,9 @@ import {
   ListItemText,
   Tooltip,
   TableFooter,
+  Select,
+  FormControl,
+  InputLabel,
 } from '@mui/material'
 
 import {
@@ -57,6 +60,8 @@ import {
   Tooltip as RechartsTooltip,
   Legend,
   ResponsiveContainer,
+  AreaChart,
+  Area,
 } from 'recharts'
 import { useSnackbar } from '../contexts/SnackbarContext'
 import ProgressiveDisclosureDialog from './ProgressiveDisclosureDialog'
@@ -128,6 +133,9 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
     rowCount: 0,
     estimatedSize: ''
   })
+  const [chartType, setChartType] = useState<'bar' | 'line' | 'pie' | 'area'>('bar')
+  const [chartDimension, setChartDimension] = useState<string | null>(null)
+  const [chartMetric, setChartMetric] = useState<string | null>(null)
 
   // Preferences persistence (per query id)
   const prefsKey = useMemo(() => `qr_prefs_${data?.metadata?.query_id || 'default'}`, [data?.metadata?.query_id])
@@ -143,13 +151,13 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       if (prefs.order === 'asc' || prefs.order === 'desc') setOrder(prefs.order)
       if (prefs.columnWidths && typeof prefs.columnWidths === 'object') setColumnWidths(prefs.columnWidths)
       if (typeof prefs.rowsPerPage === 'number') setRowsPerPage(prefs.rowsPerPage)
-    } catch {}
+    } catch { }
   }, [prefsKey, data])
 
   useEffect(() => {
     // persist on change
     const prefs = { selectedColumns, orderBy, order, columnWidths, rowsPerPage }
-    try { localStorage.setItem(prefsKey, JSON.stringify(prefs)) } catch {}
+    try { localStorage.setItem(prefsKey, JSON.stringify(prefs)) } catch { }
   }, [prefsKey, selectedColumns, orderBy, order, columnWidths, rowsPerPage])
 
   // Check for large result sets
@@ -230,7 +238,7 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
   useEffect(() => {
     const count = paginatedData?.rows.length || 0
     if (count > 50 && !RW) {
-      import('react-window').then((mod) => setRW(mod)).catch(() => {})
+      import('react-window').then((mod) => setRW(mod)).catch(() => { })
     }
   }, [paginatedData?.rows.length, RW])
   const shouldVirtualize = !!RW && (paginatedData?.rows.length || 0) > 50
@@ -296,7 +304,23 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       dimensionIndex = allIndexes[0] ?? 0
     }
 
-    const metricIndex = numericColumns[0]
+    // 3) Fallback to first column
+    if (dimensionIndex === null) {
+      dimensionIndex = allIndexes[0] ?? 0
+    }
+
+    // Override with user selection if valid
+    if (chartDimension && data.columns.includes(chartDimension)) {
+      const idx = data.columns.indexOf(chartDimension)
+      if (idx >= 0) dimensionIndex = idx
+    }
+
+    let metricIndex = numericColumns[0]
+    // Override with user selection if valid
+    if (chartMetric && data.columns.includes(chartMetric)) {
+      const idx = data.columns.indexOf(chartMetric)
+      if (idx >= 0 && numericColumns.includes(idx)) metricIndex = idx
+    }
 
     const points = data.rows.slice(0, 50).map(row => ({
       dimension: row[dimensionIndex!]?.toString() || 'N/A',
@@ -478,7 +502,7 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
 
   const handleDisclosureChoice = useCallback((choice: 'preview' | 'download' | 'aggregate' | 'cancel') => {
     setDisclosureDialog({ ...disclosureDialog, open: false })
-    
+
     if (choice === 'preview' && data) {
       // Already showing preview (first page)
       success('Showing preview of first 100 rows')
@@ -497,15 +521,15 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       <Paper elevation={0} sx={{ p: 3, border: '1px solid #e5e7eb', borderRadius: 2 }}>
         <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" minHeight={400}>
           <CircularProgress size={60} thickness={4} sx={{ mb: 3, color: '#10b981' }} />
-          <Typography 
-            variant="h6" 
+          <Typography
+            variant="h6"
             gutterBottom
             sx={{ fontFamily: '"Figtree", sans-serif', fontWeight: 600 }}
           >
             Executing request...
           </Typography>
-          <Typography 
-            variant="body2" 
+          <Typography
+            variant="body2"
             color="text.secondary"
             sx={{ fontFamily: '"Figtree", sans-serif' }}
           >
@@ -520,14 +544,14 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
     return (
       <Paper elevation={0} sx={{ p: 3, border: '1px solid #e5e7eb', borderRadius: 2 }}>
         <Alert severity="error">
-          <Typography 
-            variant="h6" 
+          <Typography
+            variant="h6"
             gutterBottom
             sx={{ fontFamily: '"Figtree", sans-serif', fontWeight: 600 }}
           >
             Query Error
           </Typography>
-          <Typography 
+          <Typography
             variant="body2"
             sx={{ fontFamily: '"Figtree", sans-serif' }}
           >
@@ -597,7 +621,7 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       let el = containerRef.current?.querySelector(selector) as HTMLElement | null
       if (!el && shouldVirtualize && listRef.current) {
         // Scroll into view then try again
-        try { listRef.current.scrollToItem(nextRow, 'smart') } catch {}
+        try { listRef.current.scrollToItem(nextRow, 'smart') } catch { }
         setTimeout(() => {
           const el2 = containerRef.current?.querySelector(selector) as HTMLElement | null
           el2?.focus()
@@ -621,559 +645,578 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
 
   return (
     <>
-    <Paper 
-      elevation={0}
-      sx={{ 
-        p: 2,
-        borderRadius: 3,
-        bgcolor: 'rgba(255,255,255,0.65)',
-        border: '1px solid rgba(255,255,255,0.45)',
-        backdropFilter: 'blur(8px) saturate(120%)',
-      }}
-    >
-      {/* Header */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={1.5}>
-        <Typography 
-          variant="subtitle1"
-          sx={{
-            fontFamily: '"Figtree", sans-serif',
-            fontWeight: 600,
-            fontSize: '1rem',
-            color: '#111827',
-          }}
-        >
-          Query Results
-        </Typography>
-        <Box display="flex" gap={1} alignItems="center">
-          <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none' }}>
-            {collapsed ? 'Show' : 'Hide'}
-          </Button>
-          <TextField
-            size="small"
-            placeholder="Search results..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" />
-                </InputAdornment>
-              ),
-              sx: {
-                fontFamily: '"Figtree", sans-serif',
-                fontSize: '0.875rem',
-              }
-            }}
-            sx={{ width: 200 }}
-          />
-          <Button
-            variant="outlined"
-            startIcon={<ColumnsIcon />}
-            onClick={handleColumnsClick}
-            size="small"
-            sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-          >
-            Columns
-          </Button>
-          <Menu anchorEl={columnsAnchorEl} open={Boolean(columnsAnchorEl)} onClose={handleColumnsClose}>
-            {data.columns.map((col) => {
-              const checked = selectedColumns.length === 0 || selectedColumns.includes(col)
-              return (
-                <MenuItem key={col} onClick={() => toggleColumn(col)} dense>
-                  <ListItemIcon>
-                    <Checkbox edge="start" checked={checked} tabIndex={-1} disableRipple />
-                  </ListItemIcon>
-                  <ListItemText primaryTypographyProps={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' }} primary={col} />
-                </MenuItem>
-              )
-            })}
-          </Menu>
-          <Button
-            variant="outlined"
-            startIcon={<CopyIcon />}
-            onClick={handleCopyClick}
-            size="small"
-            sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-          >
-            Copy
-          </Button>
-          <Menu anchorEl={copyAnchorEl} open={Boolean(copyAnchorEl)} onClose={handleCopyClose}>
-            <MenuItem onClick={copyCell} disabled={selectedCell.row === null || selectedCell.col === null}>Copy cell</MenuItem>
-            <MenuItem onClick={() => copyRow(',')} disabled={selectedCell.row === null}>Copy row (CSV)</MenuItem>
-            <MenuItem onClick={() => copyRow('\t')} disabled={selectedCell.row === null}>Copy row (TSV)</MenuItem>
-            <MenuItem onClick={() => copyColumn()} disabled={selectedCell.col === null}>Copy column</MenuItem>
-            <MenuItem onClick={() => copyPageAs(',')}>Copy page as CSV</MenuItem>
-            <MenuItem onClick={() => copyPageAs('\t')}>Copy page as TSV</MenuItem>
-          </Menu>
-          <Button
-            variant="outlined"
-            startIcon={<ExportIcon />}
-            onClick={handleExportClick}
-            size="small"
-            sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-          >
-            Export
-          </Button>
-          <Menu anchorEl={exportAnchorEl} open={Boolean(exportAnchorEl)} onClose={handleExportClose}>
-            <MenuItem onClick={exportToCSV} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as CSV</MenuItem>
-            <MenuItem onClick={exportToJSON} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as JSON</MenuItem>
-            <MenuItem onClick={exportToXLSX} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as Excel (.xlsx)</MenuItem>
-          </Menu>
-          {shouldVirtualize && (
-            <Chip label="Virtualized" size="small" sx={{ height: 22, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#111827', color: 'white' }} />
-          )}
-        </Box>
-      </Box>
-
-      {/* Metadata */}
-      {data.metadata && !collapsed && (
-        <Box sx={{ mb: 2, p: 1.5, bgcolor: 'rgba(249,250,251,0.6)', borderRadius: 1.5, border: '1px solid #e5e7eb' }}>
-          <Box display="flex" justifyContent="space-between" alignItems="center">
-            <Box display="flex" gap={1.5} alignItems="center" flexWrap="wrap">
-              <Chip 
-                label={`${(sortedData?.rows.length ?? data.rows.length) || 0} rows`} 
-                size="small"
-                sx={{ bgcolor: '#10b981', color: 'white', fontWeight: 600, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }}
-              />
-              <Chip 
-                label={`${visibleColumnIndexes.length} columns`} 
-                size="small"
-                sx={{ bgcolor: '#6b7280', color: 'white', fontWeight: 600, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }}
-              />
-              {data.metadata.execution_time && (
-                <Chip label={`${data.metadata.execution_time}ms`} size="small" sx={{ bgcolor: 'white', border: '1px solid #d1d5db', fontWeight: 500, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }} />
-              )}
-              {data.metadata.row_count && data.metadata.row_count >= 1000 && (
-                <Chip 
-                  label="ROW LIMIT REACHED"
-                  size="small"
-                  sx={{ bgcolor: '#f59e0b', color: 'white', fontWeight: 700, fontSize: '0.7rem', height: 24 }}
-                />
-              )}
-            </Box>
-            <IconButton size="small" onClick={() => setShowMetadata(!showMetadata)}>
-              {showMetadata ? <CollapseIcon /> : <ExpandIcon />}
-            </IconButton>
-          </Box>
-          <Collapse in={showMetadata}>
-            <Box mt={2}>
-              <Grid container spacing={2}>
-                {data.metadata.query_id && (
-                  <Grid item xs={12} sm={6}>
-                    <Typography variant="body2" color="text.secondary" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.65rem' }}>
-                      Query ID: {data.metadata.query_id}
-                    </Typography>
-                  </Grid>
-                )}
-                {data.metadata.timestamp && (
-                  <Grid item xs={12} sm={6}>
-                    <Typography variant="body2" color="text.secondary" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.65rem' }}>
-                      Executed: {new Date(data.metadata.timestamp).toLocaleString()}
-                    </Typography>
-                  </Grid>
-                )}
-              </Grid>
-            </Box>
-          </Collapse>
-        </Box>
-      )}
-
-      {/* Tabs */}
-      {!collapsed && (
-      <Tabs 
-        value={tabValue} 
-        onChange={handleTabChange} 
-        sx={{ 
-          mb: 2,
-          display: viewMode ? 'none' : 'flex',
-          '& .MuiTab-root': {
-            fontFamily: '"Figtree", sans-serif',
-            textTransform: 'none',
-            fontWeight: 500,
-            fontSize: '0.875rem',
-            minHeight: 36,
-          }
+      <Paper
+        elevation={0}
+        sx={{
+          p: 2,
+          borderRadius: 3,
+          bgcolor: 'rgba(255,255,255,0.65)',
+          border: '1px solid rgba(255,255,255,0.45)',
+          backdropFilter: 'blur(8px) saturate(120%)',
         }}
       >
-        <Tab icon={<TableIcon fontSize="small" />} label="Table" />
-        <Tab icon={<ChartIcon fontSize="small" />} label="Chart" disabled={!chartConfig} />
-        <Tab icon={<JsonIcon fontSize="small" />} label="JSON" />
-      </Tabs>
-      )}
+        {/* Header */}
+        <Box display="flex" justifyContent="space-between" alignItems="center" mb={1.5}>
+          <Typography
+            variant="subtitle1"
+            sx={{
+              fontFamily: '"Figtree", sans-serif',
+              fontWeight: 600,
+              fontSize: '1rem',
+              color: '#111827',
+            }}
+          >
+            Query Results
+          </Typography>
+          <Box display="flex" gap={1} alignItems="center">
+            <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none' }}>
+              {collapsed ? 'Show' : 'Hide'}
+            </Button>
+            <TextField
+              size="small"
+              placeholder="Search results..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+                sx: {
+                  fontFamily: '"Figtree", sans-serif',
+                  fontSize: '0.875rem',
+                }
+              }}
+              sx={{ width: 200 }}
+            />
+            <Button
+              variant="outlined"
+              startIcon={<ColumnsIcon />}
+              onClick={handleColumnsClick}
+              size="small"
+              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
+            >
+              Columns
+            </Button>
+            <Menu anchorEl={columnsAnchorEl} open={Boolean(columnsAnchorEl)} onClose={handleColumnsClose}>
+              {data.columns.map((col) => {
+                const checked = selectedColumns.length === 0 || selectedColumns.includes(col)
+                return (
+                  <MenuItem key={col} onClick={() => toggleColumn(col)} dense>
+                    <ListItemIcon>
+                      <Checkbox edge="start" checked={checked} tabIndex={-1} disableRipple />
+                    </ListItemIcon>
+                    <ListItemText primaryTypographyProps={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' }} primary={col} />
+                  </MenuItem>
+                )
+              })}
+            </Menu>
+            <Button
+              variant="outlined"
+              startIcon={<CopyIcon />}
+              onClick={handleCopyClick}
+              size="small"
+              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
+            >
+              Copy
+            </Button>
+            <Menu anchorEl={copyAnchorEl} open={Boolean(copyAnchorEl)} onClose={handleCopyClose}>
+              <MenuItem onClick={copyCell} disabled={selectedCell.row === null || selectedCell.col === null}>Copy cell</MenuItem>
+              <MenuItem onClick={() => copyRow(',')} disabled={selectedCell.row === null}>Copy row (CSV)</MenuItem>
+              <MenuItem onClick={() => copyRow('\t')} disabled={selectedCell.row === null}>Copy row (TSV)</MenuItem>
+              <MenuItem onClick={() => copyColumn()} disabled={selectedCell.col === null}>Copy column</MenuItem>
+              <MenuItem onClick={() => copyPageAs(',')}>Copy page as CSV</MenuItem>
+              <MenuItem onClick={() => copyPageAs('\t')}>Copy page as TSV</MenuItem>
+            </Menu>
+            <Button
+              variant="outlined"
+              startIcon={<ExportIcon />}
+              onClick={handleExportClick}
+              size="small"
+              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
+            >
+              Export
+            </Button>
+            <Menu anchorEl={exportAnchorEl} open={Boolean(exportAnchorEl)} onClose={handleExportClose}>
+              <MenuItem onClick={exportToCSV} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as CSV</MenuItem>
+              <MenuItem onClick={exportToJSON} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as JSON</MenuItem>
+              <MenuItem onClick={exportToXLSX} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as Excel (.xlsx)</MenuItem>
+            </Menu>
+            {shouldVirtualize && (
+              <Chip label="Virtualized" size="small" sx={{ height: 22, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#111827', color: 'white' }} />
+            )}
+          </Box>
+        </Box>
 
-      {!collapsed && (
-      <TabPanel value={tabValue} index={0}>
-        {/* Table View */}
-        <TableContainer sx={{ maxHeight: 500, overflowX: 'auto' }} ref={containerRef}>
-          <Table stickyHeader size="small" aria-label="query-results-table" sx={{ minWidth: 600, tableLayout: 'fixed' }}>
-            <TableHead>
-              <TableRow>
-                {visibleColumnIndexes.map((colIndex, visIdx) => (
-                  <TableCell 
-                    key={colIndex}
-                    sortDirection={orderBy === colIndex ? order : false}
-                    sx={{ 
-                      fontWeight: 700, 
-                      fontFamily: '"Figtree", sans-serif', 
-                      fontSize: '0.75rem', 
-                      bgcolor: '#f9fafb', 
-                      color: '#111827', 
-                      borderBottom: '2px solid #e5e7eb', 
-                      borderRight: visIdx < visibleColumnIndexes.length - 1 ? '1px solid #e5e7eb' : 'none', 
-                      py: 0.6,
-                      position: 'relative',
-                      width: columnWidths[colIndex] ? `${columnWidths[colIndex]}px` : undefined,
-                      whiteSpace: 'nowrap',
-                      textAlign: visibleNumericIndexes.includes(colIndex) ? 'right' : 'left',
-                    }}
-                  >
-                    <TableSortLabel
-                      active={orderBy === colIndex}
-                      direction={orderBy === colIndex ? order : 'asc'}
-                      onClick={() => handleRequestSort(colIndex)}
-                      hideSortIcon={false}
-                    >
-                      {data.columns[colIndex]}
-                    </TableSortLabel>
-                    {/* Resizer */}
-                    <Box
-                      onMouseDown={(e) => onResizeMouseDown(e, colIndex)}
-                      sx={{
-                        position: 'absolute',
-                        top: 0,
-                        right: -4,
-                        width: 8,
-                        height: '100%',
-                        cursor: 'col-resize',
-                        zIndex: 2,
-                      }}
-                    />
-                  </TableCell>
-                ))}
-              </TableRow>
-            </TableHead>
-            {shouldVirtualize ? (
-              <TableBody component={Box} sx={{ display: 'block', height: 500, position: 'relative' }}>
-                {RW && (
-                  <RW.FixedSizeList
-                    ref={listRef}
-                    itemCount={paginatedData?.rows.length || 0}
-                    itemSize={32}
-                    height={Math.min(500, (paginatedData?.rows.length || 0) * 32)}
-                    width="100%"
-                  >
-                    {({ index, style }: any) => {
-                      const row = paginatedData!.rows[index]
-                      return (
-                        <Box style={style} key={index}>
-                          <TableRow hover sx={{ '&:hover': { bgcolor: '#f9fafb' } }}>
-                            {visibleColumnIndexes.map((colIndex, visIdx) => (
-                              <TableCell 
-                                key={`${index}-${colIndex}`}
-                                data-row={index}
-                                data-col={visIdx}
-                                tabIndex={0}
-                                onKeyDown={(e) => onCellKeyDown(e, index, visIdx)}
-                                onClick={() => setSelectedCell({ row: index, col: visIdx })}
-                                sx={{ 
-                                  fontFamily: '"Figtree", sans-serif', 
-                                  fontSize: '0.7rem', 
-                                  color: '#374151', 
-                                  py: 0.25, 
-                                  px: 0.8, 
-                                  borderRight: visIdx < visibleColumnIndexes.length - 1 ? '1px solid #e5e7eb' : 'none',
-                                  width: columnWidths[colIndex] ? `${columnWidths[colIndex]}px` : undefined,
-                                  outline: selectedCell.row === index && selectedCell.col === visIdx ? '2px solid #10b981' : 'none',
-                                  outlineOffset: -2,
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  whiteSpace: 'nowrap',
-                                  textAlign: visibleNumericIndexes.includes(colIndex) ? 'right' : 'left',
-                                }}
-                              >
-                                {renderCell(row[colIndex])}
-                              </TableCell>
-                            ))}
-                          </TableRow>
-                        </Box>
-                      )
-                    }}
-                  </RW.FixedSizeList>
+        {/* Metadata */}
+        {data.metadata && !collapsed && (
+          <Box sx={{ mb: 2, p: 1.5, bgcolor: 'rgba(249,250,251,0.6)', borderRadius: 1.5, border: '1px solid #e5e7eb' }}>
+            <Box display="flex" justifyContent="space-between" alignItems="center">
+              <Box display="flex" gap={1.5} alignItems="center" flexWrap="wrap">
+                <Chip
+                  label={`${(sortedData?.rows.length ?? data.rows.length) || 0} rows`}
+                  size="small"
+                  sx={{ bgcolor: '#10b981', color: 'white', fontWeight: 600, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }}
+                />
+                <Chip
+                  label={`${visibleColumnIndexes.length} columns`}
+                  size="small"
+                  sx={{ bgcolor: '#6b7280', color: 'white', fontWeight: 600, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }}
+                />
+                {data.metadata.execution_time && (
+                  <Chip label={`${data.metadata.execution_time}ms`} size="small" sx={{ bgcolor: 'white', border: '1px solid #d1d5db', fontWeight: 500, fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif', height: 24 }} />
                 )}
-              </TableBody>
+                {data.metadata.row_count && data.metadata.row_count >= 1000 && (
+                  <Chip
+                    label="ROW LIMIT REACHED"
+                    size="small"
+                    sx={{ bgcolor: '#f59e0b', color: 'white', fontWeight: 700, fontSize: '0.7rem', height: 24 }}
+                  />
+                )}
+              </Box>
+              <IconButton size="small" onClick={() => setShowMetadata(!showMetadata)}>
+                {showMetadata ? <CollapseIcon /> : <ExpandIcon />}
+              </IconButton>
+            </Box>
+            <Collapse in={showMetadata}>
+              <Box mt={2}>
+                <Grid container spacing={2}>
+                  {data.metadata.query_id && (
+                    <Grid item xs={12} sm={6}>
+                      <Typography variant="body2" color="text.secondary" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.65rem' }}>
+                        Query ID: {data.metadata.query_id}
+                      </Typography>
+                    </Grid>
+                  )}
+                  {data.metadata.timestamp && (
+                    <Grid item xs={12} sm={6}>
+                      <Typography variant="body2" color="text.secondary" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.65rem' }}>
+                        Executed: {new Date(data.metadata.timestamp).toLocaleString()}
+                      </Typography>
+                    </Grid>
+                  )}
+                </Grid>
+              </Box>
+            </Collapse>
+          </Box>
+        )}
+
+        {/* Tabs */}
+        {!collapsed && (
+          <Tabs
+            value={tabValue}
+            onChange={handleTabChange}
+            sx={{
+              mb: 2,
+              display: viewMode ? 'none' : 'flex',
+              '& .MuiTab-root': {
+                fontFamily: '"Figtree", sans-serif',
+                textTransform: 'none',
+                fontWeight: 500,
+                fontSize: '0.875rem',
+                minHeight: 36,
+              }
+            }}
+          >
+            <Tab icon={<TableIcon fontSize="small" />} label="Table" />
+            <Tab icon={<ChartIcon fontSize="small" />} label="Chart" disabled={!chartConfig} />
+            <Tab icon={<JsonIcon fontSize="small" />} label="JSON" />
+          </Tabs>
+        )}
+
+        {!collapsed && (
+          <TabPanel value={tabValue} index={1}>
+            {/* Chart View */}
+            {chartConfig ? (
+              <Box>
+                <Paper variant="outlined" sx={{ p: 2, mb: 3, bgcolor: 'rgba(255,255,255,0.5)' }}>
+                  <Grid container spacing={3} alignItems="center">
+                    <Grid item xs={12} md={4}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel id="chart-type-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>Chart Type</InputLabel>
+                        <Select
+                          labelId="chart-type-label"
+                          value={chartType}
+                          label="Chart Type"
+                          onChange={(e) => setChartType(e.target.value as any)}
+                          sx={{ fontFamily: '"Figtree", sans-serif' }}
+                        >
+                          <MenuItem value="bar" sx={{ fontFamily: '"Figtree", sans-serif' }}>Bar Chart</MenuItem>
+                          <MenuItem value="line" sx={{ fontFamily: '"Figtree", sans-serif' }}>Line Chart</MenuItem>
+                          <MenuItem value="pie" sx={{ fontFamily: '"Figtree", sans-serif' }}>Pie Chart</MenuItem>
+                          <MenuItem value="area" sx={{ fontFamily: '"Figtree", sans-serif' }}>Area Chart</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} md={4}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel id="chart-dim-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>X-Axis (Dimension)</InputLabel>
+                        <Select
+                          labelId="chart-dim-label"
+                          value={chartDimension || ''}
+                          label="X-Axis (Dimension)"
+                          onChange={(e) => setChartDimension(e.target.value)}
+                          sx={{ fontFamily: '"Figtree", sans-serif' }}
+                        >
+                          {data.columns.map((col) => (
+                            <MenuItem key={col} value={col} sx={{ fontFamily: '"Figtree", sans-serif' }}>{col}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} md={4}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel id="chart-metric-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>Y-Axis (Metric)</InputLabel>
+                        <Select
+                          labelId="chart-metric-label"
+                          value={chartMetric || ''}
+                          label="Y-Axis (Metric)"
+                          onChange={(e) => setChartMetric(e.target.value)}
+                          sx={{ fontFamily: '"Figtree", sans-serif' }}
+                        >
+                          {numericColumns.map((idx) => (
+                            <MenuItem key={data.columns[idx]} value={data.columns[idx]} sx={{ fontFamily: '"Figtree", sans-serif' }}>{data.columns[idx]}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  </Grid>
+                </Paper>
+
+                <Box height={400} width="100%">
+                  <ResponsiveContainer width="100%" height="100%">
+                    {chartType === 'bar' ? (
+                      <BarChart data={chartConfig.data}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                        <XAxis
+                          dataKey={chartConfig.dimensionKey}
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                        />
+                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
+                        <Legend />
+                        <Bar dataKey={chartConfig.metricKey} fill="#10b981" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    ) : chartType === 'line' ? (
+                      <LineChart data={chartConfig.data}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                        <XAxis
+                          dataKey={chartConfig.dimensionKey}
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                        />
+                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
+                        <Legend />
+                        <Line type="monotone" dataKey={chartConfig.metricKey} stroke="#10b981" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                      </LineChart>
+                    ) : chartType === 'area' ? (
+                      <AreaChart data={chartConfig.data}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                        <XAxis
+                          dataKey={chartConfig.dimensionKey}
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11 }}
+                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                        />
+                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
+                        <Legend />
+                        <Area type="monotone" dataKey={chartConfig.metricKey} stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
+                      </AreaChart>
+                    ) : (
+                      <PieChart>
+                        <Pie
+                          data={chartConfig.data}
+                          cx="50%"
+                          cy="50%"
+                          labelLine={false}
+                          label={({ payload, percent }: any) => `${payload[chartConfig.dimensionKey].substring(0, 15)} ${(percent * 100).toFixed(0)}%`}
+                          outerRadius={120}
+                          fill="#8884d8"
+                          dataKey={chartConfig.metricKey}
+                          nameKey={chartConfig.dimensionKey}
+                        >
+                          {chartConfig.data.map((_entry, index) => (
+                            <Cell key={`cell-${index}`} fill={`hsla(${(index * 360) / chartConfig.data.length}, 70%, 50%, 0.8)`} />
+                          ))}
+                        </Pie>
+                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
+                        <Legend />
+                      </PieChart>
+                    )}
+                  </ResponsiveContainer>
+                </Box>
+              </Box>
             ) : (
-              <TableBody>
-                {paginatedData?.rows.map((row, rowIndex) => (
-                  <TableRow key={rowIndex} hover sx={{ '&:hover': { bgcolor: '#f9fafb' } }}>
+              <Alert severity="info">
+                <Typography>No numeric data available for charting. The chart view requires at least one numeric column.</Typography>
+              </Alert>
+            )}
+          </TabPanel>
+        )}
+        {!collapsed && (
+          <TabPanel value={tabValue} index={0}>
+            {/* Table View */}
+            <TableContainer sx={{ maxHeight: 500, overflowX: 'auto' }} ref={containerRef}>
+              <Table stickyHeader size="small" aria-label="query-results-table" sx={{ minWidth: 600, tableLayout: 'fixed' }}>
+                <TableHead>
+                  <TableRow>
                     {visibleColumnIndexes.map((colIndex, visIdx) => (
-                      <TableCell 
-                        key={`${rowIndex}-${colIndex}`}
-                        data-row={rowIndex}
-                        data-col={visIdx}
-                        tabIndex={0}
-                        onKeyDown={(e) => onCellKeyDown(e, rowIndex, visIdx)}
-                        onClick={() => setSelectedCell({ row: rowIndex, col: visIdx })}
-                        sx={{ 
-                          fontFamily: '"Figtree", sans-serif', 
-                          fontSize: '0.7rem', 
-                          color: '#374151', 
-                          py: 0.25, 
-                          px: 0.8, 
+                      <TableCell
+                        key={colIndex}
+                        sortDirection={orderBy === colIndex ? order : false}
+                        sx={{
+                          fontWeight: 700,
+                          fontFamily: '"Figtree", sans-serif',
+                          fontSize: '0.75rem',
+                          bgcolor: '#f9fafb',
+                          color: '#111827',
+                          borderBottom: '2px solid #e5e7eb',
                           borderRight: visIdx < visibleColumnIndexes.length - 1 ? '1px solid #e5e7eb' : 'none',
+                          py: 0.6,
+                          position: 'relative',
                           width: columnWidths[colIndex] ? `${columnWidths[colIndex]}px` : undefined,
-                          outline: selectedCell.row === rowIndex && selectedCell.col === visIdx ? '2px solid #10b981' : 'none',
-                          outlineOffset: -2,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
                           textAlign: visibleNumericIndexes.includes(colIndex) ? 'right' : 'left',
                         }}
                       >
-                        {renderCell(row[colIndex])}
+                        <TableSortLabel
+                          active={orderBy === colIndex}
+                          direction={orderBy === colIndex ? order : 'asc'}
+                          onClick={() => handleRequestSort(colIndex)}
+                          hideSortIcon={false}
+                        >
+                          {data.columns[colIndex]}
+                        </TableSortLabel>
+                        {/* Resizer */}
+                        <Box
+                          onMouseDown={(e) => onResizeMouseDown(e, colIndex)}
+                          sx={{
+                            position: 'absolute',
+                            top: 0,
+                            right: -4,
+                            width: 8,
+                            height: '100%',
+                            cursor: 'col-resize',
+                            zIndex: 2,
+                          }}
+                        />
                       </TableCell>
                     ))}
                   </TableRow>
-                ))}
-              </TableBody>
-            )}
-            {/* Aggregate Footer */}
-            <TableFooter>
-              <TableRow>
-                {visibleColumnIndexes.map((colIndex, visIdx) => (
-                  <TableCell key={`agg-${colIndex}`} sx={{ fontSize: '0.7rem', fontFamily: '"Figtree", sans-serif', bgcolor: '#f9fafb', borderTop: '2px solid #e5e7eb' }}>
-                    {visIdx === 0 ? (
-                      <Typography variant="caption" sx={{ fontWeight: 700 }}>Count: {sortedData?.rows.length || 0}</Typography>
-                    ) : aggregates[colIndex] ? (
-                      <Typography variant="caption" sx={{ display: 'flex', gap: 1 }}>
-                        <Box component="span"> {formatNumber.format(aggregates[colIndex]!.sum)}</Box>
-                        <Box component="span"> {formatNumber.format(aggregates[colIndex]!.avg)}</Box>
-                      </Typography>
-                    ) : null}
-                  </TableCell>
-                ))}
-              </TableRow>
-            </TableFooter>
-          </Table>
-        </TableContainer>
-        
-        <TablePagination
-          rowsPerPageOptions={[10, 25, 50, 100]}
-          component="div"
-          count={sortedData?.rows.length || 0}
-          rowsPerPage={rowsPerPage}
-          page={page}
-          onPageChange={handleChangePage}
-          onRowsPerPageChange={handleChangeRowsPerPage}
-          sx={{
-            '& .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows': { fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' },
-            '& .MuiSelect-select': { fontFamily: '"Figtree", sans-serif' }
-          }}
-        />
-      </TabPanel>
-      )}
-
-      {!collapsed && (
-      <TabPanel value={tabValue} index={1}>
-        {/* Chart View */}
-        {chartConfig ? (
-          <Box>
-            <Grid container spacing={3}>
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" gutterBottom>Bar Chart</Typography>
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={chartConfig.data}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis
-                      dataKey={chartConfig.dimensionKey}
-                      tick={{ fontSize: 11 }}
-                      label={{
-                        value: chartConfig.dimensionLabel,
-                        position: 'insideBottom',
-                        offset: -5,
-                        style: { fontSize: 11 },
-                      }}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 11 }}
-                      label={{
-                        value: chartConfig.metricLabel,
-                        angle: -90,
-                        position: 'insideLeft',
-                        style: { fontSize: 11 },
-                      }}
-                    />
-                    <RechartsTooltip
-                      formatter={(value: any) => [
-                        formatNumber.format(Number(value) || 0),
-                        chartConfig.metricLabel,
-                      ]}
-                      labelFormatter={(label: any) => `${chartConfig.dimensionLabel}: ${label}`}
-                    />
-                    <Legend />
-                    <Bar dataKey={chartConfig.metricKey} fill="#8884d8" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </Grid>
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" gutterBottom>Line Chart</Typography>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={chartConfig.data}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis
-                      dataKey={chartConfig.dimensionKey}
-                      tick={{ fontSize: 11 }}
-                      label={{
-                        value: chartConfig.dimensionLabel,
-                        position: 'insideBottom',
-                        offset: -5,
-                        style: { fontSize: 11 },
-                      }}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 11 }}
-                      label={{
-                        value: chartConfig.metricLabel,
-                        angle: -90,
-                        position: 'insideLeft',
-                        style: { fontSize: 11 },
-                      }}
-                    />
-                    <RechartsTooltip
-                      formatter={(value: any) => [
-                        formatNumber.format(Number(value) || 0),
-                        chartConfig.metricLabel,
-                      ]}
-                      labelFormatter={(label: any) => `${chartConfig.dimensionLabel}: ${label}`}
-                    />
-                    <Legend />
-                    <Line type="monotone" dataKey={chartConfig.metricKey} stroke="#8884d8" strokeWidth={2} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Grid>
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" gutterBottom>Pie Chart</Typography>
-                <ResponsiveContainer width="100%" height={300}>
-                  <PieChart>
-                    <Pie
-                      data={chartConfig.data}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={({ payload, percent }: any) => `${payload[chartConfig.dimensionKey]} ${(percent * 100).toFixed(0)}%`}
-                      outerRadius={80}
-                      fill="#8884d8"
-                      dataKey={chartConfig.metricKey}
-                      nameKey={chartConfig.dimensionKey}
-                    >
-                      {chartConfig.data.map((entry, index) => {
-                        const keyBase = (entry as any)?.[chartConfig.dimensionKey] ?? index
-                        return (
-                          <Cell
-                            key={`${keyBase}-${index}`}
-                            fill={`hsla(${(index * 360) / chartConfig.data.length}, 70%, 50%, 0.6)`}
-                          />
-                        )
-                      })}
-                    </Pie>
-                    <RechartsTooltip
-                      formatter={(value: any) => [
-                        formatNumber.format(Number(value) || 0),
-                        chartConfig.metricLabel,
-                      ]}
-                      labelFormatter={(label: any) => `${chartConfig.dimensionLabel}: ${label}`}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </Grid>
-            </Grid>
-          </Box>
-        ) : (
-          <Alert severity="info">
-            <Typography>No numeric data available for charting. The chart view requires at least one numeric column.</Typography>
-          </Alert>
-        )}
-      </TabPanel>
-      )}
-
-      <TabPanel value={tabValue} index={2}>
-        {/* Aggregate Summary + JSON View */}
-        <Box sx={{ mb: 2 }}>
-          {visibleNumericIndexes.length > 0 ? (
-            <Paper variant="outlined" sx={{ p: 2, bgcolor: 'grey.50' }}>
-              <Box display="flex" alignItems="center" gap={1} mb={1.5}>
-                <InfoIcon fontSize="small" color="primary" />
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontFamily: '"Figtree", sans-serif', fontWeight: 600, fontSize: '0.85rem' }}
-                >
-                  Aggregate summary for numeric columns
-                </Typography>
-              </Box>
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Column</TableCell>
-                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Sum</TableCell>
-                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Average</TableCell>
-                  </TableRow>
                 </TableHead>
-                <TableBody>
-                  {visibleNumericIndexes.map((idx) => {
-                    const agg = aggregates[idx]
-                    if (!agg) return null
-                    return (
-                      <TableRow key={idx}>
-                        <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif' }}>
-                          {data.columns[idx]}
-                        </TableCell>
-                        <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace' }}>
-                          {formatNumber.format(agg.sum)}
-                        </TableCell>
-                        <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace' }}>
-                          {formatNumber.format(agg.avg)}
-                        </TableCell>
+                {shouldVirtualize ? (
+                  <TableBody component={Box} sx={{ display: 'block', height: 500, position: 'relative' }}>
+                    {RW && (
+                      <RW.FixedSizeList
+                        ref={listRef}
+                        itemCount={paginatedData?.rows.length || 0}
+                        itemSize={32}
+                        height={Math.min(500, (paginatedData?.rows.length || 0) * 32)}
+                        width="100%"
+                      >
+                        {({ index, style }: any) => {
+                          const row = paginatedData!.rows[index]
+                          return (
+                            <Box style={style} key={index}>
+                              <TableRow hover sx={{ '&:hover': { bgcolor: '#f9fafb' } }}>
+                                {visibleColumnIndexes.map((colIndex, visIdx) => (
+                                  <TableCell
+                                    key={`${index}-${colIndex}`}
+                                    data-row={index}
+                                    data-col={visIdx}
+                                    tabIndex={0}
+                                    onKeyDown={(e) => onCellKeyDown(e, index, visIdx)}
+                                    onClick={() => setSelectedCell({ row: index, col: visIdx })}
+                                    sx={{
+                                      fontFamily: '"Figtree", sans-serif',
+                                      fontSize: '0.7rem',
+                                      color: '#374151',
+                                      py: 0.25,
+                                      px: 0.8,
+                                      borderRight: visIdx < visibleColumnIndexes.length - 1 ? '1px solid #e5e7eb' : 'none',
+                                      width: columnWidths[colIndex] ? `${columnWidths[colIndex]}px` : undefined,
+                                      outline: selectedCell.row === index && selectedCell.col === visIdx ? '2px solid #10b981' : 'none',
+                                      outlineOffset: -2,
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      textAlign: visibleNumericIndexes.includes(colIndex) ? 'right' : 'left',
+                                    }}
+                                  >
+                                    {renderCell(row[colIndex])}
+                                  </TableCell>
+                                ))}
+                              </TableRow>
+                            </Box>
+                          )
+                        }}
+                      </RW.FixedSizeList>
+                    )}
+                  </TableBody>
+                ) : (
+                  <TableBody>
+                    {paginatedData?.rows.map((row, rowIndex) => (
+                      <TableRow key={rowIndex} hover sx={{ '&:hover': { bgcolor: '#f9fafb' } }}>
+                        {visibleColumnIndexes.map((colIndex, visIdx) => (
+                          <TableCell
+                            key={`${rowIndex}-${colIndex}`}
+                            data-row={rowIndex}
+                            data-col={visIdx}
+                            tabIndex={0}
+                            onKeyDown={(e) => onCellKeyDown(e, rowIndex, visIdx)}
+                            onClick={() => setSelectedCell({ row: rowIndex, col: visIdx })}
+                            sx={{
+                              fontFamily: '"Figtree", sans-serif',
+                              fontSize: '0.7rem',
+                              color: '#374151',
+                              py: 0.25,
+                              px: 0.8,
+                              borderRight: visIdx < visibleColumnIndexes.length - 1 ? '1px solid #e5e7eb' : 'none',
+                              width: columnWidths[colIndex] ? `${columnWidths[colIndex]}px` : undefined,
+                              outline: selectedCell.row === rowIndex && selectedCell.col === visIdx ? '2px solid #10b981' : 'none',
+                              outlineOffset: -2,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              textAlign: visibleNumericIndexes.includes(colIndex) ? 'right' : 'left',
+                            }}
+                          >
+                            {renderCell(row[colIndex])}
+                          </TableCell>
+                        ))}
                       </TableRow>
-                    )
-                  })}
-                </TableBody>
+                    ))}
+                  </TableBody>
+                )}
+                {/* Aggregate Footer */}
+                <TableFooter>
+                  <TableRow>
+                    {visibleColumnIndexes.map((colIndex, visIdx) => (
+                      <TableCell key={`agg-${colIndex}`} sx={{ fontSize: '0.7rem', fontFamily: '"Figtree", sans-serif', bgcolor: '#f9fafb', borderTop: '2px solid #e5e7eb' }}>
+                        {visIdx === 0 ? (
+                          <Typography variant="caption" sx={{ fontWeight: 700 }}>Count: {sortedData?.rows.length || 0}</Typography>
+                        ) : aggregates[colIndex] ? (
+                          <Typography variant="caption" sx={{ display: 'flex', gap: 1 }}>
+                            <Box component="span"> {formatNumber.format(aggregates[colIndex]!.sum)}</Box>
+                            <Box component="span"> {formatNumber.format(aggregates[colIndex]!.avg)}</Box>
+                          </Typography>
+                        ) : null}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                </TableFooter>
               </Table>
-            </Paper>
-          ) : (
-            <Alert severity="info" sx={{ mb: 1 }}>
-              <Typography variant="body2" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.8rem' }}>
-                No numeric columns detected for aggregate summary.
-              </Typography>
-            </Alert>
-          )}
-        </Box>
+            </TableContainer>
 
-        {/* JSON View */}
-        <Paper variant="outlined" sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 400, overflow: 'auto' }}>
-          <pre style={{ margin: 0, fontSize: '0.875rem' }}>
-            {JSON.stringify({
-              metadata: data.metadata,
-              columns: data.columns,
-              rows: data.rows,
-            }, null, 2)}
-          </pre>
-        </Paper>
-      </TabPanel>
+            <TablePagination
+              rowsPerPageOptions={[10, 25, 50, 100]}
+              component="div"
+              count={sortedData?.rows.length || 0}
+              rowsPerPage={rowsPerPage}
+              page={page}
+              onPageChange={handleChangePage}
+              onRowsPerPageChange={handleChangeRowsPerPage}
+              sx={{
+                '& .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows': { fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' },
+                '& .MuiSelect-select': { fontFamily: '"Figtree", sans-serif' }
+              }}
+            />
+          </TabPanel>
+        )}
 
-    </Paper>
 
-    {/* Progressive Disclosure Dialog */}
-    <ProgressiveDisclosureDialog
-      open={disclosureDialog.open}
-      rowCount={disclosureDialog.rowCount}
-      estimatedSize={disclosureDialog.estimatedSize}
-      previewData={data ? {
-        columns: data.columns,
-        rows: data.rows.slice(0, 10)
-      } : undefined}
-      onClose={() => setDisclosureDialog({ ...disclosureDialog, open: false })}
-      onChoiceSelected={handleDisclosureChoice}
-    />
-  </>
+
+        <TabPanel value={tabValue} index={2}>
+          {/* Aggregate Summary + JSON View */}
+          <Box sx={{ mb: 2 }}>
+            {visibleNumericIndexes.length > 0 ? (
+              <Paper variant="outlined" sx={{ p: 2, bgcolor: 'grey.50' }}>
+                <Box display="flex" alignItems="center" gap={1} mb={1.5}>
+                  <InfoIcon fontSize="small" color="primary" />
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontFamily: '"Figtree", sans-serif', fontWeight: 600, fontSize: '0.85rem' }}
+                  >
+                    Aggregate summary for numeric columns
+                  </Typography>
+                </Box>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Column</TableCell>
+                      <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Sum</TableCell>
+                      <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem' }}>Average</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {visibleNumericIndexes.map((idx) => {
+                      const agg = aggregates[idx]
+                      if (!agg) return null
+                      return (
+                        <TableRow key={idx}>
+                          <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"Figtree", sans-serif' }}>
+                            {data.columns[idx]}
+                          </TableCell>
+                          <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace' }}>
+                            {formatNumber.format(agg.sum)}
+                          </TableCell>
+                          <TableCell sx={{ fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace' }}>
+                            {formatNumber.format(agg.avg)}
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </Paper>
+            ) : (
+              <Alert severity="info" sx={{ mb: 1 }}>
+                <Typography variant="body2" sx={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.8rem' }}>
+                  No numeric columns detected for aggregate summary.
+                </Typography>
+              </Alert>
+            )}
+          </Box>
+
+          {/* JSON View */}
+          <Paper variant="outlined" sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 400, overflow: 'auto' }}>
+            <pre style={{ margin: 0, fontSize: '0.875rem' }}>
+              {JSON.stringify({
+                metadata: data.metadata,
+                columns: data.columns,
+                rows: data.rows,
+              }, null, 2)}
+            </pre>
+          </Paper>
+        </TabPanel>
+
+      </Paper >
+
+      {/* Progressive Disclosure Dialog */}
+      <ProgressiveDisclosureDialog
+        open={disclosureDialog.open}
+        rowCount={disclosureDialog.rowCount}
+        estimatedSize={disclosureDialog.estimatedSize}
+        previewData={data ? {
+          columns: data.columns,
+          rows: data.rows.slice(0, 10)
+        } : undefined}
+        onClose={() => setDisclosureDialog({ ...disclosureDialog, open: false })}
+        onChoiceSelected={handleDisclosureChoice}
+      />
+    </>
   )
 }
 

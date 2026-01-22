@@ -1,17 +1,19 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { Button } from './ui/button'
 import { Card, CardContent } from './ui/card'
-import { AlertTriangle } from 'lucide-react'
 import { QuerySuggestionsSimple } from './QuerySuggestionsSimple'
 import { QueryValidationIndicator } from './QueryValidationIndicator'
 import { HITLApprovalDialog } from './HITLApprovalDialog'
 import { ChatHistoryDrawer } from './ChatHistoryDrawer'
+import { SessionCostTicker } from './SessionCostTicker'
+import { DrillDownBreadcrumbs } from './DrillDownBreadcrumbs'
 import { AssistantMessageCard } from './AssistantMessageCard'
 import { UserMessageBubble } from './UserMessageBubble'
 import { ChatTopBar } from './ChatTopBar'
 import { ClarificationDialog } from './ClarificationDialog'
+import { ErrorCard } from './ErrorCard'
 import { useQuerySubmission } from '@/hooks/useQuerySubmission'
-import { useChatStore, useChats, useCurrentChatId, useChatActions } from '@/stores/chatStore'
+import { useMessages, useIsLoading, useChats, useCurrentChatId, useChatActions } from '@/stores/chatStore'
 import { cn } from '@/utils/cn'
 import { useQueryHistory } from '@/hooks/useQueryHistory'
 import type { NormalizedHistoryItem } from '@/utils/history'
@@ -26,15 +28,17 @@ import { Send } from 'lucide-react'
 
 export function RealChatInterface() {
   // Global Store State
+  const messages = useMessages()
+  const storeLoading = useIsLoading()
   const {
-    messages,
     addMessage,
     updateMessage,
     mergeMessage,
-    isLoading: storeLoading,
     setLoading,
-  } = useChatStore()
-  const { createChat, switchChat, autoNameChatFromQuery } = useChatActions()
+    createChat,
+    switchChat,
+    autoNameChatFromQuery
+  } = useChatActions()
   const chats = useChats()
   const currentChatId = useCurrentChatId()
   const currentChat = chats.find(c => c.id === currentChatId) || null
@@ -55,7 +59,35 @@ export function RealChatInterface() {
   const lastUserQueryRef = useRef<string>("")
 
   // Backend Hooks
-  const { submitQuery, isLoading, error, currentState, response, retryConnection } = useQuerySubmission()
+  const { submitQuery, isLoading, error, currentState, response, retryConnection, cancelQuery } = useQuerySubmission()
+
+  // Cancellation state
+  const [cancelling, setCancelling] = useState(false)
+
+  // Handle query cancellation
+  const handleCancelQuery = async () => {
+    setCancelling(true)
+    try {
+      await cancelQuery()
+      // Update the last message to show cancellation
+      const lastMessage = messages[messages.length - 1]
+      if (lastMessage && lastMessage.type === 'assistant') {
+        mergeMessage(lastMessage.id, (prev) => ({
+          ...prev,
+          content: 'Query cancelled by user',
+          toolCall: {
+            ...(prev.toolCall || { name: 'query_processor', params: { query: lastUserQueryRef.current || '' } }),
+            status: 'error',
+            error: 'Query cancelled by user',
+          },
+        }))
+      }
+    } catch (err: any) {
+      console.error('Failed to cancel query:', err)
+    } finally {
+      setCancelling(false)
+    }
+  }
 
   // Dialog Flows
   const {
@@ -332,12 +364,13 @@ export function RealChatInterface() {
               thinkingSteps: currentState.thinking_steps ?? prev.toolCall?.metadata?.thinkingSteps,
               schemaData: currentState.schema_data ?? prev.toolCall?.metadata?.schemaData,
               intermediateData: currentState.intermediate_data ?? prev.toolCall?.metadata?.intermediateData,
+              queryId: response?.query_id ?? prev.toolCall?.metadata?.queryId,
             },
           },
         }))
       }
     }
-  }, [currentState])
+  }, [currentState, response?.query_id])
 
   // SSE Pending Approval Trigger
   useEffect(() => {
@@ -370,6 +403,9 @@ export function RealChatInterface() {
           setShowHistory(true)
         }}
       />
+      
+      {/* Drill-Down Breadcrumbs */}
+      <DrillDownBreadcrumbs />
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4">
@@ -417,6 +453,15 @@ export function RealChatInterface() {
                       handleSend()
                     }}
                     isLoading={isLoading}
+                    onRetry={() => {
+                      // Retry the original query from this message's context
+                      const originalQuery = message.toolCall?.params?.query
+                      if (originalQuery && typeof originalQuery === 'string') {
+                        handleSendQuery(originalQuery)
+                      }
+                    }}
+                    onCancelQuery={handleCancelQuery}
+                    cancelling={cancelling}
                   />
                 )}
               </div>
@@ -425,25 +470,13 @@ export function RealChatInterface() {
 
           {/* Connection Error with Retry */}
           {error && error.includes('Connection to server lost') && (
-            <Card className="border-orange-300 bg-orange-50 dark:border-orange-500 dark:bg-orange-950/70">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="h-5 w-5 text-orange-600 dark:text-orange-300 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <div className="font-semibold text-orange-900 dark:text-orange-100 mb-1">{UI_STRINGS.CONNECTION_LOST_TITLE}</div>
-                    <div className="text-sm text-orange-700 dark:text-orange-100 mb-3">{error}</div>
-                    <Button
-                      onClick={retryConnection}
-                      size="sm"
-                      variant="outline"
-                      className="border-orange-300 dark:border-orange-500 hover:bg-orange-100 dark:hover:bg-orange-900/40"
-                    >
-                      {UI_STRINGS.RETRY_CONNECTION}
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <ErrorCard
+              title={UI_STRINGS.CONNECTION_LOST_TITLE}
+              message={error}
+              severity="warning"
+              onRetry={retryConnection}
+              retryLabel={UI_STRINGS.RETRY_CONNECTION}
+            />
           )}
 
           <div ref={messagesEndRef} />
@@ -523,6 +556,9 @@ export function RealChatInterface() {
         onEditAndRun={handleEditAndRun}
         onClose={() => setShowHistory(false)}
       />
+      
+      {/* Session Cost Ticker */}
+      <SessionCostTicker />
     </div>
   )
 }

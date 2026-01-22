@@ -261,9 +261,15 @@ const ProgressiveDisclosureDialog: React.FC<ProgressiveDisclosureDialogProps> = 
                 <TableBody>
                   {previewData.rows.slice(0, 5).map((row, rowIdx) => (
                     <TableRow key={rowIdx}>
-                      {row.map((cell, cellIdx) => (
-                        <TableCell key={cellIdx}>{cell?.toString() || '-'}</TableCell>
-                      ))}
+                      {Array.isArray(row) ? (
+                        row.map((cell, cellIdx) => (
+                          <TableCell key={cellIdx}>{cell?.toString() || '-'}</TableCell>
+                        ))
+                      ) : (
+                        previewData.columns.map((col, cellIdx) => (
+                          <TableCell key={cellIdx}>{row[col]?.toString() || '-'}</TableCell>
+                        ))
+                      )}
                     </TableRow>
                   ))}
                 </TableBody>

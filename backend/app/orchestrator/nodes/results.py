@@ -105,7 +105,12 @@ async def validate_results_node(state: QueryState) -> QueryState:
     # Check 2: Null ratios per column
     if rows and row_count > 0:
         for col_idx, col_name in enumerate(columns):
-            null_count = sum(1 for row in rows if row[col_idx] is None or str(row[col_idx]).strip() == '')
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name)
+                return r[idx]
+            
+            null_count = sum(1 for row in rows if get_val(row, col_idx, col_name) is None or str(get_val(row, col_idx, col_name)).strip() == '')
             null_ratio = null_count / row_count
             
             if null_ratio > 0.5:
@@ -115,7 +120,12 @@ async def validate_results_node(state: QueryState) -> QueryState:
     # Check 3: Value distribution analysis (basic - check for single repeated value)
     if rows and row_count > 10:  # Only for datasets with >10 rows
         for col_idx, col_name in enumerate(columns):
-            values = [row[col_idx] for row in rows if row[col_idx] is not None]
+            def get_val(r, idx, name):
+                if isinstance(r, dict):
+                    return r.get(name)
+                return r[idx]
+                
+            values = [get_val(row, col_idx, col_name) for row in rows if get_val(row, col_idx, col_name) is not None]
             if values:
                 unique_values = set(values)
                 if len(unique_values) == 1:
@@ -127,9 +137,14 @@ async def validate_results_node(state: QueryState) -> QueryState:
             # Determine numeric columns by sampling
             num_idxs = []
             for idx in range(len(columns)):
+                col_name = columns[idx]
+                def get_val(r, i, n):
+                    if isinstance(r, dict):
+                        return r.get(n)
+                    return r[i]
                 try:
                     # consider numeric if most values are numbers
-                    vals = [row[idx] for row in rows if row[idx] is not None]
+                    vals = [get_val(row, idx, col_name) for row in rows if get_val(row, idx, col_name) is not None]
                     if not vals:
                         continue
                     numeric_vals = []
@@ -143,13 +158,16 @@ async def validate_results_node(state: QueryState) -> QueryState:
                         num_idxs.append(idx)
                 except Exception:
                     continue
+            
             for idx in num_idxs:
+                col_name = columns[idx]
                 vals = []
                 for r in rows:
                     try:
-                        if r[idx] is None:
+                        v = get_val(r, idx, col_name)
+                        if v is None:
                             continue
-                        vals.append(float(r[idx]))
+                        vals.append(float(v))
                     except Exception:
                         pass
                 if len(vals) >= 10:

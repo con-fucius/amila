@@ -1005,6 +1005,7 @@ class SQLGenerationSkill:
         column_mappings: List[ColumnMapping],
         schema_context: Dict[str, Any],
         implicit_operations: Optional[Dict[str, Any]] = None,
+        database_type: str = "oracle",
     ) -> str:
         """
         Build LLM prompt with EXPLICIT column mappings
@@ -1081,7 +1082,11 @@ You MUST use these exact expressions in your SQL query.
                 operations_section += f"   -  ORDER BY: {', '.join([f'{col} {dir}' for col, dir in order_hints])}\n"
             
             if implicit_operations.get("limit_hint"):
-                operations_section += f"   -  LIMIT: {implicit_operations['limit_hint']} rows\n"
+                limit_val = implicit_operations['limit_hint']
+                if database_type in ["postgres", "postgresql", "doris"]:
+                    operations_section += f"   -  LIMIT: {limit_val} rows\n"
+                else:
+                    operations_section += f"   -  FETCH FIRST: {limit_val} ROWS ONLY\n"
             
             if implicit_operations.get("aggregation_hints"):
                 operations_section += f"   -  AGGREGATIONS: {', '.join(implicit_operations['aggregation_hints'])}\n"
@@ -1106,9 +1111,9 @@ CRITICAL RULES:
 1. Use ONLY the expressions from "VALIDATED COLUMN MAPPINGS" above
 2. For DERIVED EXPRESSIONS, copy the expression exactly - DO NOT treat as column name
 3. If any concepts are UNMAPPED, return an error request clarification
-4. Use Oracle SQL syntax (TO_CHAR, TRUNC, FETCH FIRST, etc.)
+4. Use {database_type.upper()} SQL syntax ({"LIMIT" if database_type in ["postgres", "postgresql", "doris"] else "FETCH FIRST"}, etc.)
 5. Apply detected implicit operations (GROUP BY, ORDER BY, LIMIT) from hints above
-6. Always include: SELECT, FROM, GROUP BY (if aggregations), ORDER BY, FETCH FIRST N ROWS ONLY
+6. Always include: SELECT, FROM, GROUP BY (if aggregations), ORDER BY, {"LIMIT N" if database_type in ["postgres", "postgresql", "doris"] else "FETCH FIRST N ROWS ONLY"}
 
 Example correct usage for quarter:
 - User asks for "quarter"
@@ -1118,7 +1123,7 @@ Example correct usage for quarter:
 -  WRONG: SELECT QUARTER (this column doesn't exist!)
 
 Example implicit operations:
-- User asks "top 10 by revenue" -> ORDER BY REVENUE DESC FETCH FIRST 10 ROWS ONLY
+- User asks "top 10 by revenue" -> ORDER BY REVENUE DESC {"LIMIT 10" if database_type in ["postgres", "postgresql", "doris"] else "FETCH FIRST 10 ROWS ONLY"}
 - User asks "by sector" -> GROUP BY SECTOR
 - User asks "for each customer" -> GROUP BY CUSTOMER_ID
 
@@ -1287,6 +1292,7 @@ class SQLGenerationSkillsOrchestrator:
         intent: str,
         schema_data: Dict[str, Any],
         enriched_schema: Optional[Dict[str, Any]] = None,
+        database_type: str = "oracle",
     ) -> Dict[str, Any]:
         """
         Execute skills pipeline to generate accurate SQL
@@ -1369,6 +1375,7 @@ class SQLGenerationSkillsOrchestrator:
             column_mappings=column_mappings,
             schema_context={"tables": schema_data.get("tables", {})},
             implicit_operations=implicit_ops,
+            database_type=database_type,
         )
         
         return {

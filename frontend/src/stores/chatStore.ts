@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { devtools, persist } from 'zustand/middleware'
 
 // Database type for global selection
-export type DatabaseType = 'oracle' | 'doris'
+export type DatabaseType = 'oracle' | 'doris' | 'postgres'
 
 // Chat message types
 export interface ToolCallSummary {
@@ -85,9 +85,6 @@ interface ChatState {
   chats: ChatMeta[]
   currentChatId: string | null
 
-  // Derived for convenience (messages of current chat)
-  messages: ChatMessage[]
-
   // UI state
   isLoading: boolean
   pendingApproval: string | null // Message ID awaiting approval
@@ -114,6 +111,9 @@ interface ChatState {
   setPendingApproval: (messageId: string | null) => void
   setCurrentInput: (input: string) => void
   clearMessages: () => void
+  
+  // Computed selector for messages (eliminates duplication)
+  getMessages: () => ChatMessage[]
 }
 
 // Create the store with persistence
@@ -126,10 +126,16 @@ export const useChatStore = create<ChatState>()(
         databaseType: 'doris' as DatabaseType,
         chats: [],
         currentChatId: null,
-        messages: [],
         isLoading: false,
         pendingApproval: null,
         currentInput: '',
+        
+        // Computed selector - always derives from current chat (eliminates duplication)
+        getMessages: () => {
+          const state = get()
+          const currentChat = state.chats.find(c => c.id === state.currentChatId)
+          return currentChat?.messages || []
+        },
 
         // Database selection with URL sync and cache invalidation
         setDatabaseType: (type: DatabaseType) => {
@@ -171,14 +177,7 @@ export const useChatStore = create<ChatState>()(
           set({ databaseType: type }, false, 'setDatabaseType')
         },
 
-        // Helpers
-        _ensureChat: () => {
-          const state = get()
-          if (!state.currentChatId || !state.chats.find(c => c.id === state.currentChatId)) {
-            const id = get().createChat('New chat')
-            set({ currentChatId: id }, false, 'bootstrapChat')
-          }
-        },
+        // Helpers (removed unused _ensureChat)
 
         // Chat management
         createChat: (name) => {
@@ -195,7 +194,6 @@ export const useChatStore = create<ChatState>()(
           set((state) => ({
             chats: [...state.chats.filter(c => within24h(c.createdAt)), chat],
             currentChatId: id,
-            messages: [],
           }), false, 'createChat')
           return id
         },
@@ -205,12 +203,9 @@ export const useChatStore = create<ChatState>()(
         deleteChat: (id) => set((state) => {
           const remaining = state.chats.filter(c => c.id !== id)
           const nextId = remaining[0]?.id || get().createChat('New chat')
-          return { chats: remaining, currentChatId: nextId, messages: remaining.find(c => c.id === nextId)?.messages || [] }
+          return { chats: remaining, currentChatId: nextId }
         }, false, 'deleteChat'),
-        switchChat: (id) => set((state) => {
-          const chat = state.chats.find(c => c.id === id)
-          return chat ? { currentChatId: id, messages: chat.messages } : {}
-        }, false, 'switchChat'),
+        switchChat: (id) => set({ currentChatId: id }, false, 'switchChat'),
         autoNameChatFromQuery: (query: string) => set((state) => {
           const chat = state.chats.find(c => c.id === state.currentChatId)
           if (!chat) return {}
@@ -239,39 +234,35 @@ export const useChatStore = create<ChatState>()(
               const currentCount = c.promptCount || 0
               return {
                 ...c,
-                // Only increment if under limit (fix: >= 20 || >= 15 was always true at 15)
                 promptCount: isUser && currentCount < 20 ? currentCount + 1 : currentCount,
                 messages: [...c.messages.filter(m => within24h(m.timestamp.toISOString())), newMessage],
               }
             })
-            const cur = chats.find(c => c.id === state.currentChatId)
-            return { chats, messages: cur ? cur.messages : state.messages }
+            return { chats }
           }, false, 'addMessage')
           return id
         },
-        updateMessage: (id, updates) => set((state) => {
-          const chats = state.chats.map(c => c.id === state.currentChatId ? { ...c, messages: c.messages.map(m => m.id === id ? { ...m, ...updates } : m) } : c)
-          const cur = chats.find(c => c.id === state.currentChatId)
-          return { chats, messages: cur ? cur.messages : state.messages }
-        }, false, 'updateMessage'),
-        mergeMessage: (id, updater) => set((state) => {
-          const chats = state.chats.map(c => {
+        updateMessage: (id, updates) => set((state) => ({
+          chats: state.chats.map(c => 
+            c.id === state.currentChatId 
+              ? { ...c, messages: c.messages.map(m => m.id === id ? { ...m, ...updates } : m) } 
+              : c
+          )
+        }), false, 'updateMessage'),
+        mergeMessage: (id, updater) => set((state) => ({
+          chats: state.chats.map(c => {
             if (c.id !== state.currentChatId) return c
-            const msgs = c.messages.map(m => m.id === id ? updater(m) : m)
-            return { ...c, messages: msgs }
+            return { ...c, messages: c.messages.map(m => m.id === id ? updater(m) : m) }
           })
-          const cur = chats.find(c => c.id === state.currentChatId)
-          return { chats, messages: cur ? cur.messages : state.messages }
-        }, false, 'mergeMessage'),
+        }), false, 'mergeMessage'),
 
         // UI state management
         setLoading: (loading) => set({ isLoading: loading }, false, 'setLoading'),
         setPendingApproval: (messageId) => set({ pendingApproval: messageId }, false, 'setPendingApproval'),
         setCurrentInput: (input) => set({ currentInput: input }, false, 'setCurrentInput'),
-        clearMessages: () => set((state) => {
-          const chats = state.chats.map(c => c.id === state.currentChatId ? { ...c, messages: [] } : c)
-          return { chats, messages: [] }
-        }, false, 'clearMessages'),
+        clearMessages: () => set((state) => ({
+          chats: state.chats.map(c => c.id === state.currentChatId ? { ...c, messages: [] } : c)
+        }), false, 'clearMessages'),
       }),
       {
         name: 'amil-chat-storage',
@@ -358,7 +349,6 @@ export const useChatStore = create<ChatState>()(
             state: {
               ...data.state,
               chats,
-              messages: current ? current.messages : [],
               currentChatId: current ? current.id : null,
               databaseType,
             },
@@ -373,7 +363,7 @@ export const useChatStore = create<ChatState>()(
 
 // Selectors for optimized re-renders
 export const useCurrentMode = () => useChatStore((state) => state.currentMode)
-export const useMessages = () => useChatStore((state) => state.messages)
+export const useMessages = () => useChatStore((state) => state.getMessages())
 export const useIsLoading = () => useChatStore((state) => state.isLoading)
 export const usePendingApproval = () => useChatStore((state) => state.pendingApproval)
 export const useCurrentInput = () => useChatStore((state) => state.currentInput)

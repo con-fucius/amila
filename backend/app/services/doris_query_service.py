@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 
 from app.core.client_registry import registry
 from app.core.config import settings
+from app.core.exceptions import MCPException
 from app.services.execution_service import ExecutionService
 
 logger = logging.getLogger(__name__)
@@ -43,16 +44,25 @@ class DorisQueryService:
         
         async def doris_execution():
             if not settings.DORIS_MCP_ENABLED:
-                raise RuntimeError("Doris integration is disabled")
+                raise MCPException(
+                    "Doris integration is disabled",
+                    details={"doris_mcp_enabled": False}
+                )
 
             doris_client = registry.get_doris_client()
             if not doris_client:
-                raise RuntimeError("Doris MCP client not available")
+                raise MCPException(
+                    "Doris MCP client not available",
+                    details={"client_available": False}
+                )
 
             if hasattr(doris_client, "is_healthy") and not doris_client.is_healthy:
-                raise RuntimeError("Doris MCP client is not healthy")
+                raise MCPException(
+                    "Doris MCP client is not healthy",
+                    details={"is_healthy": False}
+                )
             
-            return await doris_client.execute_sql(sql_query)
+            return await doris_client.execute_sql(sql_query, query_id=query_id)
 
         return await ExecutionService.execute_with_observability(
             query_id=query_id,

@@ -1,14 +1,22 @@
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import { Loader2, Pin } from 'lucide-react'
 import { ProgressIndicator } from './ProgressIndicator'
 import { SQLPanel } from './SQLPanel'
 import { QueryResultsTable } from './QueryResultsTable'
 import QueryResults from './QueryResults'
 import { SuggestedActions } from './SuggestedActions'
 import { ReportGenerator } from './ReportGenerator'
+import { ErrorCard } from './ErrorCard'
 import type { ChatMessage } from '@/stores/chatStore'
 import type { ThinkingStep } from '@/types/domain'
+import { Badge } from '@/components/ui/badge'
+import { extractLineage } from '@/utils/sqlAnalyzer'
+import { LineageView } from '@/components/LineageView'
+import { ExecutionTimeline } from '@/components/ExecutionTimeline'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { usePinnedQueriesStore } from '@/stores/pinnedQueriesStore'
+import { useState } from 'react'
 
 interface AssistantMessageCardProps {
   message: ChatMessage
@@ -22,6 +30,9 @@ interface AssistantMessageCardProps {
   onRowActionPrompt: (prompt: string) => void
   onSuggestedQueryClick: (query: string) => void
   isLoading: boolean
+  onRetry?: () => void
+  onCancelQuery?: (queryId: string) => void
+  cancelling?: boolean
 }
 
 export function AssistantMessageCard({
@@ -36,7 +47,48 @@ export function AssistantMessageCard({
   onRowActionPrompt,
   onSuggestedQueryClick,
   isLoading,
+  onRetry,
+  onCancelQuery,
+  cancelling = false,
 }: AssistantMessageCardProps) {
+  const { addPinnedQuery, pinnedQueries, removePinnedQuery } = usePinnedQueriesStore()
+  const [isPinned, setIsPinned] = useState(false)
+  
+  // Check if this query is already pinned
+  const checkPinned = () => {
+    if (!message.toolCall?.result) return false
+    return pinnedQueries.some(pq => pq.query === message.content)
+  }
+  
+  const handlePin = () => {
+    if (!message.toolCall?.result) return
+    
+    const queryId = `pin-${Date.now()}`
+    
+    if (isPinned) {
+      // Unpin
+      const existing = pinnedQueries.find(pq => pq.query === message.content)
+      if (existing) {
+        removePinnedQuery(existing.id)
+        setIsPinned(false)
+      }
+    } else {
+      // Pin
+      addPinnedQuery({
+        id: queryId,
+        query: message.content,
+        sql: message.toolCall.metadata?.sql,
+        timestamp: new Date(message.timestamp),
+        result: {
+          columns: message.toolCall.result.columns || [],
+          rows: message.toolCall.result.rows || [],
+          rowCount: message.toolCall.result.rowCount || 0
+        }
+      })
+      setIsPinned(true)
+    }
+  }
+  
   return (
     <div className="space-y-3">
       <Card className="bg-white/80 dark:bg-slate-950/80 border border-emerald-50/60 dark:border-slate-800/80 backdrop-blur-md shadow-sm">
@@ -46,6 +98,29 @@ export function AssistantMessageCard({
               <span className="text-[10px] text-gray-400 float-right ml-2">
                 {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
               </span>
+
+              {/* Confidence Indicator */}
+              {message.toolCall?.metadata?.sql_confidence !== undefined && (
+                <div className="float-right mr-3">
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Badge variant="outline" className={
+                          (message.toolCall.metadata.sql_confidence || 0) > 0.8 ? "text-emerald-600 border-emerald-200 bg-emerald-50" :
+                            (message.toolCall.metadata.sql_confidence || 0) > 0.5 ? "text-amber-600 border-amber-200 bg-amber-50" :
+                              "text-red-600 border-red-200 bg-red-50"
+                        }>
+                          {Math.round((message.toolCall.metadata.sql_confidence || 0) * 100)}% Confidence
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Model confidence in the generated SQL</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+              )}
+
               <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap break-words">{message.content}</p>
             </div>
           </div>
@@ -61,6 +136,9 @@ export function AssistantMessageCard({
           intermediateData={message.toolCall.metadata.intermediateData}
           thinkingSteps={thinkingSteps}
           visible={true}
+          queryId={message.toolCall.metadata.queryId}
+          onCancel={onCancelQuery}
+          cancelling={cancelling}
         />
       )}
 
@@ -76,7 +154,7 @@ export function AssistantMessageCard({
         </div>
       )}
 
-      {/* Unified controls row: reasoning (left) + chart (right) */}
+      {/* Unified controls row: reasoning (left) + chart/pin (right) */}
       {(hasReasoningInfo || (message.toolCall?.status === 'completed' && message.toolCall.result)) && (
         <div className="flex items-center justify-between mt-3 mb-2">
           <div>
@@ -94,6 +172,24 @@ export function AssistantMessageCard({
           <div className="flex items-center gap-3">
             {message.toolCall?.status === 'completed' && message.toolCall.result && (
               <>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handlePin}
+                        className={`text-xs h-8 ${checkPinned() ? 'text-yellow-600' : ''}`}
+                      >
+                        <Pin className={`h-4 w-4 mr-1 ${checkPinned() ? 'fill-yellow-600' : ''}`} />
+                        {checkPinned() ? 'Unpin' : 'Pin'}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>{checkPinned() ? 'Remove from' : 'Add to'} Morning View dashboard</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <button
                   className="text-xs underline text-emerald-700 hover:text-emerald-900"
                   onClick={onToggleChart}
@@ -117,6 +213,16 @@ export function AssistantMessageCard({
       {isReasoningOpen && (
         <div className="border rounded-lg p-3 bg-gray-50 dark:bg-slate-900/50 dark:border-slate-700">
           <div className="text-xs font-semibold mb-3 text-gray-700 dark:text-gray-200">Execution Details</div>
+
+          {/* Timeline & Lineage in Reasoning Panel */}
+          {message.toolCall?.metadata?.sql && (
+            <div className="mb-4 space-y-4">
+              <LineageView lineage={extractLineage(message.toolCall.metadata.sql)} />
+              {message.toolCall.result?.executionTime && (
+                <ExecutionTimeline totalTimeMs={message.toolCall.result.executionTime} />
+              )}
+            </div>
+          )}
 
           {message.toolCall?.status === 'pending' && (
             <div className="space-y-2">
@@ -295,6 +401,8 @@ export function AssistantMessageCard({
               rows={message.toolCall.result.rows || []}
               executionTime={message.toolCall.result.executionTime}
               rowCount={message.toolCall.result.rowCount ?? 0}
+              timestamp={message.timestamp}
+              assistantText={message.content}
               onRowAction={(action, ctx) => {
                 const cols = ctx.columns || []
                 const row = ctx.row
@@ -345,38 +453,23 @@ export function AssistantMessageCard({
         </>
       )}
 
-      {/* Error Display */}
+      {/* Error Display - Self-Heal UI with Retry */}
       {message.toolCall?.status === 'error' && (
-        <Card className="border-red-300 bg-red-50 dark:border-red-500 dark:bg-red-950/70">
-          <CardContent className="p-4">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
-              <div>
-                <div className="font-semibold text-red-900 dark:text-red-100 mb-1">Query Error</div>
-                <div className="text-sm text-red-700 dark:text-red-100 whitespace-pre-wrap break-words">{message.toolCall.error}</div>
-                {message.toolCall.metadata?.errorDetails && (
-                  <div className="mt-2 text-xs text-red-800 dark:text-red-100 space-y-1">
-                    {message.toolCall.metadata.errorDetails.message && (
-                      <div>
-                        <span className="font-semibold">Cause:</span> {message.toolCall.metadata.errorDetails.message}
-                      </div>
-                    )}
-                    {message.toolCall.metadata.errorDetails.failed_at && (
-                      <div>
-                        <span className="font-semibold">Stage:</span> {message.toolCall.metadata.errorDetails.failed_at}
-                      </div>
-                    )}
-                    {message.toolCall.metadata.errorDetails.sql_attempted && (
-                      <div className="mt-1 text-[11px] text-red-900/80 dark:text-red-100 font-mono bg-red-50/80 dark:bg-red-900/40 border border-red-200 dark:border-red-500 rounded p-2 max-h-32 overflow-auto whitespace-pre-wrap">
-                        {message.toolCall.metadata.errorDetails.sql_attempted}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <ErrorCard
+          title="Query Error"
+          message={message.toolCall.error || 'An unknown error occurred'}
+          severity="error"
+          details={{
+            code: message.toolCall.metadata?.errorDetails?.code,
+            stage: message.toolCall.metadata?.errorDetails?.failed_at || message.toolCall.metadata?.currentState,
+            sql: message.toolCall.metadata?.errorDetails?.sql_attempted || message.toolCall.metadata?.sql,
+            correlationId: message.toolCall.metadata?.correlationId,
+            timestamp: new Date().toISOString(),
+          }}
+          onRetry={onRetry}
+          retryLabel="Retry Query"
+          isRetrying={isLoading}
+        />
       )}
     </div>
   )

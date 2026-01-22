@@ -6,7 +6,11 @@ Implements CSRF protection, CSP headers, JWT blacklist, and input sanitization
 import logging
 import re
 import secrets
-from typing import Optional, Set
+import hmac
+import hashlib
+import time
+from typing import Optional, Set, List
+from fastapi import Request, Response, HTTPException, status
 from fastapi import Request, Response, HTTPException, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -208,7 +212,7 @@ class CSPMiddleware(BaseHTTPMiddleware):
 class CSRFMiddleware(BaseHTTPMiddleware):
     """
     Cross-Site Request Forgery (CSRF) protection middleware
-    Implements double-submit cookie pattern
+    Implements double-submit cookie pattern with HMAC signing
     """
     
     CSRF_TOKEN_LENGTH = 32
@@ -218,82 +222,271 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     # Methods that require CSRF protection
     PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
     
-    # Paths exempt from CSRF (e.g., public API endpoints)
+    # Paths exempt from CSRF (e.g., public API endpoints, login)
     EXEMPT_PATHS = {
         "/api/v1/auth/login", 
-        "/api/v1/auth/register", 
+        "/api/v1/auth/register",
+        "/api/v1/auth/refresh",
         "/health",
-        "/api/v1/queries/submit",  # Temporarily exempt for development
-        "/api/v1/queries/process",  # Temporarily exempt for development
-        "/api/v1/queries/clarify",  # Temporarily exempt for development
-        "/api/v1/agent/query",  # Temporarily exempt for schema debugging
-        "/api/v1/schema/refresh",  # Temporarily exempt for schema debugging
-        "/schema/refresh",  # Temporarily exempt for schema debugging
+        "/metrics",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
     }
     
+    def __init__(self, app):
+        super().__init__(app)
+        self.secret = settings.jwt_secret_key  # Reuse JWT secret for CSRF signing
+    
+    def _sign_token(self, token: str) -> str:
+        """Sign CSRF token with HMAC for additional security"""
+        signature = hmac.new(
+            self.secret.encode(),
+            token.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        return f"{token}:{signature}"
+    
+    def _verify_token(self, signed_token: str) -> bool:
+        """Verify CSRF token signature"""
+        try:
+            if ':' not in signed_token:
+                return False
+            
+            token, signature = signed_token.rsplit(':', 1)
+            expected_signature = hmac.new(
+                self.secret.encode(),
+                token.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            # Use constant-time comparison to prevent timing attacks
+            return secrets.compare_digest(signature, expected_signature)
+        except Exception as e:
+            logger.warning(f"CSRF token verification failed: {e}")
+            return False
+    
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        # Development mode: disable CSRF enforcement to prevent local 403s
-        if settings.environment == "development":
-            response = await call_next(request)
-            return self._add_csrf_cookie(response)
-
+        # Skip CSRF for safe methods (GET, HEAD, OPTIONS)
         if request.method not in self.PROTECTED_METHODS:
             response = await call_next(request)
-            return self._add_csrf_cookie(response)
+            # Set CSRF cookie on safe requests if not present
+            if self.CSRF_COOKIE_NAME not in request.cookies:
+                self._add_csrf_cookie(response)
+            return response
         
-        # Skip CSRF for exempt paths (robust against trailing slashes)
+        # Skip CSRF for exempt paths
         path = request.url.path.rstrip("/")
-        if path in self.EXEMPT_PATHS:
+        if self._is_exempt_path(path):
             response = await call_next(request)
-            return self._add_csrf_cookie(response)
-        # Development-friendly exemptions for primary query endpoints
-        query_exempt_prefixes = (
-            "/api/v1/queries/process",
-            "/api/v1/queries/clarify",
-            "/api/v1/queries/submit",
-        )
-        if any(path == p or path.startswith(p + "/") for p in query_exempt_prefixes):
-            response = await call_next(request)
-            return self._add_csrf_cookie(response)
-        # Approvals and streaming endpoints
-        if path.startswith("/api/v1/queries/") and ("/approve" in path or "/reject" in path or "/stream" in path):
-            response = await call_next(request)
-            return self._add_csrf_cookie(response)
+            self._add_csrf_cookie(response)
+            return response
         
-        # Verify CSRF token
-        csrf_token = request.headers.get(self.CSRF_HEADER_NAME)
-        csrf_cookie = request.cookies.get(self.CSRF_COOKIE_NAME)
+        # Development mode: log warning but allow requests (for easier testing)
+        if settings.environment == "development":
+            csrf_token = request.headers.get(self.CSRF_HEADER_NAME)
+            csrf_cookie = request.cookies.get(self.CSRF_COOKIE_NAME)
+            
+            if not csrf_token or not csrf_cookie:
+                logger.warning(
+                    f"[DEV MODE] CSRF token missing for {request.method} {path} "
+                    f"(would be blocked in production)"
+                )
+            elif not self._validate_csrf(request):
+                logger.warning(
+                    f"[DEV MODE] CSRF validation failed for {request.method} {path} "
+                    f"(would be blocked in production)"
+                )
+            
+            response = await call_next(request)
+            self._add_csrf_cookie(response)
+            return response
         
-        if not csrf_token or not csrf_cookie:
-            logger.warning(f"CSRF token missing for {request.method} {request.url.path}")
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "CSRF token missing"}
+        # Production mode: enforce CSRF validation
+        if not self._validate_csrf(request):
+            logger.warning(
+                f"CSRF validation failed for {request.method} {path} "
+                f"from {request.client.host if request.client else 'unknown'}"
             )
-        
-        if not secrets.compare_digest(csrf_token, csrf_cookie):
-            logger.warning(f"CSRF token mismatch for {request.method} {request.url.path}")
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "CSRF token invalid"}
+                content={
+                    "detail": "CSRF validation failed. Please refresh the page and try again.",
+                    "error": "csrf_validation_failed",
+                },
             )
         
         response = await call_next(request)
-        return self._add_csrf_cookie(response)
+        self._add_csrf_cookie(response)
+        return response
+    
+    def _is_exempt_path(self, path: str) -> bool:
+        """Check if path is exempt from CSRF validation"""
+        # Exact match
+        if path in self.EXEMPT_PATHS:
+            return True
+        
+        # Prefix match for dynamic paths
+        for exempt_path in self.EXEMPT_PATHS:
+            if path.startswith(exempt_path):
+                return True
+        
+        # SSE endpoints (EventSource can't send custom headers)
+        if "/stream" in path:
+            return True
+        
+        return False
+    
+    def _validate_csrf(self, request: Request) -> bool:
+        """Validate CSRF token from header matches cookie"""
+        # Get token from cookie
+        cookie_token = request.cookies.get(self.CSRF_COOKIE_NAME)
+        if not cookie_token:
+            logger.debug("CSRF validation failed: No cookie token")
+            return False
+        
+        # Get token from header
+        header_token = request.headers.get(self.CSRF_HEADER_NAME)
+        if not header_token:
+            logger.debug("CSRF validation failed: No header token")
+            return False
+        
+        # Verify cookie token signature
+        if not self._verify_token(cookie_token):
+            logger.debug("CSRF validation failed: Invalid cookie signature")
+            return False
+        
+        # Verify header token signature
+        if not self._verify_token(header_token):
+            logger.debug("CSRF validation failed: Invalid header signature")
+            return False
+        
+        # Extract unsigned tokens for comparison
+        cookie_unsigned = cookie_token.split(':')[0]
+        header_unsigned = header_token.split(':')[0]
+        
+        # Compare tokens (constant-time)
+        if not secrets.compare_digest(cookie_unsigned, header_unsigned):
+            logger.debug("CSRF validation failed: Token mismatch")
+            return False
+        
+        return True
     
     def _add_csrf_cookie(self, response: Response) -> Response:
         """Add CSRF token cookie to response"""
-        if self.CSRF_COOKIE_NAME not in response.headers.get("set-cookie", ""):
-            csrf_token = secrets.token_urlsafe(self.CSRF_TOKEN_LENGTH)
-            response.set_cookie(
-                key=self.CSRF_COOKIE_NAME,
-                value=csrf_token,
-                httponly=False,  # JavaScript needs to read this
-                secure=settings.environment == "production",
-                samesite="strict",
-                max_age=3600 * 8,  # 8 hours
-            )
+        # Generate new token
+        token = secrets.token_urlsafe(self.CSRF_TOKEN_LENGTH)
+        signed_token = self._sign_token(token)
+        
+        # Set cookie with security flags
+        response.set_cookie(
+            key=self.CSRF_COOKIE_NAME,
+            value=signed_token,
+            max_age=3600 * 8,  # 8 hours (same as JWT)
+            httponly=False,  # Must be readable by JavaScript
+            secure=settings.environment == "production",  # HTTPS only in production
+            samesite="lax",  # Protect against CSRF while allowing normal navigation
+            path="/",
+        )
         return response
+
+
+class HMACMiddleware(BaseHTTPMiddleware):
+    """
+    HMAC Request Signing Middleware
+    Ensures request integrity and authenticity for sensitive operations
+    """
+    
+    HEADER_SIGNATURE = "X-Signature"
+    HEADER_TIMESTAMP = "X-Timestamp"
+    
+    # 5 minute window for replay protection
+    TIMESTAMP_TOLERANCE = 300 
+    
+    # Protected paths requiring signature
+    # Note: Query endpoints are protected by JWT + CSRF, HMAC is only for admin operations
+    PROTECTED_PATHS = {
+        "/api/v1/admin"
+    }
+    
+    # Exempt paths
+    EXEMPT_PATHS = {
+        "/api/v1/auth",
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json"
+    }
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Skip if not in protected paths or matches exempt paths
+        path = request.url.path.rstrip("/")
+        
+        # Check exemptions first
+        if any(path.startswith(exempt) for exempt in self.EXEMPT_PATHS):
+            return await call_next(request)
+            
+        # Check if path needs protection. For MVP, we might only enforce on specific critical paths
+        # or strict mode where everything non-exempt is protected.
+        # Here we only strictly enforce on known sensitive write operations if configured
+        is_protected = any(path.startswith(protected) for protected in self.PROTECTED_PATHS)
+        
+        # If not strictly protected and we are in dev, maybe skip? 
+        # For now, let's enforce only on robust matching
+        if not is_protected:
+             return await call_next(request)
+
+        # Retrieve headers
+        signature = request.headers.get(self.HEADER_SIGNATURE)
+        timestamp_str = request.headers.get(self.HEADER_TIMESTAMP)
+
+        if not signature or not timestamp_str:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Missing signature authentication headers"}
+            )
+
+        # 1. Verify Timestamp (Replay Attack Protection)
+        try:
+            timestamp = int(timestamp_str)
+            current_time = int(time.time())
+            
+            if abs(current_time - timestamp) > self.TIMESTAMP_TOLERANCE:
+                 return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Request timestamp expired"}
+                )
+        except ValueError:
+             return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid timestamp format"}
+            )
+
+        # 2. Reconstruct payload for signature verification
+        # Method + Path + Timestamp + Body
+        # WARNING: Reading body consumes usage. modifying Starlette request to keep body for downstream
+        body_bytes = await request.body()
+        
+        # Re-inject body support for downstream handlers
+        async def receive():
+            return {"type": "http.request", "body": body_bytes}
+        request._receive = receive
+
+        payload = f"{request.method}{request.url.path}{timestamp_str}".encode('utf-8') + body_bytes
+        
+        # 3. Calculate expected signature
+        secret = settings.hmac_secret_key.encode('utf-8')
+        expected_signature = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+        # 4. Constant time comparison
+        if not secrets.compare_digest(expected_signature, signature):
+             logger.warning(f"HMAC signature mismatch for {request.method} {request.url.path}")
+             return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid request signature"}
+            )
+
+        return await call_next(request)
 
 
 # Global sanitizer instance

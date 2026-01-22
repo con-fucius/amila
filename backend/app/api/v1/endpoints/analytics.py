@@ -13,9 +13,15 @@ import re
 from app.core.audit import audit_logger, AuditAction
 from app.core.rbac import require_permission, Permission, rbac_manager
 from app.core.redis_client import redis_client
+from app.core.structured_logging import get_iso_timestamp
+from app.models.internal_models import safe_parse_json, AuditEntryData
+from app.core.encryption import get_encryption_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Initialize encryption service
+encryption_service = get_encryption_service()
 
 
 @router.get("/user-activity")
@@ -58,8 +64,12 @@ async def get_user_activity_analytics(
             try:
                 entry_json = await redis_client.get(key)
                 if entry_json:
-                    import json
-                    entry = json.loads(entry_json)
+                    # Validate and decrypt audit entry
+                    entry_data = safe_parse_json(entry_json, AuditEntryData, default=None, log_errors=True)
+                    if not entry_data:
+                        continue
+                    
+                    entry = encryption_service.decrypt_audit_entry(entry_data.model_dump())
                     
                     # Check if within time window
                     entry_time = datetime.fromisoformat(entry["timestamp"])
@@ -106,7 +116,7 @@ async def get_user_activity_analytics(
             "period_days": days,
             "total_users": len(user_stats),
             "top_users": sorted_users,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": get_iso_timestamp()
         }
         
     except Exception as e:
@@ -152,8 +162,12 @@ async def get_table_usage_analytics(
             try:
                 entry_json = await redis_client.get(key)
                 if entry_json:
-                    import json
-                    entry = json.loads(entry_json)
+                    # Validate and decrypt audit entry
+                    entry_data = safe_parse_json(entry_json, AuditEntryData, default=None, log_errors=True)
+                    if not entry_data:
+                        continue
+                    
+                    entry = encryption_service.decrypt_audit_entry(entry_data.model_dump())
                     
                     # Check if within time window
                     entry_time = datetime.fromisoformat(entry["timestamp"])
@@ -215,7 +229,7 @@ async def get_table_usage_analytics(
             "period_days": days,
             "total_tables": len(table_stats),
             "top_tables": sorted_tables,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": get_iso_timestamp()
         }
         
     except Exception as e:
@@ -257,8 +271,12 @@ async def get_query_pattern_analytics(
             try:
                 entry_json = await redis_client.get(key)
                 if entry_json:
-                    import json
-                    entry = json.loads(entry_json)
+                    # Validate and decrypt audit entry
+                    entry_data = safe_parse_json(entry_json, AuditEntryData, default=None, log_errors=True)
+                    if not entry_data:
+                        continue
+                    
+                    entry = encryption_service.decrypt_audit_entry(entry_data.model_dump())
                     
                     # Check if within time window
                     entry_time = datetime.fromisoformat(entry["timestamp"])
@@ -299,7 +317,7 @@ async def get_query_pattern_analytics(
             "unique_patterns": len(query_fingerprints),
             "top_query_patterns": top_fingerprints,
             "query_type_distribution": type_distribution,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": get_iso_timestamp()
         }
         
     except Exception as e:

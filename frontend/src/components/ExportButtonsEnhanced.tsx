@@ -3,15 +3,23 @@ import { useState } from 'react'
 import { Button } from './ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Badge } from './ui/badge'
-import { 
-  Download, 
-  FileText, 
-  Table, 
-  Code, 
+import {
+  Download,
+  FileText,
+  Table,
+  Code,
   Eye,
   ChevronDown,
-  CheckCircle
+  CheckCircle,
+  Copy,
+  Check
 } from 'lucide-react'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip'
 
 interface ExportData {
   columns: string[]
@@ -31,15 +39,36 @@ interface ExportButtonsEnhancedProps {
 
 type ExportFormat = 'csv' | 'excel' | 'json'
 
-export function ExportButtonsEnhanced({ 
-  data, 
+export function ExportButtonsEnhanced({
+  data,
   filename = 'query_results',
-  className = '' 
+  className = ''
 }: ExportButtonsEnhancedProps) {
   const [showOptions, setShowOptions] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('csv')
   const [exporting, setExporting] = useState(false)
+  const [copySuccess, setCopySuccess] = useState(false)
+
+  // Helper to escape CSV values properly
+  const escapeCSVValue = (val: any): string => {
+    if (val === null || val === undefined) return ''
+    const str = String(val)
+    // If contains comma, quote, or newline, wrap in quotes and escape internal quotes
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+      return `"${str.replace(/"/g, '""')}"`
+    }
+    return str
+  }
+
+  // Generate CSV content with proper escaping
+  const generateCSVContent = (): string => {
+    const header = data.columns.map(escapeCSVValue).join(',')
+    const rows = data.rows.map(row => 
+      row.map(escapeCSVValue).join(',')
+    ).join('\n')
+    return `${header}\n${rows}`
+  }
 
   const exportFormats = [
     {
@@ -67,13 +96,13 @@ export function ExportButtonsEnhanced({
 
   const generatePreview = (format: ExportFormat) => {
     const previewRows = data.rows.slice(0, 3)
-    
+
     switch (format) {
       case 'csv':
         const csvHeader = data.columns.join(',')
         const csvRows = previewRows.map(row => row.join(',')).join('\n')
         return `${csvHeader}\n${csvRows}\n...`
-      
+
       case 'json':
         const jsonData = previewRows.map(row => {
           const obj: any = {}
@@ -83,10 +112,10 @@ export function ExportButtonsEnhanced({
           return obj
         })
         return JSON.stringify(jsonData, null, 2).slice(0, 200) + '...'
-      
+
       case 'excel':
         return `Excel file with ${data.rows.length} rows and ${data.columns.length} columns\nColumns: ${data.columns.join(', ')}`
-      
+
       default:
         return 'Preview not available'
     }
@@ -94,18 +123,18 @@ export function ExportButtonsEnhanced({
 
   const handleExport = async (format: ExportFormat) => {
     setExporting(true)
-    
+
     try {
       const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
       const fullFilename = `${filename}_${timestamp}`
-      
+
       switch (format) {
         case 'csv':
           const csvContent = [
             data.columns.join(','),
             ...data.rows.map(row => row.join(','))
           ].join('\n')
-          
+
           const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
           const csvUrl = URL.createObjectURL(csvBlob)
           const csvLink = document.createElement('a')
@@ -114,7 +143,7 @@ export function ExportButtonsEnhanced({
           csvLink.click()
           URL.revokeObjectURL(csvUrl)
           break
-        
+
         case 'excel':
           // Simple Excel export (would need xlsx library for full implementation)
           const excelData = [data.columns, ...data.rows]
@@ -127,7 +156,7 @@ export function ExportButtonsEnhanced({
           excelLink.click()
           URL.revokeObjectURL(excelUrl)
           break
-        
+
         case 'json':
           const jsonData = data.rows.map(row => {
             const obj: any = {}
@@ -136,13 +165,13 @@ export function ExportButtonsEnhanced({
             })
             return obj
           })
-          
+
           const jsonContent = JSON.stringify({
             metadata: data.metadata,
             columns: data.columns,
             data: jsonData
           }, null, 2)
-          
+
           const jsonBlob = new Blob([jsonContent], { type: 'application/json' })
           const jsonUrl = URL.createObjectURL(jsonBlob)
           const jsonLink = document.createElement('a')
@@ -152,13 +181,25 @@ export function ExportButtonsEnhanced({
           URL.revokeObjectURL(jsonUrl)
           break
       }
-      
+
       // Show success feedback
       setTimeout(() => setExporting(false), 1000)
-      
+
     } catch (error) {
       console.error('Export failed:', error)
       setExporting(false)
+    }
+  }
+
+  const handleCopy = async () => {
+    try {
+      // Use proper CSV format for clipboard (Excel/Sheets compatible)
+      const csvContent = generateCSVContent()
+      await navigator.clipboard.writeText(csvContent)
+      setCopySuccess(true)
+      setTimeout(() => setCopySuccess(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy: ', err)
     }
   }
 
@@ -168,6 +209,28 @@ export function ExportButtonsEnhanced({
     <div className={`relative ${className}`}>
       {/* Quick Export Button */}
       <div className="flex items-center gap-2">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCopy}
+                title="Smart Copy (CSV format)"
+                className="mr-1"
+              >
+                {copySuccess ? (
+                  <Check size={16} className="text-green-600" />
+                ) : (
+                  <Copy size={16} />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Smart Copy to clipboard (CSV format)</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         <Button
           onClick={() => handleExport(selectedFormat)}
           disabled={exporting}
@@ -180,7 +243,7 @@ export function ExportButtonsEnhanced({
           )}
           Export {selectedFormat.toUpperCase()}
         </Button>
-        
+
         <Button
           variant="outline"
           onClick={() => setShowOptions(!showOptions)}
@@ -201,11 +264,10 @@ export function ExportButtonsEnhanced({
               {exportFormats.map((format) => (
                 <div
                   key={format.id}
-                  className={`p-3 border rounded-lg cursor-pointer transition-colors ${
-                    selectedFormat === format.id
-                      ? 'border-blue-500 bg-blue-50 dark:bg-slate-900/70'
-                      : 'border-gray-200 dark:border-slate-700 hover:border-gray-300 dark:hover:border-slate-500'
-                  }`}
+                  className={`p-3 border rounded-lg cursor-pointer transition-colors ${selectedFormat === format.id
+                    ? 'border-blue-500 bg-blue-50 dark:bg-slate-900/70'
+                    : 'border-gray-200 dark:border-slate-700 hover:border-gray-300 dark:hover:border-slate-500'
+                    }`}
                   onClick={() => setSelectedFormat(format.id)}
                 >
                   <div className="flex items-center justify-between">

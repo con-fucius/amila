@@ -7,11 +7,18 @@ Implements:
 - Performance profiling
 - Error categorization
 - Integration with OpenTelemetry
+
+Trace ID Validation:
+-------------------
+Trace IDs are validated to ensure they conform to UUID v4 format for compatibility
+with OpenTelemetry and distributed tracing systems. Invalid trace IDs are replaced
+with newly generated valid UUIDs to prevent tracing system failures.
 """
 
 import logging
 import sys
 import uuid
+import re
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -29,9 +36,115 @@ trace_id_var: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
 user_id_var: ContextVar[Optional[str]] = ContextVar("user_id", default=None)
 session_id_var: ContextVar[Optional[str]] = ContextVar("session_id", default=None)
 
+# UUID v4 validation pattern
+UUID_V4_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    re.IGNORECASE
+)
+
+logger = logging.getLogger(__name__)
+
+
+def get_iso_timestamp() -> str:
+    """
+    Get current timestamp in ISO 8601 format with UTC timezone.
+    
+    This is the standard format for all user-facing timestamps in the API.
+    Use this instead of datetime.now().isoformat() for consistency.
+    
+    Returns:
+        ISO 8601 formatted timestamp string (e.g., "2026-01-16T10:30:45.123456+00:00")
+    
+    Example:
+        >>> timestamp = get_iso_timestamp()
+        >>> "2026-01-16T10:30:45"
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
+def iso_timestamp_from_unix(unix_timestamp: float) -> str:
+    """
+    Convert Unix timestamp to ISO 8601 format.
+    
+    Args:
+        unix_timestamp: Unix timestamp (seconds since epoch)
+        
+    Returns:
+        ISO 8601 formatted timestamp string
+        
+    Example:
+        >>> iso_timestamp_from_unix(1705401045.123)
+        "2024-01-16T10:30:45.123000+00:00"
+    """
+    return datetime.fromtimestamp(unix_timestamp, tz=timezone.utc).isoformat()
+
+
+def unix_timestamp_from_iso(iso_timestamp: str) -> float:
+    """
+    Convert ISO 8601 timestamp to Unix timestamp.
+    
+    Args:
+        iso_timestamp: ISO 8601 formatted timestamp string
+        
+    Returns:
+        Unix timestamp (seconds since epoch)
+        
+    Example:
+        >>> unix_timestamp_from_iso("2024-01-16T10:30:45.123000+00:00")
+        1705401045.123
+    """
+    dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+    return dt.timestamp()
+
+
+def is_valid_trace_id(trace_id: str) -> bool:
+    """
+    Validate trace ID format (UUID v4).
+    
+    Args:
+        trace_id: Trace ID to validate
+        
+    Returns:
+        True if valid UUID v4 format, False otherwise
+    """
+    if not trace_id or not isinstance(trace_id, str):
+        return False
+    
+    return bool(UUID_V4_PATTERN.match(trace_id.strip()))
+
+
+def validate_and_fix_trace_id(trace_id: Optional[str]) -> str:
+    """
+    Validate trace ID and generate new one if invalid.
+    
+    This ensures trace IDs are always valid UUIDs for compatibility with
+    OpenTelemetry and distributed tracing systems.
+    
+    Args:
+        trace_id: Trace ID to validate
+        
+    Returns:
+        Valid trace ID (original if valid, new UUID if invalid)
+    """
+    if trace_id and is_valid_trace_id(trace_id):
+        return trace_id.strip()
+    
+    if trace_id:
+        logger.warning(
+            f"Invalid trace_id format: {trace_id[:50]}, generating new UUID",
+            extra={"invalid_trace_id": trace_id[:100]}
+        )
+    
+    return str(uuid.uuid4())
+
 
 def get_trace_id() -> str:
-    """Get current trace ID or generate new one"""
+    """
+    Get current trace ID or generate new one.
+    
+    Returns:
+        Valid UUID v4 trace ID
+    """
     trace_id = trace_id_var.get()
     if not trace_id:
         trace_id = str(uuid.uuid4())
@@ -40,8 +153,17 @@ def get_trace_id() -> str:
 
 
 def set_trace_id(trace_id: str) -> None:
-    """Set trace ID for current context"""
-    trace_id_var.set(trace_id)
+    """
+    Set trace ID for current context with validation.
+    
+    Invalid trace IDs are replaced with newly generated UUIDs to ensure
+    compatibility with OpenTelemetry and distributed tracing systems.
+    
+    Args:
+        trace_id: Trace ID to set (will be validated)
+    """
+    validated_trace_id = validate_and_fix_trace_id(trace_id)
+    trace_id_var.set(validated_trace_id)
 
 
 def set_user_context(user_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
@@ -77,8 +199,8 @@ def add_trace_context(logger: Any, method_name: str, event_dict: EventDict) -> E
 
 
 def add_timestamp(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
-    """Add ISO8601 timestamp"""
-    event_dict["timestamp"] = datetime.now(timezone.utc).isoformat()
+    """Add ISO8601 timestamp to log entries"""
+    event_dict["timestamp"] = get_iso_timestamp()
     return event_dict
 
 

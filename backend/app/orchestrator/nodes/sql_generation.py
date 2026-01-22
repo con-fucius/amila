@@ -42,9 +42,16 @@ async def generate_sql_node(state: QueryState) -> QueryState:
 
     state["current_stage"] = "generate_sql"
     
+    # Record pipeline stage entry
+    from app.services.diagnostic_service import record_query_pipeline_stage
+    from datetime import datetime, timezone
+    
+    query_id = state.get("query_id", "unknown")
+    stage_start = datetime.now(timezone.utc)
+    
     # Track node execution for reasoning visibility
     await update_node_history(state, "generate_sql", "in-progress", thinking_steps=[
-        {"id": "step-1", "content": "Generating SQL query from intent and schema", "status": "in-progress", "timestamp": datetime.now(timezone.utc).isoformat()}
+        {"id": "step-1", "content": "Generating SQL query from intent and schema", "status": "in-progress", "timestamp": stage_start.isoformat()}
     ])
 
     async with langfuse_span(
@@ -58,7 +65,37 @@ async def generate_sql_node(state: QueryState) -> QueryState:
         metadata={"stage": "generate_sql"},
     ) as span:
         span.setdefault("output", {})
-        result = await _generate_sql_node_inner(state, span)
+        
+        try:
+            result = await _generate_sql_node_inner(state, span)
+            
+            # Record successful completion
+            stage_end = datetime.now(timezone.utc)
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="sql_generation",
+                status="completed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                metadata={
+                    "sql_generated": bool(state.get("sql_query")),
+                    "confidence": state.get("sql_confidence"),
+                    "needs_approval": state.get("needs_approval")
+                }
+            )
+            
+        except Exception as e:
+            # Record failure
+            stage_end = datetime.now(timezone.utc)
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="sql_generation",
+                status="failed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                error_details=str(e)
+            )
+            raise
 
         if state.get("sql_query"):
             span["output"]["sql_preview"] = state["sql_query"][:500]
@@ -83,6 +120,20 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
     logger.info(f"Generating SQL query using Skills orchestrator...")
     
     db_type = (state.get("database_type") or "oracle").lower()
+    
+    # Define limit syntax based on database type
+    if db_type in ["postgres", "postgresql", "doris"]:
+        limit_syntax_1000 = "LIMIT 1000"
+        limit_syntax_100 = "LIMIT 100"
+        limit_syntax_10 = "LIMIT 10"
+        limit_syntax_5 = "LIMIT 5"
+        limit_syntax_n = "LIMIT n"
+    else:
+        limit_syntax_1000 = "FETCH FIRST 1000 ROWS ONLY"
+        limit_syntax_100 = "FETCH FIRST 100 ROWS ONLY"
+        limit_syntax_10 = "FETCH FIRST 10 ROWS ONLY"
+        limit_syntax_5 = "FETCH FIRST 5 ROWS ONLY"
+        limit_syntax_n = "FETCH FIRST n ROWS ONLY"
     
     # Stream: Starting schema analysis
     if ExecState:
@@ -113,9 +164,13 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
     if not schema_metadata or not isinstance(schema_metadata, dict) or not schema_metadata.get("tables"):
         logger.warning(f"Schema metadata missing in state - triggering on-demand refresh")
         try:
-            from app.services.schema_service import SchemaService
+            from app.services.database_router import DatabaseRouter
 
-            refreshed = await SchemaService.get_database_schema(use_cache=False)
+            refreshed = await DatabaseRouter.get_database_schema(
+                database_type=db_type,
+                connection_name=state.get("context", {}).get("connection_name"),
+                use_cache=False
+            )
             if refreshed.get("status") == "success":
                 schema_metadata = refreshed.get("schema") or {}
                 state.setdefault("context", {})["schema_metadata"] = schema_metadata
@@ -147,6 +202,7 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
                 intent=state.get("intent", ""),
                 schema_data=schema_metadata or {},
                 enriched_schema=enriched_schema,
+                database_type=db_type,
             )
             
             # Check if clarification needed (unmapped concepts)
@@ -390,7 +446,7 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
                 schema_context += "FROM <primary_table>\n"
                 schema_context += "GROUP BY TO_CHAR(<validated_date_expression>, 'YYYY-MM')\n"
                 schema_context += "ORDER BY month_key\n"
-                schema_context += "FETCH FIRST 10 ROWS ONLY;\n"
+                schema_context += f"{limit_syntax_10};\n"
                 schema_context += "```\n"
                 schema_context += "-- Replace placeholders with the exact expressions/columns confirmed in the schema mappings above.\n\n"
             
@@ -412,13 +468,13 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
                 schema_context += "  AND RD.DS_YEAR = '2025'  --  CORRECT: Year as string\n"
                 schema_context += "GROUP BY RD.DT_DAY, RD.DS_MNTH, RD.DS_YEAR\n"
                 schema_context += "ORDER BY total_network_data DESC\n"
-                schema_context += "FETCH FIRST 5 ROWS ONLY;\n"
+                schema_context += f"{limit_syntax_5};\n"
                 schema_context += "```\n\n"
             
             schema_context += " KEY TAKEAWAYS:\n"
             schema_context += "  -  Always use exact column names from schema (DT_DAY, DS_MNTH, DS_YEAR, DATE)\n"
             schema_context += "  -  GROUP BY must include all non-aggregated SELECT columns\n"
-            schema_context += "  -  Use FETCH FIRST n ROWS ONLY (not LIMIT)\n"
+            schema_context += f"  -  Use {limit_syntax_n} (not {'FETCH FIRST' if db_type in ['postgres', 'postgresql', 'doris'] else 'LIMIT'})\n"
             schema_context += "  -  Check sample data for filter value formats (e.g., 'JANUARY' not 'January')\n"
             schema_context += "" * 100 + "\n\n"
         
@@ -571,10 +627,44 @@ SELECT m.<DIMENSION_COL>,
 FROM metrics m
 LEFT JOIN stats s USING (QUARTER_START)
 ORDER BY m.<DIMENSION_COL>, m.QUARTER_START
-FETCH FIRST 1000 ROWS ONLY;
+{limit_syntax_1000};
 """
 
-    system_prompt = f"""You are an expert Oracle SQL query generator specialized in accurate schema mapping.
+    # Generate database-specific system prompt
+    if db_type == "postgres" or db_type == "postgresql":
+        db_specific_rules = """
+6. **POSTGRESQL-SPECIFIC SYNTAX**
+   - Use LIMIT n (NOT FETCH FIRST)
+   - Date functions: DATE_TRUNC(), NOW(), CURRENT_DATE
+   - String functions: COALESCE() for NULL handling
+   - Type casting: column::TYPE or CAST(column AS TYPE)
+   - Array operations: ARRAY[...], ANY(), ALL()
+   - JSON operations: ->, ->>, @>, etc.
+"""
+        db_name = "PostgreSQL"
+    elif db_type == "doris":
+        db_specific_rules = """
+6. **DORIS-SPECIFIC SYNTAX**
+   - Use LIMIT n (NOT FETCH FIRST)
+   - Date functions: NOW(), CURDATE(), DATE_FORMAT()
+   - String functions: IFNULL() for NULL handling
+   - MySQL-compatible syntax
+   - Optimized for OLAP queries
+"""
+        db_name = "Doris"
+    else:
+        db_specific_rules = """
+6. **ORACLE-SPECIFIC SYNTAX**
+   - Use FETCH FIRST n ROWS ONLY (NOT LIMIT)
+   - Date functions: TRUNC(), ADD_MONTHS(), SYSDATE
+   - String functions: NVL() for NULL handling
+   - Reserved words MUST be quoted: "DATE", "USER", etc.
+"""
+        db_name = "Oracle"
+    
+    system_prompt = f"""You are an expert {db_name} SQL query generator specialized in accurate schema mapping.
+Database Type: {db_name}
+
 {column_mapping_enhancement}
 {schema_context}{context_section}{sample_data_section}{relationship_section}{derived_hints_section}{corrections_section}
 
@@ -597,7 +687,7 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
    - For simple "show rows" queries, prefer SELECT * over listing all columns
    
    **Examples:**
-    CORRECT: SELECT * FROM CUSTOMER_DATA FETCH FIRST 5 ROWS ONLY
+    CORRECT: SELECT * FROM CUSTOMER_DATA {limit_syntax_5}
     CORRECT: SELECT "DATE", "month", PRODUCT FROM CUSTOMER_DATA
     WRONG: SELECT DATE, month FROM CUSTOMER_DATA (missing quotes)
     WRONG: SELECT day, MONTH_NAME FROM REF_DATE (wrong column names)
@@ -670,17 +760,7 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
    - "compare between X and Y" -> Use CASE statements or separate WHERE clauses
    - "grouped by month" -> GROUP BY TRUNC(date_column, 'MM')
 
-6. **ORACLE-SPECIFIC SYNTAX**
-   - Use FETCH FIRST n ROWS ONLY (NOT LIMIT)
-   - Date functions: TRUNC(), ADD_MONTHS(), SYSDATE
-   - String matching: LIKE with % wildcards
-   - NVL() for null handling
-   -  **CRITICAL: ALWAYS quote reserved words!** DATE is a reserved word
-      WRONG: SELECT DATE FROM... (causes ORA-00904)
-      CORRECT: SELECT \"DATE\" FROM...
-   -  **CRITICAL: For CUSTOMER_DATA.\"DATE\" (VARCHAR2 'DD/MM/YYYY') and REF_DATE.ID_DATE (VARCHAR2 'YYYYMMDD') JOIN**:
-      WRONG: ON CD.\"DATE\" = RD.ID_DATE (different formats won't match!)
-      CORRECT: ON TO_CHAR(TO_DATE(CD.\"DATE\", 'DD/MM/YYYY'), 'YYYYMMDD') = RD.ID_DATE
+{db_specific_rules}
 
 7. **QUERY STRUCTURE & SELECT * USAGE**
     SELECT clause: 
@@ -693,12 +773,12 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
     ORDER BY: Optional, for sorted results
     FETCH FIRST / ROW LIMITING:
       - **CRITICAL: When user specifies row count, ALWAYS honor it exactly!**
-      - "first 5 rows" / "top 5" / "5 records" -> FETCH FIRST 5 ROWS ONLY
-      - "first 10" / "top 10" -> FETCH FIRST 10 ROWS ONLY
-      - "show me 20" -> FETCH FIRST 20 ROWS ONLY
-      - No specific count mentioned -> FETCH FIRST 100 ROWS ONLY (default preview)
-      - Large result sets -> FETCH FIRST 1000 ROWS ONLY (max limit)
-      - **NEVER use ROWNUM for limiting - use FETCH FIRST syntax**
+      - "first 5 rows" / "top 5" / "5 records" -> {limit_syntax_5}
+      - "first 10" / "top 10" -> {limit_syntax_10}
+      - "show me 20" -> {"LIMIT 20" if db_type in ["postgres", "postgresql", "doris"] else "FETCH FIRST 20 ROWS ONLY"}
+      - No specific count mentioned -> {limit_syntax_100} (default preview)
+      - Large result sets -> {limit_syntax_1000} (max limit)
+      - **NEVER use ROWNUM for limiting - use {limit_syntax_n} syntax**
 
 8. **IF COLUMN/VALUE NOT FOUND - REQUEST CLARIFICATION**
    
@@ -786,7 +866,7 @@ Do not request clarification solely because a metric name is not a physical colu
                 sql=sql_query,
                 from_dialect="oracle",
                 to_dialect="doris",
-                strict=False  # Allow best-effort conversion
+                strict=False
             )
             
             if conversion_result.success:
@@ -803,7 +883,31 @@ Do not request clarification solely because a metric name is not a physical colu
                     }
             else:
                 logger.warning(f"SQL dialect conversion failed: {conversion_result.errors}")
-                # Fallback to original SQL - may fail at execution
+                span["output"]["sql_dialect_conversion_error"] = conversion_result.errors
+        
+        elif db_type in ["postgres", "postgresql"]:
+            original_sql = sql_query
+            conversion_result = convert_sql(
+                sql=sql_query,
+                from_dialect="oracle",
+                to_dialect="postgres",
+                strict=False
+            )
+            
+            if conversion_result.success:
+                sql_query = conversion_result.sql
+                if sql_query != original_sql:
+                    logger.info(f"Converted SQL to PostgreSQL dialect using sqlglot")
+                    logger.debug(f"Conversion warnings: {conversion_result.warnings}")
+                    logger.debug(f"Unsupported features: {conversion_result.unsupported_features}")
+                    span["output"]["sql_dialect_conversion"] = {
+                        "from": "oracle",
+                        "to": "postgres",
+                        "warnings": conversion_result.warnings,
+                        "unsupported_features": conversion_result.unsupported_features
+                    }
+            else:
+                logger.warning(f"SQL dialect conversion failed: {conversion_result.errors}")
                 span["output"]["sql_dialect_conversion_error"] = conversion_result.errors
 
         # ========== ERROR MESSAGE DETECTION ==========

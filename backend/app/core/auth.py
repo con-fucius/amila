@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, RateLimitError
 from app.core.resilience import ResilienceManager, retry_async, retry_sync
+from app.models.internal_models import SessionData, RefreshTokenData, safe_parse_json, safe_parse_json_list
 
 # Constants
 MAX_REFRESH_TOKENS_PER_USER = 5
@@ -327,7 +328,18 @@ class AuthenticationManager:
                 if not session_json:
                     return None
                 
-                session = json.loads(session_json)
+                # Validate with Pydantic model
+                session_data = safe_parse_json(session_json, SessionData, default=None, log_errors=True)
+                if session_data:
+                    session = session_data.model_dump()
+                else:
+                    # Fallback to raw parsing
+                    logger.warning(f"Session validation failed for {session_id}, using raw data")
+                    from app.models.internal_models import safe_parse_json_dict
+                    session = safe_parse_json_dict(session_json, default=None, log_errors=False)
+                    if not session:
+                        return None
+                
                 if not session.get("is_active"):
                     return None
                 
@@ -353,7 +365,15 @@ class AuthenticationManager:
                 session_key = f"{SESSION_KEY_PREFIX}{session_id}"
                 session_json = await redis._client.get(session_key)
                 if session_json:
-                    session = json.loads(session_json)
+                    # Validate with Pydantic model
+                    session_data = safe_parse_json(session_json, SessionData, default=None, log_errors=False)
+                    if session_data:
+                        session = session_data.model_dump()
+                    else:
+                        # Fallback to raw parsing
+                        from app.models.internal_models import safe_parse_json_dict
+                        session = safe_parse_json_dict(session_json, default={}, log_errors=False)
+                    
                     session["is_active"] = False
                     await redis._client.setex(session_key, 3600, json.dumps(session))  # Keep for 1 hour for audit
                     logger.info(f"Session invalidated for user {session.get('username')}: {session_id[:8]}...")
@@ -380,9 +400,12 @@ class AuthenticationManager:
         if redis and redis._client:
             try:
                 refresh_key = f"{REFRESH_TOKEN_KEY_PREFIX}{username}"
-                # Get existing tokens
+                # Get existing tokens with validation
                 existing = await redis._client.get(refresh_key)
-                tokens = json.loads(existing) if existing else []
+                if existing:
+                    tokens = safe_parse_json_list(existing, default=[], log_errors=True)
+                else:
+                    tokens = []
                 tokens.append(token_data)
                 
                 # Keep only last N tokens
@@ -408,9 +431,9 @@ class AuthenticationManager:
                 refresh_key = f"{REFRESH_TOKEN_KEY_PREFIX}{username}"
                 existing = await redis._client.get(refresh_key)
                 if existing:
-                    tokens = json.loads(existing)
+                    tokens = safe_parse_json_list(existing, default=[], log_errors=True)
                     for token in tokens:
-                        if token["jti"] == token_jti:
+                        if isinstance(token, dict) and token.get("jti") == token_jti:
                             token["is_active"] = False
                             logger.info(f"Refresh token revoked for user {username}: {token_jti[:8]}...")
                             break
@@ -435,9 +458,9 @@ class AuthenticationManager:
                 refresh_key = f"{REFRESH_TOKEN_KEY_PREFIX}{username}"
                 existing = await redis._client.get(refresh_key)
                 if existing:
-                    tokens = json.loads(existing)
+                    tokens = safe_parse_json_list(existing, default=[], log_errors=True)
                     for token in tokens:
-                        if token["jti"] == token_jti and token.get("is_active", False):
+                        if isinstance(token, dict) and token.get("jti") == token_jti and token.get("is_active", False):
                             return True
             except Exception as e:
                 logger.warning(f"Redis validate refresh token failed: {e}")

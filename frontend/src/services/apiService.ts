@@ -83,7 +83,7 @@ export interface QueryRequest {
   query: string
   user_id?: string
   session_id?: string
-  database_type?: 'oracle' | 'doris'
+  database_type?: 'oracle' | 'doris' | 'postgres'
 }
 /** Mirrors backend OrchestratorQueryResponse and tolerates extra/optional fields from the backend. */
 export interface QueryResponse {
@@ -415,6 +415,18 @@ class APIService {
     })
   }
 
+  async cancelQuery(queryId: string): Promise<{
+    query_id: string
+    status: string
+    message: string
+    cancelled: boolean
+  }> {
+    return this.request(`/api/v1/queries/${queryId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
   async listConnections(): Promise<ConnectionsResponse> {
     return this.request<ConnectionsResponse>('/api/v1/queries/connections')
   }
@@ -583,7 +595,7 @@ class APIService {
   /**
    * Check database health before allowing selection
    */
-  async checkDatabaseHealth(databaseType: 'oracle' | 'doris'): Promise<{
+  async checkDatabaseHealth(databaseType: 'oracle' | 'doris' | 'postgres'): Promise<{
     status: string
     healthy: boolean
     latency_ms?: number
@@ -603,6 +615,33 @@ class APIService {
         status: 'error',
         healthy: false,
         error: err.message || 'Health check failed',
+      }
+    }
+  }
+
+  /**
+   * Get MCP tools status from both Oracle and Doris MCP servers
+   */
+  async getMCPToolsStatus(): Promise<any> {
+    try {
+      const response = await this.request<any>('/health/mcp-tools')
+      return response
+    } catch (err: any) {
+      console.error('[apiService] Failed to get MCP tools status:', err)
+      return {
+        timestamp: new Date().toISOString(),
+        servers: {
+          oracle: {
+            server_name: 'Oracle SQLcl MCP',
+            server_status: 'error',
+            tools: []
+          },
+          doris: {
+            server_name: 'Apache Doris MCP',
+            server_status: 'error',
+            tools: []
+          }
+        }
       }
     }
   }

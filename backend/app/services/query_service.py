@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from app.orchestrator import process_query
 from app.core.client_registry import registry
 from app.core.config import settings
+from app.core.exceptions import MCPException
+from app.core.structured_logging import get_iso_timestamp
 from app.core.langfuse_client import (
     create_trace,
     get_langfuse_client,
@@ -19,6 +21,7 @@ from app.core.langfuse_client import (
     update_trace,
 )
 from app.core.resilience import circuit_breaker_context, CircuitBreakerConfig, CircuitBreakerOpenError
+from app.core.mcp_resilient import safe_mcp_call, validate_mcp_response, MCPTimeoutError
 from app.services.connection_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -81,7 +84,7 @@ class QueryService:
                 "message": error_msg,
                 "error": error_msg,  # CRITICAL: Include error field for frontend
                 "query_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": get_iso_timestamp(),
             }
         except Exception as e:
             logger.error(f"Query processing failed: %s", e, exc_info=True)
@@ -91,7 +94,7 @@ class QueryService:
                 "message": error_msg,
                 "error": error_msg,  # CRITICAL: Include error field for frontend
                 "query_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": get_iso_timestamp(),
             }
     
     @staticmethod
@@ -132,16 +135,24 @@ class QueryService:
                     # Use shorter timeout for acquisition to allow fallback
                     async with sqlcl_pool.acquire(timeout=30) as client:
                         logger.info(f"Executing via SQLcl pool")
-                        return await client.execute_sql(sql_query, conn)
+                        return await client.execute_sql(sql_query, conn, query_id=query_id)
                 except asyncio.TimeoutError:
                     logger.warning(f"Pool acquisition timed out, falling back to MCP client")
+                except MCPException as e:
+                    logger.warning(f"Pool execution failed ({e.message}), falling back to MCP client")
                 except Exception as e:
                     logger.warning(f"Pool execution failed ({e}), falling back to MCP client")
 
             # Fallback to single MCP client
             mcp_client = registry.get_mcp_client()
             if not mcp_client:
-                raise RuntimeError("MCP client and pool not available")
+                raise MCPException(
+                    "MCP client and pool not available",
+                    details={
+                        "pool_available": sqlcl_pool is not None,
+                        "client_available": False
+                    }
+                )
 
             logger.info("Fetching available connections via fallback client...")
             
@@ -149,10 +160,16 @@ class QueryService:
             # Note: connect_database might internally check cache or status
             connection_result = await mcp_client.connect_database(conn)
             if connection_result.get("status") != "connected":
-                raise RuntimeError(f"Database connection failed: {connection_result.get('message')}")
+                raise MCPException(
+                    f"Database connection failed: {connection_result.get('message')}",
+                    details={
+                        "connection_name": conn,
+                        "connection_result": connection_result
+                    }
+                )
 
             # Execute query
-            return await mcp_client.execute_sql(sql_query, conn)
+            return await mcp_client.execute_sql(sql_query, conn, query_id=query_id)
 
         # Use shared execution service
         from app.services.execution_service import ExecutionService

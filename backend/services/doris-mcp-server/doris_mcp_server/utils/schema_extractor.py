@@ -1459,7 +1459,8 @@ class MetadataExtractor:
         db_name: str = None,
         catalog_name: str = None,
         max_rows: int = 100,
-        timeout: int = 30
+        timeout: int = 30,
+        query_id: str = None  # Add query_id parameter
     ) -> Dict[str, Any]:
         """
         Execute SQL query and return results, supports catalog federation queries
@@ -1468,7 +1469,7 @@ class MetadataExtractor:
         FIX for Issue #62 Bug 1: Now retrieves auth_context from context variable to support token-bound database configuration
         FIX for Issue #62 Bug 3: Now uses db_name and catalog_name parameters to switch database context
         """
-        logger.info(f"Executing SQL query: {sql}, DB: {db_name}, Catalog: {catalog_name}, MaxRows: {max_rows}, Timeout: {timeout}")
+        logger.info(f"Executing SQL query: {sql}, DB: {db_name}, Catalog: {catalog_name}, MaxRows: {max_rows}, Timeout: {timeout}, QueryID: {query_id}")
 
         try:
             if not sql:
@@ -1530,7 +1531,8 @@ class MetadataExtractor:
                 connection_manager=self.connection_manager,
                 limit=max_rows,
                 timeout=timeout,
-                auth_context=auth_context  # FIX: Pass auth_context with token
+                auth_context=auth_context,  # FIX: Pass auth_context with token
+                query_id=query_id # Pass query_id
             )
 
             return exec_result

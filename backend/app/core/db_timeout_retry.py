@@ -16,6 +16,7 @@ class DatabaseType(str, Enum):
     """Database types with different timeout characteristics"""
     ORACLE = "oracle"
     DORIS = "doris"
+    POSTGRES = "postgres"
 
 
 @dataclass
@@ -142,6 +143,24 @@ class DatabaseTimeoutRetryConfig:
         retry_on_transient=True
     )
     
+    # PostgreSQL configuration - optimized for OLTP/analytical hybrid workloads
+    # Balanced timeouts for general-purpose database
+    POSTGRES_TIMEOUT_POLICY = TimeoutPolicy(
+        connection_timeout=15.0,          # PostgreSQL connection is fast
+        query_timeout=600.0,              # 10 minutes for analytical queries
+        pool_acquisition_timeout=10.0,    # Wait up to 10s for pool connection
+        read_timeout=600.0                # Match query timeout
+    )
+    
+    POSTGRES_RETRY_POLICY = RetryPolicy(
+        max_attempts=3,
+        backoff_base=1.8,                 # 1.8s, 3.24s, 5.832s backoff
+        backoff_cap=8.0,
+        jitter=0.15,
+        retry_on_timeout=True,
+        retry_on_connection_error=True,
+        retry_on_transient=True           # Retry transient errors
+    )
     @staticmethod
     def get_timeout_policy(database_type: DatabaseType) -> TimeoutPolicy:
         """Get timeout policy for database type"""
@@ -149,6 +168,8 @@ class DatabaseTimeoutRetryConfig:
             return DatabaseTimeoutRetryConfig.ORACLE_TIMEOUT_POLICY
         elif database_type == DatabaseType.DORIS:
             return DatabaseTimeoutRetryConfig.DORIS_TIMEOUT_POLICY
+        elif database_type == DatabaseType.POSTGRES:
+            return DatabaseTimeoutRetryConfig.POSTGRES_TIMEOUT_POLICY
         else:
             logger.warning(f"Unknown database type: {database_type}, using Oracle defaults")
             return DatabaseTimeoutRetryConfig.ORACLE_TIMEOUT_POLICY
@@ -160,6 +181,8 @@ class DatabaseTimeoutRetryConfig:
             return DatabaseTimeoutRetryConfig.ORACLE_RETRY_POLICY
         elif database_type == DatabaseType.DORIS:
             return DatabaseTimeoutRetryConfig.DORIS_RETRY_POLICY
+        elif database_type == DatabaseType.POSTGRES:
+            return DatabaseTimeoutRetryConfig.POSTGRES_RETRY_POLICY
         else:
             logger.warning(f"Unknown database type: {database_type}, using Oracle defaults")
             return DatabaseTimeoutRetryConfig.ORACLE_RETRY_POLICY
@@ -338,12 +361,19 @@ def get_database_policies(database_type: str) -> tuple[TimeoutPolicy, RetryPolic
     Convenience function to get both timeout and retry policies
     
     Args:
-        database_type: "oracle" or "doris"
+        database_type: "oracle", "doris", or "postgres"
         
     Returns:
         Tuple of (TimeoutPolicy, RetryPolicy)
     """
-    db_type = DatabaseType.ORACLE if database_type.lower() == "oracle" else DatabaseType.DORIS
+    db_type_lower = database_type.lower()
+    if db_type_lower == "postgres":
+        db_type = DatabaseType.POSTGRES
+    elif db_type_lower == "doris":
+        db_type = DatabaseType.DORIS
+    else:
+        db_type = DatabaseType.ORACLE
+        
     return (
         DatabaseTimeoutRetryConfig.get_timeout_policy(db_type),
         DatabaseTimeoutRetryConfig.get_retry_policy(db_type)

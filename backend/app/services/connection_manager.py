@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from app.core.client_registry import registry
 from app.core.config import settings
+from app.core.exceptions import MCPException
 from app.services.doris_query_service import DorisQueryService
 
 logger = logging.getLogger(__name__)
@@ -93,11 +94,22 @@ class ConnectionManager:
                     logger.info(f"Retrieved {len(conns)} Oracle connections via MCP")
                     return conns
                 else:
-                    raise RuntimeError(f"MCP list_connections failed: {result.get('message')}")
+                    raise MCPException(
+                        f"MCP list_connections failed: {result.get('message')}",
+                        details={"result": result}
+                    )
+            except MCPException:
+                raise
             except Exception as e:
-                raise RuntimeError(f"Oracle MCP fallback failed: {e}")
+                raise MCPException(
+                    f"Oracle MCP fallback failed: {e}",
+                    details={"error": str(e), "error_type": type(e).__name__}
+                )
         
         error_msg = "No Oracle client available"
         if pool_error:
             error_msg += f" (Pool error: {pool_error})"
-        raise RuntimeError(error_msg)
+        raise MCPException(
+            error_msg,
+            details={"pool_error": pool_error}
+        )

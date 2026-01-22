@@ -21,3 +21,6 @@ venv.bak/
 .idea/
 .coverage
 coverage.xml
+
+# Token configuration files (may contain secrets)
+tokens.json

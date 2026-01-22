@@ -6,6 +6,12 @@ Provides unified Redis interface for:
 - Schema metadata caching (table/column info with TTL)
 - Query result caching (frequent queries with LRU eviction)
 - Celery task queue backend
+
+Features:
+- Circuit breaker for automatic failure detection
+- In-memory fallback when Redis unavailable
+- Graceful degradation for all operations
+- Comprehensive error handling
 """
 
 import json
@@ -13,11 +19,23 @@ import logging
 from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
 
+from app.utils.json_encoder import CustomJSONEncoder
+
 import redis.asyncio as redis
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import settings
+from app.core.exceptions import ExternalServiceException
+from app.core.redis_resilient import ResilientRedisWrapper
+from app.models.internal_models import (
+    SessionData,
+    SchemaMetadata,
+    SampleData,
+    QueryCacheEntry,
+    safe_parse_json,
+    safe_parse_json_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +48,7 @@ MAX_QUERY_CACHE_ENTRIES = 1000  # LRU eviction threshold
 QUERY_CACHE_INDEX_KEY = "query:cache_index"  # Sorted set for LRU tracking
 
 class RedisClient:
-    """Async Redis client with connection pooling and error handling"""
+    """Async Redis client with connection pooling, circuit breaker, and graceful degradation"""
     
     def __init__(self):
         self._client: Optional[Redis] = None
@@ -38,11 +56,47 @@ class RedisClient:
         self._cache_client: Optional[Redis] = None
         # Separate raw (binary) client for RediSearch vector operations
         self._vector_client: Optional[Redis] = None
+        # Resilient wrapper for fault tolerance
+        self._resilient_wrapper: Optional[ResilientRedisWrapper] = None
 
     def _require_client(self) -> Redis:
+        """
+        Ensure Redis client is initialized before use
+        
+        Returns:
+            Redis: The initialized Redis client
+            
+        Raises:
+            ExternalServiceException: If Redis client is not initialized
+            
+        Note: This method is wrapped by resilient wrapper for graceful degradation
+        """
         if not self._client:
-            raise RuntimeError("Redis client not initialized. Call connect() before issuing commands.")
+            raise ExternalServiceException(
+                "Redis client not initialized. Call connect() before issuing commands.",
+                service_name="redis",
+                details={"client_initialized": False}
+            )
         return self._client
+    
+    def is_connected(self) -> bool:
+        """Check if Redis client is connected"""
+        return self._client is not None
+    
+    def is_available(self) -> bool:
+        """Check if Redis is available (considers circuit breaker state)"""
+        if not self._resilient_wrapper:
+            return self.is_connected()
+        return self._resilient_wrapper.is_available()
+    
+    def get_health_status(self) -> dict:
+        """Get comprehensive health status including circuit breaker"""
+        if not self._resilient_wrapper:
+            return {
+                "connected": self.is_connected(),
+                "resilient_wrapper": False
+            }
+        return self._resilient_wrapper.get_health_status()
 
     async def connect(self, max_retries: int = 3, retry_delay: float = 1.0):
         """Initialize Redis connection pools with retry logic"""
@@ -94,6 +148,13 @@ class RedisClient:
                 # Test connection
                 await self._client.ping()
                 logger.info(f"Redis connection established successfully")
+                
+                # Initialize resilient wrapper
+                self._resilient_wrapper = ResilientRedisWrapper(
+                    self,
+                    enable_fallback=True
+                )
+                logger.info("Redis resilient wrapper initialized with circuit breaker and fallback")
                 return
 
             except RedisError as e:
@@ -126,7 +187,7 @@ class RedisClient:
         self, session_id: str, user_data: dict, ttl: int = 86400
     ) -> bool:
         """
-        Store user session data with TTL
+        Store user session data with TTL (with fallback)
 
         Args:
             session_id: Unique session identifier (JWT jti)
@@ -136,6 +197,30 @@ class RedisClient:
         Returns:
             True if successful, False otherwise
         """
+        if not self._resilient_wrapper:
+            # Fallback to direct operation if wrapper not initialized
+            return await self._set_session_direct(session_id, user_data, ttl)
+        
+        async def redis_op():
+            return await self._set_session_direct(session_id, user_data, ttl)
+        
+        def fallback_op():
+            key = f"session:{session_id}"
+            self._resilient_wrapper.fallback.set(key, user_data, ttl)
+            logger.debug(f"Session stored in fallback cache: {session_id}")
+            return True
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "set_session"
+        )
+        return result if result is not None else False
+    
+    async def _set_session_direct(
+        self, session_id: str, user_data: dict, ttl: int = 86400
+    ) -> bool:
+        """Direct session storage (internal)"""
         try:
             # Enforce maximum TTL of 7 days for security
             max_ttl = 7 * 24 * 3600  # 7 days
@@ -143,17 +228,17 @@ class RedisClient:
             
             key = f"session:{session_id}"
             await self._session_client.setex(
-                key, ttl, json.dumps(user_data)
+                key, ttl, json.dumps(user_data, cls=CustomJSONEncoder)
             )
             logger.debug(f"Session stored: {session_id}")
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to store session {session_id}: {e}")
-            return False
+            raise
 
     async def get_session(self, session_id: str) -> Optional[dict]:
         """
-        Retrieve session data
+        Retrieve session data (with fallback)
 
         Args:
             session_id: Session identifier
@@ -161,34 +246,107 @@ class RedisClient:
         Returns:
             User data dict or None if not found
         """
+        if not self._resilient_wrapper:
+            return await self._get_session_direct(session_id)
+        
+        async def redis_op():
+            return await self._get_session_direct(session_id)
+        
+        def fallback_op():
+            key = f"session:{session_id}"
+            data = self._resilient_wrapper.fallback.get(key)
+            if data:
+                logger.debug(f"Session retrieved from fallback cache: {session_id}")
+            return data
+        
+        return await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "get_session"
+        )
+    
+    async def _get_session_direct(self, session_id: str) -> Optional[dict]:
+        """Direct session retrieval (internal)"""
         try:
             key = f"session:{session_id}"
             data = await self._session_client.get(key)
             if data:
-                return json.loads(data)
+                # Validate session data with Pydantic
+                session = safe_parse_json(data, SessionData, default=None, log_errors=True)
+                if session:
+                    return session.model_dump()
+                # Fallback to raw dict if validation fails but data exists
+                logger.warning(f"Session data validation failed for {session_id}, using raw data")
+                return safe_parse_json_dict(data, default=None, log_errors=False)
             return None
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to get session {session_id}: {e}")
-            return None
+            raise
 
     async def delete_session(self, session_id: str) -> bool:
-        """Delete session (logout)"""
+        """Delete session (logout) with fallback"""
+        if not self._resilient_wrapper:
+            return await self._delete_session_direct(session_id)
+        
+        async def redis_op():
+            return await self._delete_session_direct(session_id)
+        
+        def fallback_op():
+            key = f"session:{session_id}"
+            self._resilient_wrapper.fallback.delete(key)
+            logger.debug(f"Session deleted from fallback cache: {session_id}")
+            return True
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "delete_session"
+        )
+        return result if result is not None else False
+    
+    async def _delete_session_direct(self, session_id: str) -> bool:
+        """Direct session deletion (internal)"""
         try:
             key = f"session:{session_id}"
             await self._session_client.delete(key)
             logger.debug(f"Session deleted: {session_id}")
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to delete session {session_id}: {e}")
-            return False
+            raise
 
     async def refresh_session(self, session_id: str, ttl: int = 86400) -> bool:
         """
-        Extend session TTL (prevents indefinite accumulation)
+        Extend session TTL (prevents indefinite accumulation) with fallback
         
         Args:
             ttl: Time to live in seconds (default: 24 hours, max 7 days)
         """
+        if not self._resilient_wrapper:
+            return await self._refresh_session_direct(session_id, ttl)
+        
+        async def redis_op():
+            return await self._refresh_session_direct(session_id, ttl)
+        
+        def fallback_op():
+            # Fallback: update TTL in memory cache
+            key = f"session:{session_id}"
+            data = self._resilient_wrapper.fallback.get(key)
+            if data:
+                self._resilient_wrapper.fallback.set(key, data, ttl)
+                logger.debug(f"Session TTL refreshed in fallback cache: {session_id}")
+                return True
+            return False
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "refresh_session"
+        )
+        return result if result is not None else False
+    
+    async def _refresh_session_direct(self, session_id: str, ttl: int = 86400) -> bool:
+        """Direct session refresh (internal)"""
         try:
             # Enforce maximum TTL
             max_ttl = 7 * 24 * 3600
@@ -197,9 +355,9 @@ class RedisClient:
             key = f"session:{session_id}"
             await self._session_client.expire(key, ttl)
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to refresh session {session_id}: {e}")
-            return False
+            raise
 
     # ==================== SCHEMA CACHING ====================
 
@@ -220,7 +378,7 @@ class RedisClient:
         try:
             key = f"schema:{schema_key}"
             await self._cache_client.setex(
-                key, ttl, json.dumps(metadata)
+                key, ttl, json.dumps(metadata, cls=CustomJSONEncoder)
             )
             logger.debug(f"Schema cached: {schema_key}")
             return True
@@ -229,13 +387,19 @@ class RedisClient:
             return False
 
     async def get_schema_metadata(self, schema_key: str) -> Optional[dict]:
-        """Retrieve cached schema metadata"""
+        """Retrieve cached schema metadata with Pydantic validation"""
         try:
             key = f"schema:{schema_key}"
             data = await self._cache_client.get(key)
             if data:
                 logger.debug(f"Schema cache hit: {schema_key}")
-                return json.loads(data)
+                # Validate with Pydantic model
+                schema = safe_parse_json(data, SchemaMetadata, default=None, log_errors=True)
+                if schema:
+                    return schema.model_dump()
+                # Fallback to raw dict if validation fails but data exists
+                logger.warning(f"Schema metadata validation failed for {schema_key}, using raw data")
+                return safe_parse_json_dict(data, default=None, log_errors=False)
             logger.debug(f"Schema cache miss: {schema_key}")
             return None
         except RedisError as e:
@@ -286,7 +450,7 @@ class RedisClient:
         try:
             key = f"sample:{table_name.upper()}"
             await self._cache_client.setex(
-                key, ttl, json.dumps(sample_rows)
+                key, ttl, json.dumps(sample_rows, cls=CustomJSONEncoder)
             )
             logger.debug(f"Sample data cached for {table_name}: {len(sample_rows)} rows")
             return True
@@ -295,13 +459,20 @@ class RedisClient:
             return False
     
     async def get_sample_data(self, table_name: str) -> Optional[list]:
-        """Retrieve cached sample data for a table"""
+        """Retrieve cached sample data for a table with Pydantic validation"""
         try:
             key = f"sample:{table_name.upper()}"
             data = await self._cache_client.get(key)
             if data:
                 logger.debug(f"Sample data cache hit: {table_name}")
-                return json.loads(data)
+                # Parse as list first, then validate structure if needed
+                from app.models.internal_models import safe_parse_json_list
+                rows = safe_parse_json_list(data, default=None, log_errors=True)
+                if rows is not None:
+                    return rows
+                # Fallback to raw parsing if validation fails
+                logger.warning(f"Sample data validation failed for {table_name}, using raw data")
+                return safe_parse_json_list(data, default=[], log_errors=False)
             logger.debug(f"Sample data cache miss: {table_name}")
             return None
         except RedisError as e:
@@ -383,7 +554,7 @@ class RedisClient:
             }
             
             # Store the cache entry
-            await self._cache_client.setex(key, ttl, json.dumps(cache_entry))
+            await self._cache_client.setex(key, ttl, json.dumps(cache_entry, cls=CustomJSONEncoder))
             
             # Update LRU index (sorted set with timestamp as score)
             await self._cache_client.zadd(QUERY_CACHE_INDEX_KEY, {query_hash: current_time})
@@ -397,21 +568,30 @@ class RedisClient:
             return False
 
     async def get_cached_query_result(self, query_hash: str) -> Optional[dict]:
-        """Retrieve cached query result"""
+        """Retrieve cached query result with Pydantic validation"""
         try:
             key = f"query:{query_hash}"
             data = await self._cache_client.get(key)
             if data:
-                cache_entry = json.loads(data)
+                # Validate with Pydantic model
+                cache_entry_obj = safe_parse_json(data, QueryCacheEntry, default=None, log_errors=True)
+                if cache_entry_obj:
+                    logger.debug(
+                        f"Query cache hit: {query_hash[:16]}... "
+                        f"(cached: {cache_entry_obj.cached_at})"
+                    )
+                    return cache_entry_obj.result
                 
-                # Return just the result, not metadata
-                result = cache_entry.get("result") if isinstance(cache_entry, dict) else cache_entry
-                
-                logger.debug(
-                    f"Query cache hit: {query_hash[:16]}... "
-                    f"(cached: {cache_entry.get('cached_at', 'unknown') if isinstance(cache_entry, dict) else 'legacy'})"
-                )
-                return result
+                # Fallback to raw dict parsing if validation fails
+                logger.warning(f"Query cache entry validation failed for {query_hash[:16]}, using raw data")
+                cache_entry = safe_parse_json_dict(data, default=None, log_errors=False)
+                if cache_entry:
+                    result = cache_entry.get("result") if isinstance(cache_entry, dict) else cache_entry
+                    logger.debug(
+                        f"Query cache hit (raw): {query_hash[:16]}... "
+                        f"(cached: {cache_entry.get('cached_at', 'unknown') if isinstance(cache_entry, dict) else 'legacy'})"
+                    )
+                    return result
             logger.debug(f"Query cache miss: {query_hash[:16]}...")
             return None
         except RedisError as e:
@@ -498,7 +678,26 @@ class RedisClient:
     # ==================== GENERIC KEY-VALUE OPERATIONS ====================
 
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
-        """Generic set operation"""
+        """Generic set operation with fallback"""
+        if not self._resilient_wrapper:
+            return await self._set_direct(key, value, ttl)
+        
+        async def redis_op():
+            return await self._set_direct(key, value, ttl)
+        
+        def fallback_op():
+            self._resilient_wrapper.fallback.set(key, value, ttl)
+            return True
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "set"
+        )
+        return result if result is not None else False
+    
+    async def _set_direct(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Direct set operation (internal)"""
         try:
             client = self._require_client()
             # Handle serialization - strings pass through, others get JSON encoded
@@ -506,7 +705,7 @@ class RedisClient:
                 payload = value
             else:
                 try:
-                    payload = json.dumps(value)
+                    payload = json.dumps(value, cls=CustomJSONEncoder)
                 except (TypeError, ValueError) as e:
                     logger.warning(f"Failed to serialize value for key {key}: {e}")
                     payload = str(value)
@@ -516,80 +715,207 @@ class RedisClient:
             else:
                 await client.set(key, payload)
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to set key {key}: {e}")
-            return False
+            raise
 
     async def setex(self, key: str, ttl: int, value: Any) -> bool:
-        """Set a key with expiration (wrapper used by audit logger)."""
+        """Set a key with expiration (wrapper used by audit logger) with fallback"""
+        if not self._resilient_wrapper:
+            return await self._setex_direct(key, ttl, value)
+        
+        async def redis_op():
+            return await self._setex_direct(key, ttl, value)
+        
+        def fallback_op():
+            self._resilient_wrapper.fallback.set(key, value, ttl)
+            return True
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "setex"
+        )
+        return result if result is not None else False
+    
+    async def _setex_direct(self, key: str, ttl: int, value: Any) -> bool:
+        """Direct setex operation (internal)"""
         try:
             client = self._require_client()
             # If value is not a string, serialize to JSON for consistency with decode_responses=True
-            payload = value if isinstance(value, str) else json.dumps(value)
+            payload = value if isinstance(value, str) else json.dumps(value, cls=CustomJSONEncoder)
             await client.setex(key, ttl, payload)
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to setex key {key}: {e}")
-            return False
+            raise
 
     async def get(self, key: str) -> Optional[Any]:
-        """Generic get operation"""
+        """Generic get operation with fallback"""
+        if not self._resilient_wrapper:
+            return await self._get_direct(key)
+        
+        async def redis_op():
+            return await self._get_direct(key)
+        
+        def fallback_op():
+            return self._resilient_wrapper.fallback.get(key)
+        
+        return await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "get"
+        )
+    
+    async def _get_direct(self, key: str) -> Optional[Any]:
+        """Direct get operation (internal) with safe JSON parsing"""
         try:
             data = await self._require_client().get(key)
             if data:
-                return json.loads(data)
+                # Try to parse as JSON, but return raw string if it fails
+                parsed = safe_parse_json_dict(data, default=None, log_errors=False)
+                if parsed is not None:
+                    return parsed
+                # If not a dict, return the raw data (could be a string)
+                return data
             return None
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to get key {key}: {e}")
-            return None
+            raise
 
     async def delete(self, key: str) -> bool:
-        """Generic delete operation"""
+        """Generic delete operation with fallback"""
+        if not self._resilient_wrapper:
+            return await self._delete_direct(key)
+        
+        async def redis_op():
+            return await self._delete_direct(key)
+        
+        def fallback_op():
+            self._resilient_wrapper.fallback.delete(key)
+            return True
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "delete"
+        )
+        return result if result is not None else False
+    
+    async def _delete_direct(self, key: str) -> bool:
+        """Direct delete operation (internal)"""
         try:
             await self._require_client().delete(key)
             return True
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to delete key {key}: {e}")
-            return False
+            raise
 
     async def exists(self, key: str) -> bool:
-        """Check if key exists"""
+        """Check if key exists with fallback"""
+        if not self._resilient_wrapper:
+            return await self._exists_direct(key)
+        
+        async def redis_op():
+            return await self._exists_direct(key)
+        
+        def fallback_op():
+            return self._resilient_wrapper.fallback.exists(key)
+        
+        result = await self._resilient_wrapper.execute_with_fallback(
+            redis_op,
+            fallback_op,
+            "exists"
+        )
+        return result if result is not None else False
+    
+    async def _exists_direct(self, key: str) -> bool:
+        """Direct exists check (internal)"""
         try:
             return await self._require_client().exists(key) > 0
-        except RedisError as e:
+        except (RedisError, ExternalServiceException) as e:
             logger.error(f"Failed to check key existence {key}: {e}")
+            raise
+
+    # ==================== LIST OPERATIONS ====================
+
+    async def lpush(self, key: str, value: Any) -> int:
+        """Push a value to the head of a list"""
+        try:
+            client = self._require_client()
+            payload = value if isinstance(value, str) else json.dumps(value)
+            return await client.lpush(key, payload)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to lpush to {key}: {e}")
+            return 0
+
+    async def ltrim(self, key: str, start: int, end: int) -> bool:
+        """Trim a list to the specified range"""
+        try:
+            client = self._require_client()
+            return await client.ltrim(key, start, end)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to ltrim {key}: {e}")
             return False
 
     # ==================== SORTED SET OPERATIONS ====================
 
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
-        """Add members to a sorted set."""
-        return await self._require_client().zadd(key, mapping)
+        """Add members to a sorted set with error handling"""
+        try:
+            return await self._require_client().zadd(key, mapping)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to zadd to {key}: {e}")
+            return 0
 
     async def zcard(self, key: str) -> int:
-        """Return the sorted set cardinality."""
-        return await self._require_client().zcard(key)
+        """Return the sorted set cardinality with error handling"""
+        try:
+            return await self._require_client().zcard(key)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to get zcard for {key}: {e}")
+            return 0
 
     async def zrange(self, key: str, start: int, stop: int, withscores: bool = False):
-        """Return a range of members in a sorted set."""
-        return await self._require_client().zrange(key, start, stop, withscores=withscores)
+        """Return a range of members in a sorted set with error handling"""
+        try:
+            return await self._require_client().zrange(key, start, stop, withscores=withscores)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to zrange {key}: {e}")
+            return []
 
     async def zremrangebyscore(self, key: str, min_score: float, max_score: float) -> int:
-        """Remove all members in the sorted set within the given scores."""
-        return await self._require_client().zremrangebyscore(key, min_score, max_score)
+        """Remove all members in the sorted set within the given scores with error handling"""
+        try:
+            return await self._require_client().zremrangebyscore(key, min_score, max_score)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to zremrangebyscore {key}: {e}")
+            return 0
 
     async def expire(self, key: str, seconds: int) -> bool:
-        """Set a key's time to live in seconds."""
-        return await self._require_client().expire(key, seconds)
+        """Set a key's time to live in seconds with error handling"""
+        try:
+            return await self._require_client().expire(key, seconds)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to set expire for {key}: {e}")
+            return False
 
     async def keys(self, pattern: str) -> list[str]:
-        """Find keys matching a given pattern.
+        """Find keys matching a given pattern with error handling.
         WARNING: Uses KEYS command which is O(n) - use scan_iter for large datasets."""
-        return await self._require_client().keys(pattern)
+        try:
+            return await self._require_client().keys(pattern)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to get keys for pattern {pattern}: {e}")
+            return []
     
     async def zrevrange(self, key: str, start: int, stop: int, withscores: bool = False):
-        """Return a range of members in a sorted set, by score, high to low."""
-        return await self._require_client().zrevrange(key, start, stop, withscores=withscores)
+        """Return a range of members in a sorted set, by score, high to low with error handling"""
+        try:
+            return await self._require_client().zrevrange(key, start, stop, withscores=withscores)
+        except (RedisError, ExternalServiceException) as e:
+            logger.error(f"Failed to zrevrange {key}: {e}")
+            return []
 
     # ==================== VECTOR / SEARCH OPERATIONS ====================
 
@@ -599,7 +925,11 @@ class RedisClient:
         Returns True on success or if already exists."""
         try:
             if not self._vector_client:
-                raise RuntimeError("Vector client not initialized")
+                raise ExternalServiceException(
+                    "Vector client not initialized",
+                    service_name="redis_vector",
+                    details={"vector_client_initialized": False}
+                )
             # Check if index exists
             try:
                 await self._vector_client.execute_command("FT.INFO", index_name)
@@ -625,6 +955,8 @@ class RedisClient:
             ]
             await self._vector_client.execute_command(*cmd)
             return True
+        except ExternalServiceException:
+            raise
         except Exception as e:
             logger.error(f"Failed to ensure vector index {index_name}: {e}")
             return False
@@ -634,7 +966,11 @@ class RedisClient:
         'embedding' field must be bytes (float32 array)."""
         try:
             if not self._vector_client:
-                raise RuntimeError("Vector client not initialized")
+                raise ExternalServiceException(
+                    "Vector client not initialized",
+                    service_name="redis_vector",
+                    details={"vector_client_initialized": False}
+                )
             # Build mapping dict for hset - convert non-string/bytes to string
             mapping = {}
             for k, v in fields.items():
@@ -644,6 +980,8 @@ class RedisClient:
                     mapping[k] = str(v)
             await self._vector_client.hset(key, mapping=mapping)
             return True
+        except ExternalServiceException:
+            raise
         except Exception as e:
             logger.error(f"Failed to upsert vector document {key}: {e}")
             return False
@@ -652,7 +990,11 @@ class RedisClient:
         """Perform KNN search using RediSearch KNN syntax; returns list of docs with scores and basic fields."""
         try:
             if not self._vector_client:
-                raise RuntimeError("Vector client not initialized")
+                raise ExternalServiceException(
+                    "Vector client not initialized",
+                    service_name="redis_vector",
+                    details={"vector_client_initialized": False}
+                )
             # Build filter expression
             filter_expr = "*"
             if filters:
@@ -664,7 +1006,7 @@ class RedisClient:
             params = ["2", "vec_param", query_vector]
             cmd = [
                 "FT.SEARCH", index_name,
-                f"{filter_expr}=>[KNN {k} {vector_field} $vec_param AS vector_score]",
+                f"{filter_expr}=>[KNN {k} @{vector_field} $vec_param AS vector_score]",
                 "PARAMS", *params,
                 "RETURN", "6", "name", "type", "table", "column", "text", "vector_score",
                 "SORTBY", "vector_score", "ASC",
@@ -746,3 +1088,31 @@ redis_client = RedisClient()
 async def get_redis_client() -> RedisClient:
     """Dependency injection for FastAPI routes"""
     return redis_client
+
+
+# Additional helper methods for Redis health monitoring
+async def check_redis_health() -> dict:
+    """
+    Check Redis health with circuit breaker status
+    
+    Returns comprehensive health information including:
+    - Connection status
+    - Circuit breaker state
+    - Fallback cache statistics
+    - Operation statistics
+    """
+    return await redis_client.health_check()
+
+
+def reset_redis_circuit() -> dict:
+    """
+    Manually reset Redis circuit breaker
+    
+    Returns status of reset operation
+    """
+    try:
+        redis_client.reset_circuit_breaker()
+        return {"status": "success", "message": "Circuit breaker reset"}
+    except Exception as e:
+        logger.error(f"Failed to reset circuit breaker: {e}")
+        return {"status": "error", "message": str(e)}

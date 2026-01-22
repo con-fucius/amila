@@ -161,7 +161,8 @@ class TokenManager:
                     content = f.read().strip()
                     if content and content != '{}':
                         token_file_exists = True
-            except:
+            except (IOError, OSError, json.JSONDecodeError) as e:
+                self.logger.debug(f"Could not read token file: {e}")
                 pass
         
         # Add default tokens only if no custom configuration exists

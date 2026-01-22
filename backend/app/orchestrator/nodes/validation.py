@@ -34,9 +34,16 @@ async def validate_query_node(state: QueryState) -> QueryState:
 
     state["current_stage"] = "validate"
     
+    # Record pipeline stage entry
+    from app.services.diagnostic_service import record_query_pipeline_stage
+    from datetime import datetime, timezone
+    
+    query_id = state.get("query_id", "unknown")
+    stage_start = datetime.now(timezone.utc)
+    
     # Track node execution
     await update_node_history(state, "validate", "in-progress", thinking_steps=[
-        {"id": "step-1", "content": "Validating SQL syntax and security", "status": "in-progress", "timestamp": datetime.now(timezone.utc).isoformat()}
+        {"id": "step-1", "content": "Validating SQL syntax and security", "status": "in-progress", "timestamp": stage_start.isoformat()}
     ])
     
     # Check iteration limit to prevent infinite loops
@@ -45,6 +52,17 @@ async def validate_query_node(state: QueryState) -> QueryState:
         state["error"] = f"Maximum iteration limit reached ({state['total_iterations']}). Stopping to prevent infinite loop."
         state["next_action"] = "error"
         logger.error(f"Iteration limit reached at validation node")
+        
+        # Record failure
+        stage_end = datetime.now(timezone.utc)
+        await record_query_pipeline_stage(
+            query_id=query_id,
+            stage="validation",
+            status="failed",
+            entered_at=stage_start,
+            exited_at=stage_end,
+            error_details="Maximum iteration limit reached"
+        )
         return state
 
     async with langfuse_span(
@@ -57,7 +75,37 @@ async def validate_query_node(state: QueryState) -> QueryState:
         metadata={"stage": "validate"},
     ) as span:
         span.setdefault("output", {})
-        result = await _validate_query_node_inner(state, span)
+        
+        try:
+            result = await _validate_query_node_inner(state, span)
+            
+            # Record completion
+            stage_end = datetime.now(timezone.utc)
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="validation",
+                status="completed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                metadata={
+                    "validation_passed": result.get("next_action") != "error",
+                    "needs_approval": result.get("needs_approval"),
+                    "risk_level": result.get("validation_result", {}).get("risk_level")
+                }
+            )
+            
+        except Exception as e:
+            # Record failure
+            stage_end = datetime.now(timezone.utc)
+            await record_query_pipeline_stage(
+                query_id=query_id,
+                stage="validation",
+                status="failed",
+                entered_at=stage_start,
+                exited_at=stage_end,
+                error_details=str(e)
+            )
+            raise
 
         # Expose final routing decision for observability
         span["output"]["next_action"] = result.get("next_action")
@@ -86,16 +134,20 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
     
     try:
         # Validate SQL for target dialect and convert if needed
-        if db_type == "doris":
-            # Convert Oracle-style SQL to Doris/MySQL compatible SQL
-            conversion_result = SQLDialectConverter.convert_to_doris(sql_query, strict=False)
+        if db_type in ["doris", "postgres", "postgresql"]:
+            # Convert Oracle-style SQL to target dialect
+            if db_type == "doris":
+                conversion_result = SQLDialectConverter.convert_to_doris(sql_query, strict=False)
+            else:
+                conversion_result = SQLDialectConverter.convert_to_postgres(sql_query, strict=False)
+            
             if conversion_result.success and conversion_result.sql != sql_query:
                 sql_query = conversion_result.sql
                 dialect_conversion_applied = True
-                logger.info(f"SQL converted to Doris dialect")
+                logger.info(f"SQL converted to {db_type} dialect")
                 span["output"]["dialect_conversion"] = {
                     "from": "oracle",
-                    "to": "doris",
+                    "to": db_type,
                     "applied": True,
                     "warnings": conversion_result.warnings[:3] if conversion_result.warnings else [],
                     "unsupported_features": conversion_result.unsupported_features[:3] if conversion_result.unsupported_features else [],
@@ -108,7 +160,7 @@ async def _validate_query_node_inner(state: QueryState, span: dict) -> QueryStat
                 logger.warning(f"Dialect conversion failed: {conversion_result.errors}")
                 span["output"]["dialect_conversion"] = {
                     "from": "oracle",
-                    "to": "doris",
+                    "to": db_type,
                     "applied": False,
                     "errors": conversion_result.errors[:3] if conversion_result.errors else [],
                 }

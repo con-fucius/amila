@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from app.core.graphiti_client import GraphitiClient
     from app.core.sqlcl_pool import SQLclProcessPool
     from app.core.doris_client import DorisMCPClient
+    from app.core.postgres_client import PostgreSQLClient
 
 class ClientRegistry:
     """Global registry for client instances"""
@@ -19,6 +20,7 @@ class ClientRegistry:
         self._graphiti_client: Optional["GraphitiClient"] = None
         self._sqlcl_pool: Optional["SQLclProcessPool"] = None
         self._doris_client: Optional["DorisMCPClient"] = None
+        self._postgres_client: Optional["PostgreSQLClient"] = None
         self._query_orchestrator = None
         self._langgraph_checkpointer: Any = None
         self._langgraph_checkpointer_context: Any = None
@@ -75,6 +77,19 @@ class ClientRegistry:
         """Property accessor for Doris client"""
         return self._doris_client
     
+    def set_postgres_client(self, client: "PostgreSQLClient"):
+        """Set the global PostgreSQL client instance"""
+        self._postgres_client = client
+    
+    def get_postgres_client(self) -> Optional["PostgreSQLClient"]:
+        """Get the global PostgreSQL client instance"""
+        return self._postgres_client
+    
+    @property
+    def postgres_client(self) -> Optional["PostgreSQLClient"]:
+        """Property accessor for PostgreSQL client"""
+        return self._postgres_client
+    
     def set_query_orchestrator(self, orchestrator):
         """Set the global query orchestrator graph instance"""
         self._query_orchestrator = orchestrator
@@ -119,3 +134,7 @@ def get_sqlcl_pool() -> Optional["SQLclProcessPool"]:
 def get_doris_client() -> Optional["DorisMCPClient"]:
     """Convenience function to get Doris MCP client"""
     return registry.get_doris_client()
+
+def get_postgres_client() -> Optional["PostgreSQLClient"]:
+    """Convenience function to get PostgreSQL client"""
+    return registry.get_postgres_client()

@@ -45,7 +45,10 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
     }
   }, [])
 
-  const cancelQuery = useCallback(() => {
+  const cancelQuery = useCallback(async () => {
+    const queryId = currentQueryIdRef.current
+    
+    // Abort SSE stream
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
       abortControllerRef.current = null
@@ -55,8 +58,21 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
       retryTimeoutRef.current = null
     }
     retryCountRef.current = 0
+    
+    // Call backend cancel endpoint if we have a query ID
+    if (queryId) {
+      try {
+        await apiService.cancelQuery(queryId)
+        console.log(`Query ${queryId} cancellation requested`)
+      } catch (err: any) {
+        console.error('Failed to cancel query:', err)
+        // Don't throw - we still want to clean up local state
+      }
+    }
+    
     currentQueryIdRef.current = null
     setIsLoading(false)
+    setError('Query cancelled by user')
   }, [])
 
   const setupSSEStream = useCallback(async (queryId: string, initialResult: QueryResponse) => {

@@ -1,11 +1,99 @@
 """
 Execution Step Tracker for Reasoning Display
 Tracks actual execution steps for frontend visibility
+Includes node-level timing for execution timeline visualization
 """
 
 import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
+
+
+# Track node start times for duration calculation
+_node_start_times: Dict[str, float] = {}
+
+
+def start_node_tracking(state: Dict[str, Any], node_name: str) -> None:
+    """
+    Start tracking a node's execution time
+    
+    Args:
+        state: Query state dictionary
+        node_name: Name of the orchestrator node
+    """
+    query_id = state.get("query_id", "unknown")
+    key = f"{query_id}:{node_name}"
+    _node_start_times[key] = time.time()
+    
+    # Initialize node_history if not present
+    if "node_history" not in state:
+        state["node_history"] = []
+    
+    # Add node entry with start time
+    state["node_history"].append({
+        "name": node_name,
+        "status": "running",
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "end_time": None,
+        "duration_ms": None,
+        "error": None,
+    })
+    
+    # Update current node
+    state["current_node"] = node_name
+
+
+def end_node_tracking(
+    state: Dict[str, Any], 
+    node_name: str, 
+    status: str = "completed",
+    error: Optional[str] = None,
+    thinking_steps: Optional[List[str]] = None
+) -> None:
+    """
+    End tracking a node's execution and record duration
+    
+    Args:
+        state: Query state dictionary
+        node_name: Name of the orchestrator node
+        status: Final status (completed, error, skipped)
+        error: Error message if failed
+        thinking_steps: Any thinking steps from this node
+    """
+    query_id = state.get("query_id", "unknown")
+    key = f"{query_id}:{node_name}"
+    
+    duration_ms = None
+    if key in _node_start_times:
+        duration_ms = int((time.time() - _node_start_times[key]) * 1000)
+        del _node_start_times[key]
+    
+    # Find and update the node entry
+    if "node_history" in state:
+        for entry in reversed(state["node_history"]):
+            if entry["name"] == node_name and entry["status"] == "running":
+                entry["status"] = status
+                entry["end_time"] = datetime.now(timezone.utc).isoformat()
+                entry["duration_ms"] = duration_ms
+                if error:
+                    entry["error"] = error
+                if thinking_steps:
+                    entry["thinking_steps"] = thinking_steps
+                break
+    
+    # Clear current node if it matches
+    if state.get("current_node") == node_name:
+        state["current_node"] = ""
+
+
+def get_node_timeline(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Get the execution timeline for all nodes
+    
+    Returns:
+        List of node execution entries with timing info
+    """
+    return state.get("node_history", [])
 
 
 def add_execution_step(

@@ -12,13 +12,15 @@ import { QueryBuilder } from './pages/QueryBuilder'
 import { SchemaBrowser } from './pages/SchemaBrowser'
 import { Login } from './pages/Login'
 import { Account } from './pages/Account'
+import { Settings } from './pages/Settings'
 import { AuthGuard } from './components/AuthGuard'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { CommandPalette } from './components/CommandPalette'
 import { createAppTheme } from './theme/theme'
 
 // Create ThemeContext for dark mode toggle
-export const ColorModeContext = React.createContext({ 
-  toggleColorMode: () => {},
+export const ColorModeContext = React.createContext({
+  toggleColorMode: () => { },
   mode: 'light' as PaletteMode
 })
 
@@ -26,12 +28,18 @@ function App() {
   // Initialize theme mode from localStorage, default to 'light'
   const [mode, setMode] = useState<PaletteMode>(() => {
     const savedMode = localStorage.getItem('themeMode')
-    return (savedMode === 'dark' || savedMode === 'light') ? savedMode : 'light'
+    const initialMode = (savedMode === 'dark' || savedMode === 'light') ? savedMode : 'light'
+    // Apply dark class immediately during initialization to prevent flash
+    if (typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('dark', initialMode === 'dark')
+    }
+    return initialMode
   })
 
-  // Save theme mode to localStorage whenever it changes
+  // Save theme mode to localStorage and sync document class whenever it changes
   useEffect(() => {
     localStorage.setItem('themeMode', mode)
+    document.documentElement.classList.toggle('dark', mode === 'dark')
   }, [mode])
 
   const colorMode = useMemo(
@@ -54,6 +62,7 @@ function App() {
           <ThemeProvider theme={theme}>
             <CssBaseline />
             <SnackbarProvider>
+              <CommandPalette />
               <Routes>
                 <Route path="/login" element={<Login />} />
                 <Route
@@ -66,6 +75,7 @@ function App() {
                           <Route path="/query-builder" element={<QueryBuilder />} />
                           <Route path="/schema-browser" element={<SchemaBrowser />} />
                           <Route path="/account" element={<Account />} />
+                          <Route path="/settings" element={<Settings />} />
                         </Routes>
                       </MainLayout>
                     </AuthGuard>

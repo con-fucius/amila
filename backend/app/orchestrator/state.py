@@ -1,5 +1,49 @@
 """
 Query Orchestrator State Definition
+
+This module defines the state structure for the LangGraph query orchestrator.
+
+IMPORTANT: Message Validation Design Decision
+============================================
+
+The `messages` field uses LangChain's `add_messages` reducer and is typed as
+`Annotated[Sequence[BaseMessage], add_messages]`. This design intentionally does NOT
+include explicit runtime validation for the following reasons:
+
+1. **LangChain Internal Handling**: The `add_messages` reducer from LangChain handles
+   message validation and deduplication internally. Adding our own validation would
+   duplicate this functionality.
+
+2. **Type Safety**: Python's type hints provide static type checking. The annotation
+   `Annotated[Sequence[BaseMessage], add_messages]` ensures that only BaseMessage
+   instances (HumanMessage, AIMessage, SystemMessage, etc.) should be added.
+
+3. **Compatibility**: Adding runtime validation could break compatibility with
+   LangChain's internal message handling mechanisms and future versions.
+
+4. **Code Correctness**: All messages added to the state in this codebase are
+   constructed using proper LangChain message types (HumanMessage, AIMessage,
+   SystemMessage). There are no code paths that add raw dicts or strings.
+
+5. **Performance**: Runtime validation on every message addition would add unnecessary
+   overhead when the type system already provides compile-time guarantees.
+
+**Defensive Checks at API Boundaries**:
+While we don't validate LangChain messages, we DO validate external data at API
+boundaries (e.g., conversation_history from HTTP requests) before it's used for
+routing or context. See `validate_conversation_history()` in processor.py.
+
+**If you need to add messages programmatically**:
+Always use LangChain message types:
+```python
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+state["messages"].append(HumanMessage(content="User input"))
+state["messages"].append(AIMessage(content="Assistant response"))
+state["messages"].append(SystemMessage(content="System instruction"))
+```
+
+Never add raw dicts or strings directly to the messages array.
 """
 
 from typing import TypedDict, Annotated, Sequence, Optional, Literal
@@ -7,7 +51,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 # Valid database types
-DatabaseTypeEnum = Literal["oracle", "doris"]
+DatabaseTypeEnum = Literal["oracle", "doris", "postgres", "postgresql"]
 
 # Maximum history sizes to prevent unbounded memory growth
 MAX_CLARIFICATION_HISTORY = 10
@@ -18,9 +62,20 @@ class QueryState(TypedDict, total=False):
     """Agent state tracking query processing workflow.
     
     Uses total=False to make all fields optional with sensible defaults.
+    
+    Note on message validation:
+    ---------------------------
+    The `messages` field is NOT validated at runtime because:
+    - LangChain's add_messages reducer handles validation internally
+    - Type hints provide static type checking
+    - All code paths use proper LangChain message types
+    - Runtime validation would duplicate LangChain's functionality
+    
+    See module docstring for detailed explanation.
     """
     
     # Message history for conversation context
+    # Uses LangChain's add_messages reducer for automatic message handling
     messages: Annotated[Sequence[BaseMessage], add_messages]
     
     # Query processing pipeline
@@ -121,8 +176,11 @@ def get_default_state() -> dict:
 def validate_database_type(db_type: str) -> str:
     """Validate and normalize database type."""
     normalized = db_type.lower().strip() if db_type else "oracle"
-    if normalized not in ("oracle", "doris"):
+    if normalized not in ("oracle", "doris", "postgres", "postgresql"):
         return "oracle"  # Default fallback
+    # Normalize postgresql to postgres
+    if normalized == "postgresql":
+        return "postgres"
     return normalized
 
 

@@ -503,7 +503,7 @@ class PerformanceAnalyticsTools:
                     else:
                         dt = query_time
                     query_hours.append(dt.hour)
-            except:
+            except (ValueError, TypeError, AttributeError):
                 continue
         
         hour_distribution = Counter(query_hours)

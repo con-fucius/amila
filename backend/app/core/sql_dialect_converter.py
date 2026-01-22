@@ -28,6 +28,8 @@ class SQLDialect(str, Enum):
     ORACLE = "oracle"
     DORIS = "doris"
     MYSQL = "mysql"  # Doris is MySQL-compatible
+    POSTGRES = "postgres"
+    POSTGRESQL = "postgresql"  # Alias for postgres
     GENERIC = "generic"
 
 
@@ -100,6 +102,40 @@ class SQLDialectConverter:
         r'\bCAST\s*\(([^)]+)\s+AS\s+DOUBLE\)': r'TO_NUMBER(\1)',
     }
     
+    # PostgreSQL-specific function mappings
+    ORACLE_TO_POSTGRES_FUNCTIONS = {
+        # Date functions
+        r'\bSYSDATE\b': 'NOW()',
+        r'\bCURRENT_DATE\b': 'CURRENT_DATE',
+        r'\bCURRENT_TIMESTAMP\b': 'CURRENT_TIMESTAMP',
+        
+        # String functions
+        r'\bNVL\s*\(': 'COALESCE(',
+        r'\bNVL2\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)': r'CASE WHEN \1 IS NOT NULL THEN \2 ELSE \3 END',
+        
+        # Numeric functions
+        r'\bTRUNC\s*\(': 'TRUNC(',
+        
+        # Type conversion
+        r'\bTO_CHAR\s*\(([^,)]+)\)': r'CAST(\1 AS TEXT)',
+        r'\bTO_NUMBER\s*\(([^,)]+)\)': r'CAST(\1 AS NUMERIC)',
+        r'\bTO_DATE\s*\(([^,)]+),\s*([^)]+)\)': r'TO_DATE(\1, \2)',
+    }
+    
+    POSTGRES_TO_ORACLE_FUNCTIONS = {
+        # Date functions
+        r'\bNOW\s*\(\)': 'SYSDATE',
+        r'\bCURRENT_DATE\b': 'TRUNC(SYSDATE)',
+        r'\bCURRENT_TIMESTAMP\b': 'SYSTIMESTAMP',
+        
+        # String functions
+        r'\bCOALESCE\s*\(': 'NVL(',
+        
+        # Type conversion
+        r'\bCAST\s*\(([^)]+)\s+AS\s+TEXT\)': r'TO_CHAR(\1)',
+        r'\bCAST\s*\(([^)]+)\s+AS\s+NUMERIC\)': r'TO_NUMBER(\1)',
+    }
+    
     @staticmethod
     def convert_to_oracle(sql: str, strict: bool = False) -> ConversionResult:
         """
@@ -121,6 +157,28 @@ class SQLDialectConverter:
             )
         else:
             return SQLDialectConverter._convert_to_oracle_regex(sql)
+    
+    @staticmethod
+    def convert_to_postgres(sql: str, strict: bool = False) -> ConversionResult:
+        """
+        Convert SQL to PostgreSQL dialect
+        
+        Args:
+            sql: Input SQL query
+            strict: If True, fail on unsupported features; if False, best-effort conversion
+            
+        Returns:
+            ConversionResult with converted SQL and metadata
+        """
+        if SQLGLOT_AVAILABLE:
+            return SQLDialectConverter._convert_with_sqlglot(
+                sql,
+                source_dialect="oracle",
+                target_dialect="postgres",
+                strict=strict
+            )
+        else:
+            return SQLDialectConverter._convert_to_postgres_regex(sql)
     
     @staticmethod
     def convert_to_doris(sql: str, strict: bool = False) -> ConversionResult:
@@ -238,6 +296,69 @@ class SQLDialectConverter:
                     return SQLDialectConverter._convert_to_doris_regex(sql)
                 else:
                     return SQLDialectConverter._convert_to_oracle_regex(sql)
+    
+    @staticmethod
+    def _convert_to_postgres_regex(sql: str) -> ConversionResult:
+        """
+        Convert Oracle SQL to PostgreSQL using regex (fallback method)
+        
+        Args:
+            sql: Oracle SQL query
+            
+        Returns:
+            ConversionResult
+        """
+        warnings = []
+        converted = sql
+        
+        # Apply function mappings
+        for pattern, replacement in SQLDialectConverter.ORACLE_TO_POSTGRES_FUNCTIONS.items():
+            if re.search(pattern, converted, re.IGNORECASE):
+                converted = re.sub(pattern, replacement, converted, flags=re.IGNORECASE)
+                logger.debug(f"Converted pattern: {pattern} -> {replacement}")
+        
+        # Convert FETCH FIRST n ROWS ONLY to LIMIT n
+        fetch_match = re.search(
+            r'\bFETCH\s+FIRST\s+(\d+)\s+ROWS?\s+ONLY\b',
+            converted,
+            re.IGNORECASE
+        )
+        if fetch_match:
+            limit_value = fetch_match.group(1)
+            converted = re.sub(
+                r'\bFETCH\s+FIRST\s+\d+\s+ROWS?\s+ONLY\b',
+                f'LIMIT {limit_value}',
+                converted,
+                flags=re.IGNORECASE
+            )
+            logger.debug(f"Converted FETCH FIRST to LIMIT {limit_value}")
+        
+        # Convert Oracle outer join syntax (+) to ANSI joins (best-effort)
+        if '(+)' in converted:
+            warnings.append("Oracle outer join syntax (+) detected - manual review recommended")
+        
+        # Convert dual table references
+        converted = re.sub(r'\bFROM\s+DUAL\b', '', converted, flags=re.IGNORECASE)
+        
+        # Check for unsupported features
+        unsupported = []
+        if re.search(r'\bCONNECT\s+BY\b', converted, re.IGNORECASE):
+            unsupported.append("CONNECT BY hierarchical queries")
+            warnings.append("CONNECT BY is not supported in PostgreSQL - use WITH RECURSIVE instead")
+        
+        if re.search(r'\bSTART\s+WITH\b', converted, re.IGNORECASE):
+            unsupported.append("START WITH clause")
+        
+        if re.search(r'\bMERGE\b', converted, re.IGNORECASE):
+            unsupported.append("MERGE statement")
+            warnings.append("MERGE is not supported in PostgreSQL - use INSERT ... ON CONFLICT instead")
+        
+        return ConversionResult(
+            sql=converted,
+            success=True,
+            warnings=warnings,
+            unsupported_features=unsupported
+        )
     
     @staticmethod
     def _convert_to_doris_regex(sql: str) -> ConversionResult:
@@ -397,17 +518,21 @@ def convert_sql(sql: str, from_dialect: str, to_dialect: str, strict: bool = Fal
     
     Args:
         sql: Input SQL query
-        from_dialect: Source dialect ("oracle", "doris", "mysql")
-        to_dialect: Target dialect ("oracle", "doris", "mysql")
+        from_dialect: Source dialect ("oracle", "doris", "mysql", "postgres")
+        to_dialect: Target dialect ("oracle", "doris", "mysql", "postgres")
         strict: If True, fail on unsupported features
         
     Returns:
         ConversionResult
     """
-    if to_dialect.lower() in ["doris", "mysql"]:
+    to_dialect_lower = to_dialect.lower()
+    
+    if to_dialect_lower in ["doris", "mysql"]:
         return SQLDialectConverter.convert_to_doris(sql, strict=strict)
-    elif to_dialect.lower() == "oracle":
+    elif to_dialect_lower == "oracle":
         return SQLDialectConverter.convert_to_oracle(sql, strict=strict)
+    elif to_dialect_lower in ["postgres", "postgresql"]:
+        return SQLDialectConverter.convert_to_postgres(sql, strict=strict)
     else:
         logger.warning(f"Unknown target dialect: {to_dialect}")
         return ConversionResult(sql=sql, success=False, errors=[f"Unknown dialect: {to_dialect}"])

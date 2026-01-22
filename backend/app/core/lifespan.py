@@ -11,15 +11,18 @@ from app.core.config import settings
 
 async def _run_periodic_cleanup():
     """
-    Background task to periodically clean up expired query metadata and states.
-    Runs every 5 minutes to prevent memory leaks from unbounded dict growth.
+    Background task to periodically clean up expired query metadata, states, and checkpoints.
+    Runs every 5 minutes to prevent memory leaks and unbounded growth.
     """
     logger = logging.getLogger(__name__)
     cleanup_interval = 300  # 5 minutes
+    checkpoint_cleanup_interval = 3600  # 1 hour for checkpoint cleanup
+    last_checkpoint_cleanup = 0
     
     while True:
         try:
             await asyncio.sleep(cleanup_interval)
+            current_time = time.time()
             
             # Import here to avoid circular imports
             from app.services.query_state_manager import get_query_state_manager
@@ -34,18 +37,82 @@ async def _run_periodic_cleanup():
             
             if cleaned_metadata > 0 or cleaned_states > 0:
                 logger.info(f"Periodic cleanup: {cleaned_metadata} metadata, {cleaned_states} states removed")
+            
+            # Clean up LangGraph checkpoints (every hour)
+            if current_time - last_checkpoint_cleanup >= checkpoint_cleanup_interval:
+                try:
+                    await _cleanup_langgraph_checkpoints()
+                    last_checkpoint_cleanup = current_time
+                except Exception as e:
+                    logger.error(f"Checkpoint cleanup error: {e}")
                 
         except asyncio.CancelledError:
             logger.info("Cleanup task cancelled")
             break
         except Exception as e:
             logger.error(f"Periodic cleanup error: {e}")
+
+
+async def _cleanup_langgraph_checkpoints():
+    """
+    Clean up old LangGraph SQLite checkpoints to prevent unbounded growth.
+    Removes checkpoints older than 7 days and runs VACUUM to reclaim space.
+    """
+    import os
+    import sqlite3
+    from pathlib import Path
+    
+    logger = logging.getLogger(__name__)
+    checkpoint_db_path = Path(settings.LANGGRAPH_CHECKPOINT_DB)
+    
+    if not checkpoint_db_path.exists():
+        logger.debug("Checkpoint database does not exist, skipping cleanup")
+        return
+    
+    try:
+        # Get file size before cleanup
+        size_before = checkpoint_db_path.stat().st_size
+        
+        # Connect to SQLite database
+        conn = sqlite3.connect(str(checkpoint_db_path))
+        cursor = conn.cursor()
+        
+        # Delete checkpoints older than 7 days
+        # LangGraph stores checkpoints with timestamps
+        seven_days_ago = int((time.time() - (7 * 24 * 60 * 60)) * 1000)  # milliseconds
+        
+        # Check if checkpoints table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
+        if cursor.fetchone():
+            cursor.execute("DELETE FROM checkpoints WHERE checkpoint_ns < ?", (seven_days_ago,))
+            deleted_count = cursor.rowcount
+            
+            # Run VACUUM to reclaim space
+            conn.commit()
+            cursor.execute("VACUUM")
+            conn.commit()
+            
+            # Get file size after cleanup
+            size_after = checkpoint_db_path.stat().st_size
+            size_freed = size_before - size_after
+            
+            if deleted_count > 0 or size_freed > 0:
+                logger.info(
+                    f"Checkpoint cleanup: {deleted_count} old checkpoints removed, "
+                    f"{size_freed / 1024 / 1024:.2f} MB freed"
+                )
+        
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Failed to cleanup checkpoints: {e}")
 from app.core.observability import setup_observability
 from app.core.logging_config import setup_logging
 from app.core.client_registry import registry
 from app.core.graphiti_client import close_graphiti_client
 from app.core.initializers import (
     init_doris,
+    init_postgres,
     init_redis,
     init_semantic_index,
     init_graphiti,
@@ -83,6 +150,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.warning(f"Structured logging initialization failed: {e}")
+    
+    # Initialize degraded mode manager early
+    try:
+        from app.core.degraded_mode_manager import degraded_mode_manager
+        
+        # Register all components upfront
+        degraded_mode_manager.register_component(
+            "redis",
+            impact_description="Session management, caching, and rate limiting"
+        )
+        degraded_mode_manager.register_component(
+            "celery",
+            impact_description="Background task processing (reports, schema refresh)"
+        )
+        degraded_mode_manager.register_component(
+            "langgraph_checkpointer",
+            impact_description="Query state persistence and HITL approval resumption"
+        )
+        degraded_mode_manager.register_component(
+            "graphiti",
+            impact_description="Context-aware query generation"
+        )
+        degraded_mode_manager.register_component(
+            "postgres",
+            impact_description="PostgreSQL database connectivity"
+        )
+        
+        logger.info("Degraded mode manager initialized with component registry")
+    except Exception as e:
+        logger.warning(f"Degraded mode manager initialization failed: {e}")
 
     # Langfuse Setup
     langfuse_helpers = {}
@@ -142,8 +239,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning(f"Doris init failed: {err}")
         else:
             logger.info("Doris MCP initialized successfully")
+    
+    # 1.5 PostgreSQL
+    if settings.POSTGRES_ENABLED:
+        async with startup_span("startup.postgres", metadata={"component": "postgres"}) as span:
+            success, err = await init_postgres()
+            app.state.postgres_initialized = success
+            span["output"] = {"status": "success" if success else "error", "error": err}
+            if not success:
+                startup_errors.append(f"PostgreSQL init failed: {err}")
+                logger.warning(f"PostgreSQL init failed: {err}")
+            else:
+                logger.info("PostgreSQL client initialized successfully")
 
-    # 2. Observability
+    # 2. Encryption Service
+    async with startup_span("startup.encryption", metadata={"component": "encryption"}) as span:
+        try:
+            from app.core.encryption import get_encryption_service
+            encryption_service = get_encryption_service()
+            if encryption_service.is_enabled():
+                logger.info("Encryption service initialized and enabled")
+                span["output"] = {"status": "success", "enabled": True}
+                component_status["encryption"] = {"status": "success", "enabled": True}
+            else:
+                logger.warning("Encryption service initialized but disabled (no key configured)")
+                span["output"] = {"status": "success", "enabled": False}
+                component_status["encryption"] = {"status": "success", "enabled": False}
+        except Exception as e:
+            startup_errors.append(f"Encryption service failed: {e}")
+            span["output"] = {"status": "error", "error": str(e)}
+            component_status["encryption"] = {"status": "error", "error": str(e)}
+            logger.error(f"Encryption service initialization failed: {e}")
+
+    # 3. Observability
     async with startup_span("startup.observability", metadata={"component": "observability"}) as span:
         try:
             setup_observability()
@@ -154,13 +282,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             span["output"] = {"status": "error", "error": str(e)}
             component_status["observability"] = {"status": "error", "error": str(e)}
 
-    # 3. Redis
+    # 4. Redis
     async with startup_span("startup.redis", metadata={"component": "redis"}) as span:
         success, err = await init_redis()
         status = "success" if success else "error"
         span["output"] = {"status": status, "error": err}
         component_status["redis"] = {"status": status, "error": err}
         if not success: startup_errors.append(f"Redis failed: {err}")
+    
+    # 4.5 Check Celery worker availability
+    try:
+        from app.core.celery_fallback import celery_fallback_handler
+        from app.core.degraded_mode_manager import degraded_mode_manager, ComponentStatus
+        
+        if celery_fallback_handler.is_celery_available():
+            logger.info("Celery workers available")
+            degraded_mode_manager.update_component_status(
+                "celery",
+                ComponentStatus.OPERATIONAL
+            )
+        else:
+            logger.warning("Celery workers not available, using fallback execution")
+            degraded_mode_manager.update_component_status(
+                "celery",
+                ComponentStatus.DEGRADED,
+                degradation_reason="No workers available",
+                fallback_active=True,
+                fallback_type="synchronous_execution",
+                recovery_actions=[
+                    "Start Celery workers: celery -A app.core.celery_app worker",
+                    "Check Redis broker connectivity",
+                    "Review Celery worker logs"
+                ]
+            )
+    except Exception as e:
+        logger.warning(f"Celery health check failed: {e}")
 
     # 4. Semantic Index
     if component_status.get("redis", {}).get("status") == "success":
@@ -201,12 +357,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # Start background cleanup task for query state manager
     cleanup_task = None
+    mcp_probe_task = None
     try:
         cleanup_task = asyncio.create_task(_run_periodic_cleanup())
         app.state.cleanup_task = cleanup_task
         logger.info("Started periodic cleanup background task")
     except Exception as e:
         logger.warning(f"Failed to start cleanup task: {e}")
+    
+    # Start background MCP probe task for diagnostics
+    try:
+        from app.services.diagnostic_service import start_mcp_probe_task
+        mcp_probe_task = asyncio.create_task(start_mcp_probe_task())
+        app.state.mcp_probe_task = mcp_probe_task
+        logger.info("Started MCP probe background task")
+    except Exception as e:
+        logger.warning(f"Failed to start MCP probe task: {e}")
 
     if trace_identifier and langfuse_helpers.get('update_trace'):
         try:
@@ -235,6 +401,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             pass
         except Exception as e:
             logger.warning(f"Cleanup task cancellation error: {e}")
+    
+    # Cancel MCP probe task
+    if hasattr(app.state, "mcp_probe_task") and app.state.mcp_probe_task:
+        try:
+            app.state.mcp_probe_task.cancel()
+            await asyncio.wait_for(app.state.mcp_probe_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception as e:
+            logger.warning(f"MCP probe task cancellation error: {e}")
     
     # Cleanup checkpointer
     if hasattr(app.state, "checkpointer_context") and app.state.checkpointer_context:
@@ -269,6 +445,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.core.doris_server import doris_server
             doris_server.stop()
+        except Exception:
+            pass
+    
+    # Cleanup PostgreSQL
+    if settings.POSTGRES_ENABLED:
+        try:
+            from app.core.postgres_client import postgres_client
+            await postgres_client.close()
         except Exception:
             pass
             

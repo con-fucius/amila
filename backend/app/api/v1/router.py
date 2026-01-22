@@ -4,7 +4,8 @@ Main router for all v1 API endpoints
 """
 
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, queries, health, schema, analytics, corrections, doris_proxy, errors
+from app.api.v1.endpoints import auth, health, schema, analytics, corrections, doris_proxy, errors, governance, diagnostics, qlik, superset
+from app.api.v1.endpoints.queries import router as queries_router
 
 # Create main API router
 api_router = APIRouter()
@@ -17,7 +18,7 @@ api_router.include_router(
 )
 
 api_router.include_router(
-    queries.router,
+    queries_router,
     prefix="/queries",
     tags=["queries"]
 )
@@ -52,9 +53,29 @@ api_router.include_router(
     tags=["doris-mcp"]
 )
 
-# Error reporting endpoint
 api_router.include_router(
     errors.router,
     prefix="/errors",
     tags=["errors"]
+)
+
+api_router.include_router(
+    governance.router,
+    prefix="/governance",
+    tags=["governance"]
+)
+
+api_router.include_router(
+    diagnostics.router,
+    tags=["diagnostics"]
+)
+
+api_router.include_router(
+    qlik.router,
+    tags=["qlik"]
+)
+
+api_router.include_router(
+    superset.router,
+    tags=["superset"]
 )
