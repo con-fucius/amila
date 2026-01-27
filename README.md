@@ -31,7 +31,7 @@ Follow these steps meticulously to start the Amila platform. All commands should
 
 ### 1. Start Infrastructure Services
 Start the core databases and monitoring infrastructure using Docker Compose. Ensure Docker Desktop is running before proceeding.
-
+Run the commands in project root directory.
 ```powershell
 # Command to start Redis, FalkorDB, Doris, Postgres, Otel-Collector, Grafana, Prometheus, and Oracle
 docker-compose --profile full --profile observability up -d redis falkordb doris postgres otel-collector grafana prometheus oracle
@@ -171,3 +171,4 @@ Identify the running container, stop it, and remove it before attempting to remo
 
 **Frontend: Fonts not rendering correctly**
 - **Note**: The system prioritizes `Figtree` for UI and `Cantarell`/`Consolas` for SQL. Ensure you have an internet connection for Google Fonts or have these fonts installed locally.
+
