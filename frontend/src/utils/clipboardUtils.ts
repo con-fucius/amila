@@ -103,7 +103,7 @@ function formatAsCSV(data: any[][]): string {
 function formatAsHTML(data: any[][], columns?: string[]): string {
   const hasHeaders = columns && columns.length > 0;
 
-  let html = `<table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px;">`;
+  let html = `<table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px;">`;
 
   // Add header row if columns provided
   if (hasHeaders) {

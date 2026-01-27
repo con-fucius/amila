@@ -24,30 +24,31 @@ if ($ResetDoris) {
     docker rm bi-agent-doris 2>$null
 }
 
-Write-Host "  Starting Redis, FalkorDB, and Doris..." -ForegroundColor Gray
-docker-compose up -d redis falkordb doris
+Write-Host "  Starting Redis, FalkorDB, Doris, and Oracle..." -ForegroundColor Gray
+docker-compose up -d redis falkordb doris oracle
 
-# Step 2: Wait for Doris to be healthy
-Write-Host "`n[2/5] Waiting for Doris to be healthy..." -ForegroundColor Yellow
+# Step 2: Wait for databases to be healthy
+Write-Host "`n[2/5] Waiting for databases to be healthy..." -ForegroundColor Yellow
 $maxAttempts = 40
 $attempt = 0
 
 do {
     $attempt++
-    $status = docker inspect --format='{{.State.Health.Status}}' bi-agent-doris 2>$null
+    $dorisStatus = docker inspect --format='{{.State.Health.Status}}' bi-agent-doris 2>$null
+    $oracleStatus = docker inspect --format='{{.State.Health.Status}}' bi-agent-oracle 2>$null
     
-    if ($status -eq "healthy") {
-        Write-Host "  Doris is healthy!" -ForegroundColor Green
+    Write-Host "  Attempt $attempt/$maxAttempts - Doris: $dorisStatus, Oracle: $oracleStatus" -ForegroundColor Gray
+    
+    if ($dorisStatus -eq "healthy" -and $oracleStatus -eq "healthy") {
+        Write-Host "  Databases are healthy!" -ForegroundColor Green
         break
     }
     
-    Write-Host "  Attempt $attempt/$maxAttempts - Status: $status" -ForegroundColor Gray
     Start-Sleep -Seconds 5
 } while ($attempt -lt $maxAttempts)
 
-if ($status -ne "healthy") {
-    Write-Host "  ERROR: Doris did not become healthy. Check logs:" -ForegroundColor Red
-    Write-Host "    docker logs bi-agent-doris --tail 50" -ForegroundColor Gray
+if ($dorisStatus -ne "healthy" -or $oracleStatus -ne "healthy") {
+    Write-Host "  ERROR: Databases did not become healthy in time." -ForegroundColor Red
     exit 1
 }
 

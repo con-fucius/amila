@@ -113,9 +113,9 @@ def generate_records(num_records: int, faker: Faker) -> List[Tuple]:
             "sector": random.choice(SECTORS),
         })
     
-    # Generate date range (last 12 months)
-    end_date = datetime(2025, 7, 31)
+    # Generate date range (full year 2025)
     start_date = datetime(2025, 1, 1)
+    end_date = datetime(2025, 12, 31)
     date_range = (end_date - start_date).days
     
     for i in range(num_records):
@@ -162,30 +162,43 @@ def generate_records(num_records: int, faker: Faker) -> List[Tuple]:
     return records
 
 
-def wait_for_doris(max_retries: int = 30, retry_interval: int = 2) -> bool:
-    """Wait for Doris to be ready."""
+def wait_for_doris(max_retries: int = 60, retry_interval: int = 5) -> bool:
+    """Wait for Doris to be ready with automatic localhost fallback."""
     import time
+    import socket
     
-    print(f"Waiting for Doris at {DORIS_HOST}:{DORIS_PORT}...")
+    current_host = DORIS_HOST
+    print(f"Waiting for Doris at {current_host}:{DORIS_PORT}...")
     
     for attempt in range(max_retries):
         try:
             conn = pymysql.connect(
-                host=DORIS_HOST,
+                host=current_host,
                 port=DORIS_PORT,
                 user=DORIS_USER,
                 password=DORIS_PASSWORD,
                 connect_timeout=5,
             )
             conn.close()
-            print("[OK] Doris is ready!")
+            print(f"\n[OK] Doris is ready at {current_host}!")
             return True
         except Exception as e:
+            error_msg = str(e)
+            # If resolution fails (Errno 11001) or connection refused, try localhost
+            if ("getaddrinfo failed" in error_msg or "Can't connect" in error_msg) and current_host != "127.0.0.1":
+                if attempt == 0:
+                    print(f"  Note: Could not resolve '{current_host}'. Falling back to 127.0.0.1 for local execution.")
+                current_host = "127.0.0.1"
+                
             if attempt < max_retries - 1:
-                print(f"  Attempt {attempt + 1}/{max_retries}: Waiting... ({str(e)[:50]})")
+                if attempt % 5 == 0:
+                    print(f"  Attempt {attempt + 1}/{max_retries}: Waiting for Doris... ({error_msg[:100]})")
+                else:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
                 time.sleep(retry_interval)
             else:
-                print(f"[FAIL] Doris not ready after {max_retries} attempts")
+                print(f"\n[FAIL] Doris not ready after {max_retries} attempts")
                 return False
     
     return False
@@ -255,7 +268,7 @@ def init_database():
     print("[OK] CUSTOMER_DATA table created")
     
     # Generate data
-    print("\nGenerating 10,000 records...")
+    print("\nGenerating 100,000 records...")
     faker = Faker()
     Faker.seed(42)  # For reproducibility
     random.seed(42)

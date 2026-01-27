@@ -55,7 +55,7 @@ def get_query_llm_provider() -> str:
     return getattr(settings, 'GRAPHITI_LLM_PROVIDER', 'gemini').lower()
 
 
-def get_query_llm_model(default: str = 'unknown') -> str:
+def get_query_llm_model(default: str = 'unknown', for_provider: Optional[str] = None) -> str:
     """Resolve model name for query orchestration."""
     # Environment override (supports OpenAI-compatible providers like Qwen)
     env_model = os.getenv('OPENAI_MODEL')
@@ -64,6 +64,21 @@ def get_query_llm_model(default: str = 'unknown') -> str:
 
     # Check for QUERY_LLM_MODEL specifically
     model = getattr(settings, 'QUERY_LLM_MODEL', None) or os.getenv('QUERY_LLM_MODEL')
+
+    # If we are looking for a specific provider, check if the override is valid for it
+    if for_provider:
+        current_provider = get_query_llm_provider()
+        if for_provider != current_provider:
+            # We are likely in a fallback or specific provider instantiation
+            # Do NOT use the universal QUERY_LLM_MODEL if it doesn't match the for_provider's characteristic
+            if model:
+                # Heuristic: if model contains 'flash' it's likely gemini, if 'devstral' it's mistral
+                if for_provider == 'mistral' and 'devstral' in model:
+                    return model
+                if for_provider == 'gemini' and 'flash' in model:
+                    return model
+            return default
+            
     if model:
         return model
         
@@ -132,8 +147,8 @@ def get_llm():
     if llm_provider == 'gemini':
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        model_name = get_query_llm_model(settings.GRAPHITI_LLM_MODEL)
-        logger.debug("Initializing Google Gemini LLM for query orchestration")
+        model_name = get_query_llm_model("gemini-2.0-flash", for_provider='gemini')
+        logger.debug(f"Initializing Google Gemini LLM ({model_name}) for query orchestration")
         return ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=settings.GOOGLE_API_KEY,
@@ -156,6 +171,25 @@ def get_llm():
                 "top_p": 0.95,
             },
         )
+
+    if llm_provider == 'mistral':
+        from langchain_mistralai import ChatMistralAI
+        
+        # Use specific model from settings or default
+        model_name = get_query_llm_model(settings.MISTRAL_MODEL)
+        api_key = os.getenv('MISTRAL_API_KEY') or settings.MISTRAL_API_KEY
+        
+        if not api_key:
+            logger.warning("Mistral API key not found, falling back to OpenRouter for devstral")
+            llm_provider = 'openrouter' # Run-time fallback
+        else:
+            logger.info(f"Initializing Mistral LLM: model={model_name}")
+            return ChatMistralAI(
+                model=model_name,
+                mistral_api_key=api_key,
+                temperature=0.0,
+                max_tokens=4096,
+            )
 
     if llm_provider == 'qwen':
         access_token, base_url = load_qwen_credentials()
@@ -193,7 +227,7 @@ def get_llm():
                 "Get your API key from https://openrouter.ai/keys"
             )
         
-        model_name = get_query_llm_model('mistralai/devstral-2512:free')
+        model_name = get_query_llm_model('mistralai/devstral-small-latest:free', for_provider='openrouter')
         base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
         
         logger.info(f"Initializing OpenRouter LLM: model={model_name}")
@@ -234,19 +268,16 @@ def get_llm():
         api_key = os.getenv('MISTRAL_API_KEY') or settings.MISTRAL_API_KEY
         
         if not api_key:
-            raise ValueError(
-                "Mistral provider selected but MISTRAL_API_KEY is not set. "
-                "Set this in your .env file or environment."
+            logger.warning("Mistral API key not found, falling back to OpenRouter for devstral")
+            llm_provider = 'openrouter' # Continue to openrouter block
+        else:
+            logger.info(f"Initializing Mistral LLM: model={model_name}")
+            return ChatMistralAI(
+                model=model_name,
+                mistral_api_key=api_key,
+                temperature=0.0,
+                max_tokens=4096,
             )
-            
-        logger.info(f"Initializing Mistral LLM: model={model_name}")
-        
-        return ChatMistralAI(
-            model=model_name,
-            mistral_api_key=api_key,
-            temperature=0.0,
-            max_tokens=4096,
-        )
 
     raise ValueError(
         f"Unsupported LLM provider: {llm_provider}. "
@@ -322,7 +353,7 @@ def get_llm_for_provider(provider: str) -> Any:
     """
     if provider == 'gemini':
         from langchain_google_genai import ChatGoogleGenerativeAI
-        model_name = get_query_llm_model(settings.GRAPHITI_LLM_MODEL)
+        model_name = get_query_llm_model("gemini-2.0-flash", for_provider='gemini')
         return ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=settings.GOOGLE_API_KEY,
@@ -372,7 +403,7 @@ def get_llm_for_provider(provider: str) -> Any:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY not set")
         
-        model_name = get_query_llm_model('mistralai/devstral-2512:free')
+        model_name = get_query_llm_model('mistralai/devstral-small-latest:free', for_provider='openrouter')
         base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
         
         try:

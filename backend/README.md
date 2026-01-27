@@ -14,58 +14,22 @@ app/
   skills/           # YAML-based SQL generation skills
 ```
 
-## Key Components
+## Architecture & Services
 
-- **LangGraph Orchestrator** - Multi-node workflow: intent -> context -> SQL generation -> validation -> execution -> results
-- **MCP Client** - STDIO/JSON-RPC communication with SQLcl (Oracle) and HTTP with Doris
-- **PostgreSQL Integration** - Read-only PostgreSQL support via MCP (crystaldba/postgres-mcp)
-- **Qlik Sense Integration** - Read-only access to Qlik Sense dashboards and apps via QRS API
-- **Apache Superset Integration** - Dashboard auto-generation and management via REST API
-- **Redis** - Sessions, caching, rate limiting
-- **FalkorDB** - Knowledge graph for query patterns
+The backend uses **LangGraph** to orchestrate the query lifecycle:
+`Intent Classification` → `Context Retrieval` → `SQL Generation` → `Security Validation` → `Execution` → `Result Formatting`.
 
-## Database Support
+- **DatabaseRouter**: Routes to Oracle, Doris, or PostgreSQL.
+- **SkillsLoader**: Dynamic YAML-based generation rules.
+- **DiagnosticService**: Real-time health monitoring (`/api/v1/diagnostics/status`).
 
-### Oracle
-- Via SQLcl MCP server (STDIO/JSON-RPC)
-- Connection pooling with process management
-- Full SQL dialect support
+## Configuration & Environment
 
-### Apache Doris
-- Via HTTP MCP server
-- MySQL-compatible SQL dialect
-- Advanced analytics capabilities
+Environment variables are managed in `.env`. Key services include:
+- **Redis**: Caching, rate limiting, and session state.
+- **FalkorDB/Graphiti**: Context storage for the knowledge graph.
+- **Celery**: Asynchronous tasks and exports.
 
-### PostgreSQL
-- Via PostgreSQL MCP Pro (crystaldba/postgres-mcp)
-- Read-only transactions enforced
-- SQL parsing and validation
-- Connection pooling
+## Tracing
 
-## Visualization & BI Integration
-
-### Qlik Sense (On-Premises)
-- Read-only API access via QRS API
-- List apps, sheets, and visualizations
-- Dashboard metadata retrieval
-- Requires: `QLIK_BASE_URL`, `QLIK_AUTH_USER`
-
-### Apache Superset (On-Premises)
-- Dashboard auto-generation from query results
-- Chart creation and management
-- Visualization recommendations
-- Requires: `SUPERSET_BASE_URL`, `SUPERSET_USERNAME`, `SUPERSET_PASSWORD`
-
-## Configuration
-
-Set in `.env`:
-- `QUERY_LLM_PROVIDER` - `gemini`, `bedrock`, `qwen`, or `openrouter`
-- `LOG_LEVEL` - Logging verbosity
-- `POSTGRES_ENABLED` - Enable PostgreSQL integration
-- `QLIK_BASE_URL` - Qlik Sense server URL
-- `SUPERSET_BASE_URL` - Apache Superset server URL
-
-## Logging
-
-- Console: INFO+
-- File: `logs/bi-agent.log` (DEBUG+)
+Full observability is integrated via **OpenTelemetry** and **Langfuse**. Traces can be accessed when the monitoring profile is active.

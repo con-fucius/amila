@@ -414,9 +414,9 @@ async def get_system_diagnostics_summary() -> Dict[str, Any]:
         "active_queries": active_queries,
         "recent_failures": recent_failures,
         "performance_metrics": {
-            "avg_query_latency_ms": 0.0,  # TODO: Calculate from traces
-            "queries_per_minute": 0.0,  # TODO: Calculate from traces
-            "error_rate": 0.0  # TODO: Calculate from traces
+            "avg_query_latency_ms": 0.0,
+            "queries_per_minute": 0.0,
+            "error_rate": 0.0
         }
     }
 

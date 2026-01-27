@@ -21,7 +21,7 @@ export function MonacoSQLEditor({
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     // Configure SQL language support
     monaco.languages.register({ id: 'sql' })
-    
+
     // Add SQL keywords
     monaco.languages.setMonarchTokensProvider('sql', {
       defaultToken: '',
@@ -154,6 +154,7 @@ export function MonacoSQLEditor({
           readOnly,
           minimap: { enabled: false },
           fontSize: 13,
+          fontFamily: "'Cantarell', 'Consolas', 'Courier New', monospace",
           lineNumbers: 'on',
           scrollBeyondLastLine: false,
           automaticLayout: true,

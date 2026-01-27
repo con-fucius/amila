@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from './ui/alert-dialog'
 import { SystemHealthMonitor } from './SystemHealthMonitor'
+import { DatabaseSelector } from './DatabaseSelector'
 
 interface NavigationSidebarProps {
   isCollapsed: boolean
@@ -138,7 +139,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
     <aside
       style={{ width: isCollapsed ? 64 : width ?? 256 }}
       className={cn(
-        'h-screen bg-gradient-to-b from-gray-900 to-gray-800 text-white transition-all duration-300 z-40 flex-shrink-0 relative',
+        'h-screen bg-black border-r border-gray-800/50 text-white transition-all duration-300 z-40 flex-shrink-0 relative',
         isCollapsed && 'w-16'
       )}
     >
@@ -146,7 +147,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
       <div className="flex items-center justify-between p-4 border-b border-gray-700">
         {!isCollapsed && (
           <div>
-            <div className="text-2xl font-bold bg-gradient-to-r from-emerald-400 to-green-500 bg-clip-text text-transparent">AMILA</div>
+            <div className="text-[26px] font-bold bg-gradient-to-r from-emerald-400 to-green-500 bg-clip-text text-transparent">Amila</div>
             <div className="text-[10px] text-gray-300 mt-0.5">Ask. Understand. Act</div>
           </div>
         )}
@@ -159,7 +160,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
       </div>
 
       {/* Navigation Items */}
-      <nav className="p-2 space-y-1">
+      <nav className="p-2 space-y-0.5">
         {navigation.map((item) => {
           const Icon = item.icon
           const isActive = location.pathname === item.href
@@ -169,13 +170,14 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               key={item.name}
               to={item.href}
               className={cn(
-                'flex items-center transition-all relative group',
-                isCollapsed ? 'justify-center w-10 h-10 mx-auto rounded-lg' : 'gap-3 px-3 py-2.5 rounded-lg w-full',
+                'flex items-center transition-all relative group overflow-hidden',
+                isCollapsed ? 'justify-center w-10 h-10 mx-auto rounded-lg' : 'gap-3 px-3 py-2 rounded-lg w-full',
                 isActive
-                  ? 'bg-gradient-to-r from-emerald-500 to-green-600 text-white shadow-lg'
-                  : 'bg-gray-800/50 hover:bg-gray-700 text-gray-300'
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_15px_-3px_rgba(16,185,129,0.1)]'
+                  : 'hover:bg-gray-800/80 text-gray-400 hover:text-gray-200'
               )}
             >
+
               <Icon className="h-5 w-5 flex-shrink-0" />
               {!isCollapsed && (
                 <div className="flex items-center justify-between w-full min-w-0">
@@ -263,7 +265,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
 
       {/* Footer */}
       {!isCollapsed && (
-        <div className="absolute bottom-0 left-0 right-0 border-t border-gray-700 pt-5 pb-6 px-4 space-y-6 bg-gradient-to-b from-gray-900/95 to-gray-950">
+        <div className="absolute bottom-0 left-0 right-0 border-t border-gray-800/50 pt-5 pb-6 px-4 space-y-5 bg-black">
           <div className="mt-4">
             <SystemHealthMonitor components={components} />
           </div>
@@ -275,59 +277,25 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               {isProcessing && <span className="text-yellow-400 text-[9px]">(locked)</span>}
             </div>
 
-            <div className="flex p-1 bg-gray-900/50 rounded-lg border border-gray-700 relative">
-              <button
-                onClick={() => !isProcessing && handleDatabaseChange('oracle')}
-                disabled={isProcessing || !isDatabaseHealthy('oracle')}
-                className={cn(
-                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
-                  databaseType === 'oracle'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-gray-200',
-                  (isProcessing || !isDatabaseHealthy('oracle')) && 'opacity-50 cursor-not-allowed'
-                )}
-              >
-                Oracle
-                <span className={cn(
-                  'w-1.5 h-1.5 rounded-full',
-                  isDatabaseHealthy('oracle') ? 'bg-green-500' : 'bg-red-500'
-                )} />
-              </button>
-              <button
-                onClick={() => !isProcessing && handleDatabaseChange('doris')}
-                disabled={isProcessing || !isDatabaseHealthy('doris')}
-                className={cn(
-                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
-                  databaseType === 'doris'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-gray-200',
-                  (isProcessing || !isDatabaseHealthy('doris')) && 'opacity-50 cursor-not-allowed'
-                )}
-              >
-                Doris
-                <span className={cn(
-                  'w-1.5 h-1.5 rounded-full',
-                  isDatabaseHealthy('doris') ? 'bg-green-500' : 'bg-red-500'
-                )} />
-              </button>
-              <button
-                onClick={() => !isProcessing && handleDatabaseChange('postgres')}
-                disabled={isProcessing || !isDatabaseHealthy('postgres')}
-                className={cn(
-                  'flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all relative z-10 flex items-center justify-center gap-1.5',
-                  databaseType === 'postgres'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-gray-200',
-                  (isProcessing || !isDatabaseHealthy('postgres')) && 'opacity-50 cursor-not-allowed'
-                )}
-              >
-                Postgres
-                <span className={cn(
-                  'w-1.5 h-1.5 rounded-full',
-                  isDatabaseHealthy('postgres') ? 'bg-green-500' : 'bg-red-500'
-                )} />
-              </button>
-            </div>
+            <DatabaseSelector
+              variant="sidebar"
+              disabled={isProcessing}
+            />
+          </div>
+          {/* Settings link (at very bottom) */}
+          <div className="mt-2 pt-2 border-t border-gray-800/30">
+            <button
+              onClick={() => navigate('/settings')}
+              className={cn(
+                "flex items-center gap-3 px-3 py-2.5 rounded-lg w-full transition-all group",
+                location.pathname === '/settings'
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  : 'hover:bg-gray-800/60 text-gray-400 hover:text-gray-200'
+              )}
+            >
+              <Settings className="h-4 w-4 group-hover:text-emerald-400 transition-colors" />
+              <span className="text-xs font-medium">Settings</span>
+            </button>
           </div>
         </div>
       )}

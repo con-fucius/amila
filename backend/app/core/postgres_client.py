@@ -74,9 +74,11 @@ class PostgreSQLClient:
                     min_size=settings.POSTGRES_POOL_MIN_SIZE,
                     max_size=settings.POSTGRES_POOL_MAX_SIZE,
                     timeout=settings.POSTGRES_POOL_TIMEOUT,
-                    open=True
+                    open=False # Don't open in constructor (deprecated)
                 )
                 
+                # Explicitly open the pool
+                await self._pool.open()
                 await self._pool.wait()
                 
                 self._initialized = True
@@ -359,10 +361,10 @@ class PostgreSQLClient:
                     if result and result[0] == 1:
                         latency = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
                         
-                        # Get pool stats
+                        # Get pool stats (API changed in psycopg_pool 3.x, some attributes removed)
                         pool_stats = {
-                            "size": self._pool.size if self._pool else 0,
-                            "available": self._pool.available if self._pool else 0,
+                            "min_size": settings.POSTGRES_POOL_MIN_SIZE,
+                            "max_size": settings.POSTGRES_POOL_MAX_SIZE,
                         }
                         
                         return {

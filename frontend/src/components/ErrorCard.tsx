@@ -2,6 +2,12 @@ import { useState, useEffect } from 'react'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { AlertTriangle, RefreshCw, ChevronDown, ChevronUp, Copy, Check, XCircle, Lightbulb } from 'lucide-react'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu'
 import { cn } from '@/utils/cn'
 
 export type ErrorSeverity = 'error' | 'warning' | 'info'
@@ -56,15 +62,15 @@ const severityStyles: Record<ErrorSeverity, { border: string; bg: string; icon: 
 // Levenshtein distance for fuzzy matching
 function levenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = []
-  
+
   for (let i = 0; i <= b.length; i++) {
     matrix[i] = [i]
   }
-  
+
   for (let j = 0; j <= a.length; j++) {
     matrix[0][j] = j
   }
-  
+
   for (let i = 1; i <= b.length; i++) {
     for (let j = 1; j <= a.length; j++) {
       if (b.charAt(i - 1) === a.charAt(j - 1)) {
@@ -78,23 +84,23 @@ function levenshteinDistance(a: string, b: string): number {
       }
     }
   }
-  
+
   return matrix[b.length][a.length]
 }
 
 function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]): SelfHealSuggestion | null {
   const msgLower = message.toLowerCase()
-  
+
   // Missing column error
   if (msgLower.includes('column') && (msgLower.includes('not found') || msgLower.includes('unknown') || msgLower.includes('invalid'))) {
     const columnMatch = message.match(/['"`]?(\w+)['"`]?/i)
     if (columnMatch && schemaColumns && schemaColumns.length > 0) {
       const missingColumn = columnMatch[1]
-      
+
       // Find closest match using Levenshtein distance
       let closestMatch = ''
       let minDistance = Infinity
-      
+
       schemaColumns.forEach(col => {
         const distance = levenshteinDistance(missingColumn.toLowerCase(), col.toLowerCase())
         if (distance < minDistance && distance <= 3) { // Max 3 character difference
@@ -102,7 +108,7 @@ function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]
           closestMatch = col
         }
       })
-      
+
       if (closestMatch && sql) {
         return {
           type: 'column_typo',
@@ -113,7 +119,7 @@ function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]
       }
     }
   }
-  
+
   // Missing table error
   if (msgLower.includes('table') && (msgLower.includes('not found') || msgLower.includes('does not exist'))) {
     return {
@@ -122,7 +128,7 @@ function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]
       suggestion: 'Check the Schema Browser for available tables'
     }
   }
-  
+
   // Syntax error
   if (msgLower.includes('syntax error') || msgLower.includes('near')) {
     return {
@@ -131,7 +137,7 @@ function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]
       suggestion: 'Review the SQL syntax or try rephrasing your question'
     }
   }
-  
+
   // Permission error
   if (msgLower.includes('permission') || msgLower.includes('access denied') || msgLower.includes('insufficient privileges')) {
     return {
@@ -140,7 +146,7 @@ function analyzeSQLError(message: string, sql?: string, schemaColumns?: string[]
       suggestion: 'Contact your administrator for access to this resource'
     }
   }
-  
+
   return null
 }
 
@@ -186,7 +192,6 @@ export function ErrorCard({
 
   const handleRetryWithFix = () => {
     if (suggestion?.fixedSql && onRetry) {
-      // TODO: Pass fixed SQL to retry handler
       onRetry()
     }
   }
@@ -195,28 +200,28 @@ export function ErrorCard({
 
   return (
     <Card className={cn(styles.border, styles.bg, className)}>
-      <CardContent className="p-4">
-        <div className="flex items-start gap-3">
+      <CardContent className="p-3">
+        <div className="flex items-start gap-2.5">
           {severity === 'error' ? (
-            <XCircle className={cn('h-5 w-5 flex-shrink-0 mt-0.5', styles.icon)} />
+            <XCircle className={cn('h-4 w-4 flex-shrink-0 mt-0.5', styles.icon)} />
           ) : (
-            <AlertTriangle className={cn('h-5 w-5 flex-shrink-0 mt-0.5', styles.icon)} />
+            <AlertTriangle className={cn('h-4 w-4 flex-shrink-0 mt-0.5', styles.icon)} />
           )}
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-2">
-              <div className={cn('font-semibold mb-1', styles.title)}>{title}</div>
+              <div className={cn('text-xs font-semibold mb-0.5', styles.title)}>{title}</div>
               {onDismiss && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-6 w-6 -mt-1 -mr-1"
+                  className="h-5 w-5 -mt-0.5 -mr-1"
                   onClick={onDismiss}
                 >
-                  <XCircle className="h-4 w-4" />
+                  <XCircle className="h-3.5 w-3.5" />
                 </Button>
               )}
             </div>
-            <div className="text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words">
+            <div className="text-[13px] text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words leading-tight">
               {message}
             </div>
 
@@ -250,57 +255,40 @@ export function ErrorCard({
             )}
 
             {/* Action buttons */}
-            <div className="flex items-center gap-2 mt-3">
+            <div className="flex items-center gap-1.5 mt-2">
               {onRetry && (
                 <Button
                   onClick={onRetry}
                   size="sm"
                   variant="outline"
                   disabled={isRetrying}
-                  className={cn(styles.border, 'hover:bg-white/50 dark:hover:bg-slate-800/50')}
+                  className={cn('h-7 text-[11px] px-2.5', styles.border, 'hover:bg-white/50 dark:hover:bg-slate-800/50')}
                 >
-                  <RefreshCw className={cn('h-3.5 w-3.5 mr-1.5', isRetrying && 'animate-spin')} />
+                  <RefreshCw className={cn('h-3 w-3 mr-1.5', isRetrying && 'animate-spin')} />
                   {isRetrying ? 'Retrying...' : retryLabel}
                 </Button>
               )}
-              {hasDetails && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowDetails(!showDetails)}
-                  className="text-xs"
-                >
-                  {showDetails ? (
-                    <>
-                      <ChevronUp className="h-3 w-3 mr-1" />
-                      Hide details
-                    </>
-                  ) : (
-                    <>
-                      <ChevronDown className="h-3 w-3 mr-1" />
-                      Show details
-                    </>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" className="h-7 px-1.5 text-gray-500 hover:text-gray-900 gap-1">
+                    <span className="text-[11px]">Actions</span>
+                    <ChevronDown className="h-3 w-3 opacity-50" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-40 border-gray-200 dark:border-slate-800">
+                  {hasDetails && (
+                    <DropdownMenuItem onClick={() => setShowDetails(!showDetails)} className="text-xs gap-2 py-2 cursor-pointer">
+                      {showDetails ? <ChevronUp className="h-3.5 w-3.5 text-gray-500" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-500" />}
+                      <span>{showDetails ? 'Hide details' : 'Show details'}</span>
+                    </DropdownMenuItem>
                   )}
-                </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleCopyError}
-                className="text-xs ml-auto"
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-3 w-3 mr-1 text-green-600" />
-                    Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-3 w-3 mr-1" />
-                    Copy error
-                  </>
-                )}
-              </Button>
+                  <DropdownMenuItem onClick={handleCopyError} className="text-xs gap-2 py-2 cursor-pointer">
+                    {copied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5 text-gray-500" />}
+                    <span>{copied ? 'Copied' : 'Copy error'}</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
 
             {/* Expandable details */}

@@ -11,18 +11,29 @@ interface SystemHealthMonitorProps {
 export function SystemHealthMonitor({ components, className, collapsed }: SystemHealthMonitorProps) {
     if (!components) return null
 
-    // Normalize statuses
-    const redisStatus = components.redis?.toLowerCase() || 'unknown'
-    const dorisStatus = components.doris_mcp?.toLowerCase() || 'unknown'
-    const oracleStatus = components.sqlcl_pool?.toLowerCase() || 'unknown'
-    const graphStatus = components.graphiti?.toLowerCase() || 'unknown'
+    // Extract status from objects if necessary
+    const getStatus = (comp: any) => {
+        if (!comp) return 'unknown'
+        if (typeof comp === 'string') return comp.toLowerCase()
+        return comp.status?.toLowerCase() || 'unknown'
+    }
+
+    const redisStatus = getStatus(components.redis)
+    const dorisStatus = getStatus(components.doris)
+    const oracleStatus = getStatus(components.sqlcl_pool)
+    const graphStatus = getStatus(components.graphiti)
+    const orchestratorStatus = getStatus(components.orchestrator)
+    const pgStatus = getStatus(components.postgres)
+    const qlikStatus = getStatus(components.qlik)
+    const supersetStatus = getStatus(components.superset)
 
     // Backend composite status
     const backendStatus = (
         dorisStatus === 'connected' ||
         oracleStatus === 'active' ||
-        components.mcp_client === 'connected' ||
-        components.mcp_client === 'ready'
+        orchestratorStatus === 'ready' ||
+        orchestratorStatus === 'initialized' ||
+        components.mcp_client === 'connected'
     ) ? 'active' : 'degraded'
 
     if (collapsed) {
@@ -42,12 +53,19 @@ export function SystemHealthMonitor({ components, className, collapsed }: System
             </div>
 
             <div className="grid grid-cols-1 gap-1">
-                {/* Backend / Orchestrator */}
+                {/* Core Architecture */}
                 <StatusCapsule
                     label="Backend"
                     status={backendStatus}
                     icon={Server}
-                    details="FastAPI, LangGraph Orchestrator"
+                    details={`Orchestrator: ${orchestratorStatus}`}
+                />
+
+                <StatusCapsule
+                    label="Redis"
+                    status={redisStatus}
+                    icon={Share2}
+                    details="Cache, Sessions & Task Queue"
                 />
 
                 {/* Database Layer */}
@@ -55,29 +73,50 @@ export function SystemHealthMonitor({ components, className, collapsed }: System
                     label="Oracle"
                     status={oracleStatus}
                     icon={Database}
-                    details="Oracle SQLcl Pool"
+                    details="Primary Analytics Store (SQLcl)"
                 />
 
                 <StatusCapsule
                     label="Doris"
                     status={dorisStatus}
                     icon={Database}
-                    details="Doris MCP Server (Streamable HTTP)"
+                    details="Federated Query Engine (MCP)"
                 />
 
-                <StatusCapsule
-                    label="Redis"
-                    status={redisStatus}
-                    icon={Share2}
-                    details="Cache & Pub/Sub Layer"
-                />
+                {pgStatus !== 'disabled' && (
+                    <StatusCapsule
+                        label="Postgre"
+                        status={pgStatus}
+                        icon={Database}
+                        details="Relational Storage"
+                    />
+                )}
 
                 <StatusCapsule
                     label="Graph"
                     status={graphStatus}
                     icon={Share2}
-                    details="Graphiti / FalkorDB Knowledge Graph"
+                    details="Knowledge Graph (FalkorDB)"
                 />
+
+                {/* BI Integration Layer */}
+                {qlikStatus !== 'not_configured' && (
+                    <StatusCapsule
+                        label="Qlik"
+                        status={qlikStatus}
+                        icon={Activity}
+                        details="Qlik Sense Integration"
+                    />
+                )}
+
+                {supersetStatus !== 'not_configured' && (
+                    <StatusCapsule
+                        label="Superset"
+                        status={supersetStatus}
+                        icon={Activity}
+                        details="Apache Superset Integration"
+                    />
+                )}
             </div>
         </div>
     )

@@ -13,9 +13,13 @@ from datetime import datetime
 try:
     from graphiti_core import Graphiti
     from graphiti_core.driver.falkordb_driver import FalkorDriver
+    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+    # Gemini clients
     from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig as GeminiLLMConfig
     from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
-    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+    # Generic clients for Mistral/OpenRouter
+    from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient, LLMConfig as OpenAIConfig
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
     GRAPHITI_AVAILABLE = True
 except Exception:
     GRAPHITI_AVAILABLE = False
@@ -32,6 +36,24 @@ logger = logging.getLogger(__name__)
 class GraphitiClientError(Exception):
     """Custom exception for Graphiti client errors"""
     pass
+
+
+class LocalEmbedder:
+    """
+    Local embedding provider using sentence-transformers.
+    Provides a compatible interface for Graphiti.
+    """
+    def __init__(self, model_name: str, dimensions: int):
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading local embedding model: {model_name}")
+        self.model = SentenceTransformer(model_name)
+        self.dimensions = dimensions
+
+    async def embed(self, texts: List[str]) -> List[List[float]]:
+        """Generate static embeddings for a list of texts synchronously (wrapped in to_thread)"""
+        # sentence-transformers is sync, so we run in thread to avoid blocking event loop
+        embeddings = await asyncio.to_thread(self.model.encode, texts)
+        return embeddings.tolist()
 
 
 class GraphitiClient:
@@ -88,6 +110,10 @@ class GraphitiClient:
             # Initialize Graphiti with appropriate LLM provider
             if self._llm_provider == "gemini":
                 self._graphiti = await self._initialize_with_gemini()
+            elif self._llm_provider == "mistral":
+                self._graphiti = await self._initialize_with_mistral()
+            elif self._llm_provider == "openrouter":
+                self._graphiti = await self._initialize_with_openrouter()
             elif self._llm_provider == "bedrock":
                 self._graphiti = await self._initialize_with_bedrock()
             else:
@@ -140,6 +166,76 @@ class GraphitiClient:
             embedder=embedder,
             cross_encoder=reranker
         )
+
+    async def _initialize_with_mistral(self) -> "Graphiti":
+        """Initialize Graphiti with Mistral AI API"""
+        api_key = os.getenv("MISTRAL_API_KEY") or settings.MISTRAL_API_KEY
+        if not api_key:
+            raise GraphitiClientError("MISTRAL_API_KEY not set")
+
+        logger.info(f"Initializing Graphiti with Mistral provider (Model: {settings.GRAPHITI_LLM_MODEL})")
+
+        # LLM Client (using Generic OpenAI-compatible client)
+        llm_config = OpenAIConfig(
+            api_key=api_key,
+            model=settings.GRAPHITI_LLM_MODEL,
+            base_url="https://api.mistral.ai/v1"
+        )
+        llm_client = OpenAIGenericClient(config=llm_config)
+
+        # Embedder
+        embedder = await self._get_embedder()
+
+        return Graphiti(
+            graph_driver=self._driver,
+            llm_client=llm_client,
+            embedder=embedder
+        )
+
+    async def _initialize_with_openrouter(self) -> "Graphiti":
+        """Initialize Graphiti with OpenRouter (Fallback)"""
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise GraphitiClientError("OPENROUTER_API_KEY not set")
+
+        logger.info(f"Initializing Graphiti with OpenRouter provider (Model: {settings.GRAPHITI_LLM_MODEL})")
+
+        # LLM Client
+        llm_config = OpenAIConfig(
+            api_key=api_key,
+            model=settings.GRAPHITI_LLM_MODEL,
+            base_url="https://openrouter.ai/api/v1"
+        )
+        llm_client = OpenAIGenericClient(config=llm_config)
+
+        # Embedder
+        embedder = await self._get_embedder()
+
+        return Graphiti(
+            graph_driver=self._driver,
+            llm_client=llm_client,
+            embedder=embedder
+        )
+
+    async def _get_embedder(self) -> Any:
+        """Resolve and initialize the configured embedder"""
+        if self._embedding_provider == "local":
+            return LocalEmbedder(
+                model_name=settings.GRAPHITI_EMBEDDING_MODEL,
+                dimensions=settings.GRAPHITI_EMBEDDING_DIMENSIONS
+            )
+        
+        if self._embedding_provider == "gemini":
+            from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+            embedder_config = GeminiEmbedderConfig(
+                api_key=settings.GOOGLE_API_KEY,
+                embedding_model=settings.GRAPHITI_EMBEDDING_MODEL,
+                embedding_dim=settings.GRAPHITI_EMBEDDING_DIMENSIONS
+            )
+            return GeminiEmbedder(config=embedder_config)
+
+        # Fallback to OpenAI if configured (optional)
+        raise GraphitiClientError(f"Embedding provider '{self._embedding_provider}' not yet configured for this helper.")
 
     async def _initialize_with_bedrock(self) -> "Graphiti":
         """Initialize Graphiti with AWS Bedrock LLM provider (Production)"""

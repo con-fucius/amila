@@ -38,7 +38,7 @@ export function Login() {
         {/* Logo */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold bg-gradient-to-r from-emerald-400 to-green-500 bg-clip-text text-transparent">
-            AMILA
+            Amila
           </h1>
           <p className="text-gray-400 mt-2 text-sm">Ask. Understand. Act</p>
         </div>

@@ -45,6 +45,7 @@ import {
   ExpandMore as ExpandIcon,
   ExpandLess as CollapseIcon,
   Info as InfoIcon,
+  ArrowUpward as ArrowUp,
 } from '@mui/icons-material'
 import {
   BarChart,
@@ -334,7 +335,7 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       dimensionLabel: data.columns[dimensionIndex!] ?? 'Dimension',
       metricLabel: data.columns[metricIndex] ?? 'Value',
     }
-  }, [data, numericColumns, visibleColumnIndexes])
+  }, [data, numericColumns, visibleColumnIndexes, chartDimension, chartMetric])
 
   const handleTabChange = useCallback((_: React.SyntheticEvent, newValue: number) => setTabValue(newValue), [])
   const handleChangePage = useCallback((_: unknown, newPage: number) => setPage(newPage), [])
@@ -669,9 +670,21 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
             Query Results
           </Typography>
           <Box display="flex" gap={1} alignItems="center">
-            <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none' }}>
-              {collapsed ? 'Show' : 'Hide'}
-            </Button>
+            {tabValue !== 0 ? (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => setTabValue(0)}
+                sx={{ textTransform: 'none', borderColor: '#e5e7eb', color: '#6b7280' }}
+                startIcon={<ArrowUp className="h-4 w-4 rotate-[-90deg]" />}
+              >
+                Back to Table
+              </Button>
+            ) : (
+              <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none' }}>
+                {collapsed ? 'Show' : 'Hide'}
+              </Button>
+            )}
             <TextField
               size="small"
               placeholder="Search results..."
@@ -830,17 +843,27 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
             {/* Chart View */}
             {chartConfig ? (
               <Box>
-                <Paper variant="outlined" sx={{ p: 2, mb: 3, bgcolor: 'rgba(255,255,255,0.5)' }}>
-                  <Grid container spacing={3} alignItems="center">
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    mb: 3,
+                    bgcolor: 'rgba(255,255,255,0.5)',
+                    '.dark &': { bgcolor: 'rgba(15,23,42,0.5)', borderColor: 'rgba(30,41,59,0.5)' }
+                  }}
+                  className="bg-white/50 dark:bg-slate-900/50 border-gray-200 dark:border-slate-800"
+                >
+                  <Grid container spacing={2} alignItems="center">
                     <Grid item xs={12} md={4}>
                       <FormControl fullWidth size="small">
-                        <InputLabel id="chart-type-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>Chart Type</InputLabel>
+                        <InputLabel id="chart-type-label" sx={{ fontFamily: '"Figtree", sans-serif' }} className="dark:text-gray-400">Chart Type</InputLabel>
                         <Select
                           labelId="chart-type-label"
                           value={chartType}
                           label="Chart Type"
                           onChange={(e) => setChartType(e.target.value as any)}
                           sx={{ fontFamily: '"Figtree", sans-serif' }}
+                          className="dark:text-gray-200 dark:border-gray-700"
                         >
                           <MenuItem value="bar" sx={{ fontFamily: '"Figtree", sans-serif' }}>Bar Chart</MenuItem>
                           <MenuItem value="line" sx={{ fontFamily: '"Figtree", sans-serif' }}>Line Chart</MenuItem>
@@ -851,13 +874,14 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
                     </Grid>
                     <Grid item xs={12} md={4}>
                       <FormControl fullWidth size="small">
-                        <InputLabel id="chart-dim-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>X-Axis (Dimension)</InputLabel>
+                        <InputLabel id="chart-dim-label" sx={{ fontFamily: '"Figtree", sans-serif' }} className="dark:text-gray-400">X-Axis (Dimension)</InputLabel>
                         <Select
                           labelId="chart-dim-label"
                           value={chartDimension || ''}
                           label="X-Axis (Dimension)"
                           onChange={(e) => setChartDimension(e.target.value)}
                           sx={{ fontFamily: '"Figtree", sans-serif' }}
+                          className="dark:text-gray-200 dark:border-gray-700"
                         >
                           {data.columns.map((col) => (
                             <MenuItem key={col} value={col} sx={{ fontFamily: '"Figtree", sans-serif' }}>{col}</MenuItem>
@@ -867,13 +891,14 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
                     </Grid>
                     <Grid item xs={12} md={4}>
                       <FormControl fullWidth size="small">
-                        <InputLabel id="chart-metric-label" sx={{ fontFamily: '"Figtree", sans-serif' }}>Y-Axis (Metric)</InputLabel>
+                        <InputLabel id="chart-metric-label" sx={{ fontFamily: '"Figtree", sans-serif' }} className="dark:text-gray-400">Y-Axis (Metric)</InputLabel>
                         <Select
                           labelId="chart-metric-label"
                           value={chartMetric || ''}
                           label="Y-Axis (Metric)"
                           onChange={(e) => setChartMetric(e.target.value)}
                           sx={{ fontFamily: '"Figtree", sans-serif' }}
+                          className="dark:text-gray-200 dark:border-gray-700"
                         >
                           {numericColumns.map((idx) => (
                             <MenuItem key={data.columns[idx]} value={data.columns[idx]} sx={{ fontFamily: '"Figtree", sans-serif' }}>{data.columns[idx]}</MenuItem>
@@ -884,55 +909,126 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
                   </Grid>
                 </Paper>
 
-                <Box height={400} width="100%">
+                <Box height={320} width="100%">
                   <ResponsiveContainer width="100%" height="100%">
                     {chartType === 'bar' ? (
-                      <BarChart data={chartConfig.data}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <BarChart data={chartConfig.data} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" className="dark:stroke-slate-800" />
                         <XAxis
                           dataKey={chartConfig.dimensionKey}
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={{ stroke: '#e5e7eb' }}
+                          tickLine={false}
+                          interval={0}
+                          angle={-15}
+                          textAnchor="end"
+                          height={40}
                         />
                         <YAxis
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={false}
+                          tickLine={false}
+                          width={45}
                         />
-                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
-                        <Legend />
-                        <Bar dataKey={chartConfig.metricKey} fill="#10b981" radius={[4, 4, 0, 0]} />
+                        <RechartsTooltip
+                          contentStyle={{
+                            borderRadius: '8px',
+                            border: '1px solid #e5e7eb',
+                            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                            fontSize: '12px'
+                          }}
+                          cursor={{ fill: 'rgba(16, 185, 129, 0.1)' }}
+                          formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                        <Bar
+                          dataKey={chartConfig.metricKey}
+                          name={chartConfig.metricLabel}
+                          fill="#10b981"
+                          radius={[3, 3, 0, 0]}
+                          barSize={24}
+                        />
                       </BarChart>
                     ) : chartType === 'line' ? (
-                      <LineChart data={chartConfig.data}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <LineChart data={chartConfig.data} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" className="dark:stroke-slate-800" />
                         <XAxis
                           dataKey={chartConfig.dimensionKey}
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={{ stroke: '#e5e7eb' }}
+                          tickLine={false}
+                          interval={0}
+                          angle={-15}
+                          textAnchor="end"
+                          height={40}
                         />
                         <YAxis
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={false}
+                          tickLine={false}
+                          width={45}
                         />
-                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
-                        <Legend />
-                        <Line type="monotone" dataKey={chartConfig.metricKey} stroke="#10b981" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                        <RechartsTooltip
+                          contentStyle={{
+                            borderRadius: '8px',
+                            border: '1px solid #e5e7eb',
+                            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                            fontSize: '12px'
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                        <Line
+                          type="monotone"
+                          dataKey={chartConfig.metricKey}
+                          name={chartConfig.metricLabel}
+                          stroke="#10b981"
+                          strokeWidth={2}
+                          dot={{ fill: '#10b981', r: 3 }}
+                          activeDot={{ r: 5 }}
+                        />
                       </LineChart>
                     ) : chartType === 'area' ? (
-                      <AreaChart data={chartConfig.data}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <AreaChart data={chartConfig.data} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                        <defs>
+                          <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" className="dark:stroke-slate-800" />
                         <XAxis
                           dataKey={chartConfig.dimensionKey}
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.dimensionLabel, position: 'insideBottom', offset: -5 }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={{ stroke: '#e5e7eb' }}
+                          tickLine={false}
+                          interval={0}
+                          angle={-15}
+                          textAnchor="end"
+                          height={40}
                         />
                         <YAxis
-                          tick={{ fontSize: 11 }}
-                          label={{ value: chartConfig.metricLabel, angle: -90, position: 'insideLeft' }}
+                          tick={{ fontSize: 10, fill: '#6b7280' }}
+                          axisLine={false}
+                          tickLine={false}
+                          width={45}
                         />
-                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
-                        <Legend />
-                        <Area type="monotone" dataKey={chartConfig.metricKey} stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
+                        <RechartsTooltip
+                          contentStyle={{
+                            borderRadius: '8px',
+                            border: '1px solid #e5e7eb',
+                            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                            fontSize: '12px'
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                        <Area
+                          type="monotone"
+                          dataKey={chartConfig.metricKey}
+                          name={chartConfig.metricLabel}
+                          stroke="#10b981"
+                          fillOpacity={1}
+                          fill="url(#colorMetric)"
+                        />
                       </AreaChart>
                     ) : (
                       <PieChart>
@@ -940,27 +1036,36 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
                           data={chartConfig.data}
                           cx="50%"
                           cy="50%"
-                          labelLine={false}
-                          label={({ payload, percent }: any) => `${payload[chartConfig.dimensionKey].substring(0, 15)} ${(percent * 100).toFixed(0)}%`}
-                          outerRadius={120}
-                          fill="#8884d8"
+                          innerRadius={60}
+                          outerRadius={100}
+                          paddingAngle={2}
                           dataKey={chartConfig.metricKey}
                           nameKey={chartConfig.dimensionKey}
                         >
                           {chartConfig.data.map((_entry, index) => (
-                            <Cell key={`cell-${index}`} fill={`hsla(${(index * 360) / chartConfig.data.length}, 70%, 50%, 0.8)`} />
+                            <Cell key={`cell-${index}`} fill={`hsla(${(index * 137.5) % 360}, 70%, 50%, 0.8)`} />
                           ))}
                         </Pie>
-                        <RechartsTooltip formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]} />
-                        <Legend />
+                        <RechartsTooltip
+                          contentStyle={{
+                            borderRadius: '8px',
+                            border: '1px solid #e5e7eb',
+                            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                            fontSize: '12px'
+                          }}
+                          formatter={(value: any) => [formatNumber.format(Number(value) || 0), chartConfig.metricLabel]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px' }} />
                       </PieChart>
                     )}
                   </ResponsiveContainer>
                 </Box>
               </Box>
             ) : (
-              <Alert severity="info">
-                <Typography>No numeric data available for charting. The chart view requires at least one numeric column.</Typography>
+              <Alert severity="info" className="dark:bg-blue-900/20 dark:text-blue-200">
+                <Typography variant="body2" sx={{ fontFamily: '"Figtree", sans-serif' }}>
+                  No numeric usage data available for charting.
+                </Typography>
               </Alert>
             )}
           </TabPanel>

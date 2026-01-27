@@ -124,74 +124,74 @@ const darkColors = {
   },
 };
 
-// Typography configuration with Figtree font (Phase 2.1: Reduced by 1-2px)
+// Typography configuration with Kumbh Sans font (Phase 2.1: Reduced by 1-2px)
 const typography = {
-  fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
+  fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
   h1: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 700,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 800,
     fontSize: '2.125rem', // 34px (reduced from 38px)
     lineHeight: 1.2,
   },
   h2: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '1.625rem', // 26px (reduced from 30px)
     lineHeight: 1.3,
   },
   h3: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '1.375rem', // 22px (reduced from 26px)
     lineHeight: 1.3,
   },
   h4: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '1.125rem', // 18px (reduced from 22px)
     lineHeight: 1.4,
   },
   h5: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '1rem', // 16px (reduced from 18px)
     lineHeight: 1.4,
   },
   h6: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '0.875rem', // 14px (reduced from 16px)
     lineHeight: 1.4,
   },
   body1: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 400,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 500,
     fontSize: '0.875rem', // 14px (reduced from 15px)
     lineHeight: 1.6,
     letterSpacing: '0.005em',
   },
   body2: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 400,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 500,
     fontSize: '0.75rem', // 12px (reduced from 13px)
     lineHeight: 1.5,
   },
   button: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '0.75rem', // 12px (reduced from 13px)
     textTransform: 'none' as const,
     letterSpacing: '0.02em',
   },
   caption: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 400,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 500,
     fontSize: '0.625rem', // 10px (reduced from 11px)
     lineHeight: 1.4,
   },
   overline: {
-    fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif',
-    fontWeight: 600,
+    fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontWeight: 700,
     fontSize: '0.625rem', // 10px (reduced from 11px)
     textTransform: 'uppercase' as const,
     letterSpacing: '0.08em',
@@ -202,11 +202,13 @@ const typography = {
 const getComponents = (mode: PaletteMode) => ({
   MuiCssBaseline: {
     styleOverrides: `
-      @import url('https://fonts.googleapis.com/css2?family=Figtree:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@100;200;300;400;500;600;700;800;900&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400;1,700&display=swap');
       
-      * { box-sizing: border-box; }
+      * { box-sizing: border-box; font-family: "Kumbh Sans", sans-serif; }
       html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
-      body { font-family: "Figtree", "Roboto", "Helvetica", "Arial", sans-serif; margin: 0; padding: 0; }
+      body { font-family: "Kumbh Sans", sans-serif; margin: 0; padding: 0; font-weight: 500; }
+      code, pre, .font-mono { font-family: "Cantarell", monospace !important; }
 
       /* Focus visibility (WCAG AA) */
       .MuiButtonBase-root:focus-visible,
@@ -316,24 +318,24 @@ const getComponents = (mode: PaletteMode) => ({
   },
   MuiDrawer: { styleOverrides: { paper: { borderRight: mode === 'dark' ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid rgba(0, 0, 0, 0.08)', boxShadow: mode === 'dark' ? '2px 0 12px rgba(0, 0, 0, 0.5)' : '2px 0 12px rgba(0, 0, 0, 0.08)' } } },
   MuiAppBar: { styleOverrides: { root: { boxShadow: mode === 'dark' ? '0 2px 12px rgba(0, 0, 0, 0.5)' : '0 2px 12px rgba(0, 0, 0, 0.08)', borderBottom: mode === 'dark' ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid rgba(0, 0, 0, 0.06)' } } },
-  MuiListItemText: { styleOverrides: { primary: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' }, secondary: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiListItemButton: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiMenuItem: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiInputBase: { styleOverrides: { input: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiInputLabel: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiFormLabel: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiTooltip: { styleOverrides: { tooltip: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiListItemText: { styleOverrides: { primary: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' }, secondary: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiListItemButton: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiMenuItem: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiInputBase: { styleOverrides: { input: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiInputLabel: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiFormLabel: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiTooltip: { styleOverrides: { tooltip: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
   MuiDialog: { styleOverrides: { paper: { borderRadius: 12 } } },
-  MuiDialogTitle: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif', fontWeight: 600 } } },
-  MuiDialogContent: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
-  MuiDialogContentText: { styleOverrides: { root: { fontFamily: '"Figtree", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiDialogTitle: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif', fontWeight: 600 } } },
+  MuiDialogContent: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
+  MuiDialogContentText: { styleOverrides: { root: { fontFamily: '"Kumbh Sans", "Roboto", "Helvetica", "Arial", sans-serif' } } },
   MuiDialogActions: { styleOverrides: { root: { padding: '16px 24px' } } },
 });
 
 // Create theme factory function that accepts mode
 export const createAppTheme = (mode: PaletteMode = 'light') => {
   const colors = mode === 'dark' ? darkColors : lightColors;
-  
+
   const themeOptions: ThemeOptions = {
     palette: {
       mode,

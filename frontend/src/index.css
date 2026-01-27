@@ -55,17 +55,26 @@
 @layer base {
   * {
     @apply border-border;
-    font-size: 11px !important;
+    font-family: 'Kumbh Sans', sans-serif !important;
+  }
+
+  code,
+  pre,
+  .font-mono,
+  .font-mono * {
+    font-family: 'Cantarell', monospace !important;
   }
 
   body {
     @apply bg-background text-foreground;
     font-size: 11px !important;
+    font-weight: 500 !important;
     line-height: 1.4 !important;
   }
 
   html {
     font-size: 11px !important;
+    font-weight: 500;
   }
 
   /* Prevent flash of wrong theme colors during initialization */
@@ -101,6 +110,7 @@
   td,
   th {
     font-size: 11px !important;
+    font-weight: 500;
   }
 
   button:not(nav button):not(.nav-item-btn) {
@@ -110,7 +120,7 @@
 
   /* Ensure consistent height for navigation items */
   nav a {
-    min-height: 36px !important;
+    min-height: 32px !important;
   }
 
   input,
@@ -132,12 +142,14 @@
   code,
   pre {
     font-size: 10px !important;
+    font-family: 'Cantarell', 'Consolas', 'Courier New', monospace !important;
   }
 
   /* Monaco editor compact font size */
   .monaco-editor,
   .monaco-editor .mtk {
     font-size: 10px !important;
+    font-family: 'Cantarell', 'Consolas', 'Courier New', monospace !important;
   }
 
   /* Chat header subtitle - intentionally small label */
@@ -164,6 +176,13 @@
   .chat-quickstart-badge {
     font-size: 8px !important;
     line-height: 1.2 !important;
+  }
+
+  /* Custom timestamp styling */
+  .chat-timestamp {
+    font-size: 8px !important;
+    font-weight: 300 !important;
+    opacity: 0.7;
   }
 
   /* Sidebar theme toggle pill - slightly taller for comfort */

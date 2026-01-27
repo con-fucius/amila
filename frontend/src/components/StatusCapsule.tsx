@@ -55,7 +55,7 @@ const getStatusConfig = (status: string) => {
     }
 
     // Red / Error
-    if (['disconnected', 'error', 'down', 'offline', 'failed', 'missing'].includes(s)) {
+    if (['disconnected', 'error', 'down', 'offline', 'failed', 'missing', 'unhealthy', 'inactive'].includes(s)) {
         return {
             color: 'text-red-400',
             bgColor: 'bg-red-500/10',
@@ -154,11 +154,11 @@ export function StatusCapsule({
                         initial={{ opacity: 0, y: 3 }}
                         animate={{ opacity: 1, y: 0 }}
                         className={cn(
-                            "flex items-center justify-between px-3 rounded-md border backdrop-blur-sm transition-all duration-300 group cursor-help min-w-[120px]",
+                            "flex items-center justify-between px-3 rounded-md border transition-all duration-300 group cursor-help min-w-[120px]",
                             size === 'sm' ? "py-0.5 h-5 text-[10px]" : "py-1.5 h-7 text-[11px]",
                             config.bgColor,
                             config.borderColor,
-                            "hover:border-opacity-100 border-opacity-60",
+                            "hover:border-opacity-100 border-opacity-40",
                             className
                         )}
                     >
@@ -195,7 +195,7 @@ export function StatusCapsule({
                         Status: <span className={cn(config.color)}>{config.label}</span>
                     </div>
                     {details && (
-                        <div className="text-gray-500 mt-1 text-[10px] italic border-t border-gray-800 pt-1">
+                        <div className="text-gray-500 mt-1 text-[10px] border-t border-gray-800 pt-1">
                             {details}
                         </div>
                     )}

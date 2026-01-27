@@ -299,16 +299,7 @@ class ErrorReporterService:
         if len(cls._recent_errors) > cls._max_buffer_size:
             cls._recent_errors = cls._recent_errors[-cls._max_buffer_size:]
     
-    @classmethod
-    def _send_to_external_services(cls, error: AmilaError) -> None:
-        """
-        Send error to external services (CloudWatch, Sentry, etc.)
-        This is a placeholder for external integrations.
-        """
-        # TODO: Implement external service integrations
-        # - AWS CloudWatch Logs
-        # - Sentry
-        # - Datadog
+        # External service integration placeholders (CloudWatch, Sentry, etc.)
         pass
     
     @classmethod

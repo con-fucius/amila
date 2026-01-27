@@ -7,7 +7,7 @@ Uses Redis for distributed state (rate limiting, sessions, tokens).
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from jose import jwt, JWTError
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
@@ -28,8 +28,8 @@ BLOCKED_USER_KEY_PREFIX = "auth:blocked:"
 SESSION_KEY_PREFIX = "auth:session:"
 REFRESH_TOKEN_KEY_PREFIX = "auth:refresh:"
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing configuration (bcrypt manages its own context)
+# pwd_context removed in favor of direct bcrypt usage
 
 # HTTP Bearer token security scheme
 security = HTTPBearer()
@@ -73,7 +73,7 @@ class AuthenticationManager:
     @retry_sync("auth_verify_password")
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """
-        Verify a plain password against a hashed password with retry logic
+        Verify a plain password against a hashed password using direct bcrypt
 
         Args:
             plain_password: Plain text password
@@ -82,19 +82,29 @@ class AuthenticationManager:
         Returns:
             bool: True if password matches, False otherwise
         """
-        return pwd_context.verify(plain_password, hashed_password)
+        try:
+            return bcrypt.checkpw(
+                plain_password.encode('utf-8'),
+                hashed_password.encode('utf-8')
+            )
+        except Exception as e:
+            logger.error(f"Password verification failed: {e}")
+            return False
 
     def get_password_hash(self, password: str) -> str:
         """
-        Hash a password
+        Hash a password using direct bcrypt
 
         Args:
             password: Plain text password
 
         Returns:
-            str: Hashed password
+            str: Hashed password (utf-8 decoded string)
         """
-        return pwd_context.hash(password)
+        return bcrypt.hashpw(
+            password.encode('utf-8'),
+            bcrypt.gensalt()
+        ).decode('utf-8')
 
     async def check_rate_limit(self, username: str) -> None:
         """

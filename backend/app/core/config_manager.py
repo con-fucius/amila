@@ -57,7 +57,7 @@ class AppSettings(BaseSettings):
     # Oracle Database Configuration
     ORACLE_HOST: str = Field(default="localhost", min_length=1, max_length=255, description="Oracle host")
     ORACLE_PORT: int = Field(default=1521, ge=1, le=65535, description="Oracle port")
-    ORACLE_SERVICE_NAME: str = Field(default="XEPDB1", min_length=1, max_length=128, description="Oracle service name")
+    ORACLE_SERVICE_NAME: str = Field(default="FREEPDB1", min_length=1, max_length=128, description="Oracle service name")
     ORACLE_USERNAME: Optional[str] = Field(default=None, min_length=1, max_length=128, description="Oracle username")
     ORACLE_PASSWORD: Optional[str] = Field(default=None, min_length=1, max_length=128, description="Oracle password")
 
@@ -138,7 +138,7 @@ class AppSettings(BaseSettings):
 
     # Mistral AI Configuration
     MISTRAL_API_KEY: Optional[str] = Field(default=None, description="Mistral AI API key")
-    MISTRAL_MODEL: str = Field(default="mistral-large-latest", description="Mistral AI model name")
+    MISTRAL_MODEL: str = Field(default="devstral-small-latest", description="Mistral AI model name")
 
     # FalkorDB Configuration (Graph Database for Graphiti)
     FALKORDB_HOST: str = Field(default="localhost", description="FalkorDB host")
@@ -149,15 +149,15 @@ class AppSettings(BaseSettings):
     # Graphiti Configuration (Temporal Knowledge Graph)
     GRAPHITI_TELEMETRY_ENABLED: bool = Field(default=False, description="Enable Graphiti telemetry")
     GRAPHITI_SEMAPHORE_LIMIT: int = Field(default=10, ge=1, le=100, description="Graphiti concurrency limit")
-    GRAPHITI_LLM_PROVIDER: str = Field(default="gemini", pattern=r"^(gemini|bedrock)$", description="Graphiti LLM provider")
-    GRAPHITI_LLM_MODEL: str = Field(default="gemini-2.5-flash-lite", description="Graphiti LLM model name")
-    GRAPHITI_EMBEDDING_PROVIDER: str = Field(default="gemini", pattern=r"^(gemini|bedrock)$", description="Graphiti embedding provider")
-    GRAPHITI_EMBEDDING_MODEL: str = Field(default="text-embedding-004", description="Graphiti embedding model")
-    GRAPHITI_EMBEDDING_DIMENSIONS: int = Field(default=768, ge=128, le=3072, description="Graphiti embedding dimensions")
+    GRAPHITI_LLM_PROVIDER: str = Field(default="mistral", pattern=r"^(gemini|bedrock|mistral|openrouter)$", description="Graphiti LLM provider")
+    GRAPHITI_LLM_MODEL: str = Field(default="devstral-small-latest", description="Graphiti LLM model name")
+    GRAPHITI_EMBEDDING_PROVIDER: str = Field(default="local", pattern=r"^(gemini|bedrock|local)$", description="Graphiti embedding provider")
+    GRAPHITI_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="Graphiti embedding model")
+    GRAPHITI_EMBEDDING_DIMENSIONS: int = Field(default=384, ge=128, le=3072, description="Graphiti embedding dimensions")
 
     # Query Orchestrator Configuration (separate from Graphiti)
     QUERY_LLM_PROVIDER: str = Field(
-        default="gemini",
+        default="mistral",
         pattern=r"^(gemini|bedrock|qwen|openrouter|mistral)$",
         description="LLM provider for the query orchestrator"
     )
@@ -439,13 +439,17 @@ class AppSettings(BaseSettings):
         Test user accounts for authentication
         In production, this should be replaced with a proper database user store
         """
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        # Use direct bcrypt instead of passlib to avoid compatibility issues with bcrypt 4.0+
+        import bcrypt
+        
+        # Hash "adminpassword"
+        # In a real app, this would be loaded from env or a DB, not hashed on the fly
+        hashed = bcrypt.hashpw(b"adminpassword", bcrypt.gensalt()).decode('utf-8')
         
         return {
             "admin": {
                 "username": "admin",
-                "hashed_password": pwd_context.hash("adminpassword"),
+                "hashed_password": hashed,
                 "disabled": False,
                 "role": "admin"
             }

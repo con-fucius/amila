@@ -1,12 +1,12 @@
 import { Card, CardContent } from './ui/card'
+import { cn } from '@/utils/cn'
 import { Button } from './ui/button'
-import { Loader2, Pin } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { ProgressIndicator } from './ProgressIndicator'
 import { SQLPanel } from './SQLPanel'
 import { QueryResultsTable } from './QueryResultsTable'
 import QueryResults from './QueryResults'
 import { SuggestedActions } from './SuggestedActions'
-import { ReportGenerator } from './ReportGenerator'
 import { ErrorCard } from './ErrorCard'
 import type { ChatMessage } from '@/stores/chatStore'
 import type { ThinkingStep } from '@/types/domain'
@@ -53,18 +53,18 @@ export function AssistantMessageCard({
 }: AssistantMessageCardProps) {
   const { addPinnedQuery, pinnedQueries, removePinnedQuery } = usePinnedQueriesStore()
   const [isPinned, setIsPinned] = useState(false)
-  
+
   // Check if this query is already pinned
   const checkPinned = () => {
     if (!message.toolCall?.result) return false
     return pinnedQueries.some(pq => pq.query === message.content)
   }
-  
+
   const handlePin = () => {
     if (!message.toolCall?.result) return
-    
+
     const queryId = `pin-${Date.now()}`
-    
+
     if (isPinned) {
       // Unpin
       const existing = pinnedQueries.find(pq => pq.query === message.content)
@@ -88,14 +88,14 @@ export function AssistantMessageCard({
       setIsPinned(true)
     }
   }
-  
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <Card className="bg-white/80 dark:bg-slate-950/80 border border-emerald-50/60 dark:border-slate-800/80 backdrop-blur-md shadow-sm">
         <CardContent className="pt-3 pr-3 pb-2 pl-3 relative">
           <div className="flex items-start">
             <div className="flex-1">
-              <span className="text-[10px] text-gray-400 float-right ml-2">
+              <span className="chat-timestamp float-right ml-2 text-gray-400">
                 {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
               </span>
 
@@ -144,69 +144,13 @@ export function AssistantMessageCard({
 
       {/* SQL query ribbon directly under preamble - skip for conversational responses */}
       {message.toolCall?.metadata?.sql && !message.toolCall.metadata?.isConversational && (
-        <div className="mt-3">
+        <div className="mt-1">
           <SQLPanel
             sql={message.toolCall.metadata.sql}
             status={message.toolCall.status === 'completed' ? 'executed' : 'generated'}
             onCopy={() => onCopySQL(message.toolCall!.metadata!.sql)}
             compact={message.toolCall.status === 'completed'}
           />
-        </div>
-      )}
-
-      {/* Unified controls row: reasoning (left) + chart/pin (right) */}
-      {(hasReasoningInfo || (message.toolCall?.status === 'completed' && message.toolCall.result)) && (
-        <div className="flex items-center justify-between mt-3 mb-2">
-          <div>
-            {hasReasoningInfo && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onToggleReasoning}
-                className="text-xs"
-              >
-                {isReasoningOpen ? 'Hide' : 'Show'} reasoning
-              </Button>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            {message.toolCall?.status === 'completed' && message.toolCall.result && (
-              <>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handlePin}
-                        className={`text-xs h-8 ${checkPinned() ? 'text-yellow-600' : ''}`}
-                      >
-                        <Pin className={`h-4 w-4 mr-1 ${checkPinned() ? 'fill-yellow-600' : ''}`} />
-                        {checkPinned() ? 'Unpin' : 'Pin'}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>{checkPinned() ? 'Remove from' : 'Add to'} Morning View dashboard</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                <button
-                  className="text-xs underline text-emerald-700 hover:text-emerald-900"
-                  onClick={onToggleChart}
-                >
-                  {isChartOpen ? 'Hide chart' : 'Show chart'}
-                </button>
-                <ReportGenerator
-                  queryResults={[{
-                    columns: message.toolCall.result.columns || [],
-                    rows: message.toolCall.result.rows || [],
-                    row_count: message.toolCall.result.rowCount || message.toolCall.result.row_count,
-                  }]}
-                  userQueries={[message.content]}
-                />
-              </>
-            )}
-          </div>
         </div>
       )}
 
@@ -403,14 +347,21 @@ export function AssistantMessageCard({
               rowCount={message.toolCall.result.rowCount ?? 0}
               timestamp={message.timestamp}
               assistantText={message.content}
+              isPinned={checkPinned()}
+              onPin={handlePin}
+              isChartOpen={isChartOpen}
+              onToggleChart={onToggleChart}
+              isReasoningOpen={isReasoningOpen}
+              onToggleReasoning={onToggleReasoning}
+              isLoading={isLoading}
               onRowAction={(action, ctx) => {
                 const cols = ctx.columns || []
                 const row = ctx.row
                 if (!row || cols.length === 0) return
 
-                const upper = cols.map((c) => c.toUpperCase())
+                const upper = cols.map((c: string) => c.toUpperCase())
                 const priority = ['CUSTOMER_NAME', 'CUSTOMER', 'ACCOUNT_NAME', 'ACCOUNT', 'CLIENT', 'COMPANY', 'PARTNER', 'ORG_NAME']
-                let colIdx = upper.findIndex((c) => priority.includes(c))
+                let colIdx = upper.findIndex((c: string) => priority.includes(c))
                 if (colIdx === -1) colIdx = 0
 
                 const colName = cols[colIdx] || cols[0]

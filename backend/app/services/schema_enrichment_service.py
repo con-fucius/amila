@@ -343,7 +343,14 @@ class SchemaEnrichmentService:
         relationships = []
         tables = schema_data.get("tables", {})
         
-        fk_relationships = await self._fetch_foreign_keys(table_names)
+        if str(schema_data.get("source", "")).lower() == "postgres":
+            db_type = "postgres"
+        elif str(schema_data.get("source", "")).lower() == "doris_mcp":
+            db_type = "doris"
+        else:
+            db_type = "oracle"
+            
+        fk_relationships = await self._fetch_foreign_keys(table_names, database_type=db_type)
         relationships.extend(fk_relationships)
         
         for i, table1 in enumerate(table_names):
@@ -390,12 +397,17 @@ class SchemaEnrichmentService:
         logger.info(f"Detected {len(unique_relationships)} relationships")
         return unique_relationships
     
-    async def _fetch_foreign_keys(self, table_names: List[str]) -> List[Dict[str, str]]:
+    async def _fetch_foreign_keys(
+        self,
+        table_names: List[str],
+        database_type: str = "oracle"
+    ) -> List[Dict[str, str]]:
         """
         Fetch actual foreign key constraints from database
         
         Args:
             table_names: List of table names
+            database_type: Database type
             
         Returns:
             List of foreign key relationships
@@ -405,6 +417,10 @@ class SchemaEnrichmentService:
         from app.core.config import settings
         
         if not mcp_client:
+            return relationships
+
+        # Foreign key queries currently only implemented for Oracle
+        if database_type != "oracle":
             return relationships
         
         try:

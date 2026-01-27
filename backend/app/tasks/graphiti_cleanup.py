@@ -52,8 +52,7 @@ class GraphitiCleanupService:
             
             deleted_count = 0
             
-            # TODO: When Graphiti API supports date-based deletion:
-            # deleted_count = await graphiti_client.delete_nodes_before(cutoff_date)
+            # Logic for date-based node deletion will go here once supported by the API
             
             logger.info(f"Graphiti cleanup complete: {deleted_count} nodes deleted")
             

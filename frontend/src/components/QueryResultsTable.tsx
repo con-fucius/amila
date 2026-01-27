@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react'
+import { cn } from '@/utils/cn'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Filter, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, MoreHorizontal, Check, Clock } from 'lucide-react'
 import { ExportButtonsEnhanced } from './ExportButtonsEnhanced'
@@ -22,6 +23,8 @@ import {
 import { detectNumericColumnIndexes, paginateRows } from '@/utils/results'
 import { findCitedCells, type CellCitation } from '@/utils/citationMatcher'
 import { isCellChanged, type CellDiff } from '@/utils/resultDiff'
+import { QueryActionsDropdown } from './QueryActionsDropdown'
+import { apiService } from '@/services/apiService'
 
 interface QueryResultsTableProps {
   columns: string[]
@@ -33,6 +36,13 @@ interface QueryResultsTableProps {
   assistantText?: string
   diffData?: CellDiff[]
   onRowAction?: (action: 'filter' | 'drilldown', context: { row: any; rowIndex: number; columns: string[] }) => void
+  isPinned?: boolean
+  onPin?: () => void
+  isChartOpen?: boolean
+  onToggleChart?: () => void
+  isLoading?: boolean
+  onToggleReasoning?: () => void
+  isReasoningOpen?: boolean
 }
 
 export function QueryResultsTable({
@@ -44,6 +54,13 @@ export function QueryResultsTable({
   assistantText,
   diffData,
   onRowAction,
+  isPinned = false,
+  onPin,
+  isChartOpen = false,
+  onToggleChart,
+  isLoading = false,
+  onToggleReasoning,
+  isReasoningOpen,
 }: QueryResultsTableProps) {
   const [sortColumn, setSortColumn] = useState<string | null>(null)
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
@@ -276,6 +293,57 @@ export function QueryResultsTable({
     }
   }
 
+  // --- Action Handlers ---
+  const handleExport = async (format: 'csv' | 'excel' | 'json') => {
+    try {
+      const timestamp_str = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
+      const fullFilename = `query_results_${timestamp_str}`
+      const exportData = { columns: normalizedColumns, rows: sortedRows }
+
+      if (format === 'csv') {
+        const csvContent = [normalizedColumns.join(','), ...sortedRows.map(row => rowValues(row).join(','))].join('\n')
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+        const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${fullFilename}.csv`; link.click(); URL.revokeObjectURL(url)
+      } else if (format === 'json') {
+        const jsonData = sortedRows.map(row => {
+          const obj: any = {}; normalizedColumns.forEach((col, i) => obj[col] = getCellValue(row, col, i)); return obj
+        })
+        const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${fullFilename}.json`; link.click(); URL.revokeObjectURL(url)
+      } else if (format === 'excel') {
+        const content = [normalizedColumns.join('\t'), ...sortedRows.map(row => rowValues(row).join('\t'))].join('\n')
+        const blob = new Blob([content], { type: 'application/vnd.ms-excel' })
+        const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${fullFilename}.xls`; link.click(); URL.revokeObjectURL(url)
+      }
+    } catch (err) { console.error('Export failed', err) }
+  }
+
+  const [reportLoading, setReportLoading] = useState(false)
+  const handleGenerateReport = async (format: 'pdf' | 'docx' | 'html') => {
+    setReportLoading(true)
+    try {
+      const response = await apiService.generateReport({
+        query_results: [{ columns: normalizedColumns, rows: sortedRows, row_count: rowCount || rows.length }],
+        format,
+        user_queries: assistantText ? [assistantText] : [],
+      })
+      if (response.status === 'success') {
+        let blob: Blob
+        if (response.encoding === 'base64') {
+          const binaryString = atob(response.content)
+          const bytes = new Uint8Array(binaryString.length); for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i)
+          blob = new Blob([bytes], { type: response.content_type })
+        } else { blob = new Blob([response.content], { type: response.content_type }) }
+        const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `report_${new Date().toISOString().slice(0, 10)}.${format}`; a.click(); URL.revokeObjectURL(url)
+      }
+    } catch (err) { console.error('Report failed', err) } finally { setReportLoading(false) }
+  }
+
+  const handleCopyCSV = () => {
+    const csvContent = [normalizedColumns.join(','), ...sortedRows.map(row => rowValues(row).map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))].join('\n')
+    navigator.clipboard.writeText(csvContent).catch(err => console.error('Copy failed', err))
+  }
+
 
 
   return (
@@ -335,7 +403,48 @@ export function QueryResultsTable({
               </TooltipProvider>
             )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            {/* Pagination Controls in Header */}
+            <div className="flex items-center gap-1.5 mr-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => handlePageChange(currentPage - 1)}
+                disabled={currentPage === 1}
+              >
+                <ChevronDown className="h-4 w-4 rotate-90" />
+              </Button>
+              <span className="text-[11px] font-medium text-gray-500 whitespace-nowrap">
+                {currentPage} / {totalPages}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => handlePageChange(currentPage + 1)}
+                disabled={currentPage === totalPages}
+              >
+                <ChevronDown className="h-4 w-4 -rotate-90" />
+              </Button>
+            </div>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-8 px-2 text-gray-500 hover:text-gray-900">
+                  <span className="text-[11px] font-medium mr-1.5">{rowsPerPage} rows</span>
+                  <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-24">
+                {[5, 10, 20, 50, 100].map((size) => (
+                  <DropdownMenuItem key={size} onClick={() => handleRowsPerPageChange(size)} className="text-xs">
+                    {size} rows
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" className="h-8">
@@ -360,21 +469,22 @@ export function QueryResultsTable({
               variant="outline"
               size="sm"
               onClick={() => setShowFilter(!showFilter)}
-              className={showFilter ? 'bg-gray-100' : ''}
+              className={cn("h-8", showFilter && 'bg-gray-100')}
             >
-              <Filter className="h-4 w-4 mr-1" />
-              Filter
+              <Filter className="h-3.5 w-3.5" />
             </Button>
-            <ExportButtonsEnhanced
-              data={{
-                columns,
-                rows: sortedRows,
-                metadata: {
-                  timestamp: new Date().toISOString(),
-                  row_count: sortedRows.length
-                }
-              }}
-              filename="query_results"
+
+            <QueryActionsDropdown
+              isPinned={isPinned}
+              onPin={onPin || (() => { })}
+              isChartOpen={isChartOpen}
+              onToggleChart={onToggleChart || (() => { })}
+              isReasoningOpen={isReasoningOpen}
+              onToggleReasoning={onToggleReasoning}
+              onExport={handleExport}
+              onGenerateReport={handleGenerateReport}
+              onCopyCSV={handleCopyCSV}
+              disabled={isLoading || reportLoading}
             />
           </div>
         </div>
@@ -394,8 +504,8 @@ export function QueryResultsTable({
           </div>
         )}
       </CardHeader>
-      <CardContent>
-        <div className="border rounded-lg max-h-[420px] overflow-x-auto overflow-y-auto">
+      <CardContent className="p-0">
+        <div className="max-h-[420px] overflow-x-auto overflow-y-auto border-t border-gray-100 dark:border-slate-800">
           <Table className="table-auto min-w-max">
             <TableHeader>
               <TableRow className="bg-gray-50 dark:bg-slate-900/80 sticky top-0 z-10 shadow-sm border-b border-gray-200 dark:border-slate-700">
@@ -558,126 +668,6 @@ export function QueryResultsTable({
           </Table>
         </div>
 
-        {sortedRows.length > 0 && (
-          <div className="flex items-center justify-between mt-4 text-sm">
-            <div className="flex items-center gap-4">
-              <div className="text-gray-600 dark:text-gray-300">
-                {filterText && sortedRows.length !== rows.length && (
-                  <div>
-                    Filtered from {rows.length} {rows.length === 1 ? 'row' : 'rows'}
-                  </div>
-                )}
-                {typeof rowCount === 'number' && rowCount > rows.length && (
-                  <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
-                    Backend reports {rowCount.toLocaleString()} total rows; displaying {rows.length.toLocaleString()} loaded rows.
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-gray-600 dark:text-gray-300">Rows per page:</span>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="h-8 w-16">
-                      {rowsPerPage}
-                      <ChevronDown className="h-3 w-3 ml-1" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    {[5, 10, 20, 50, 100].map((size) => (
-                      <DropdownMenuItem
-                        key={size}
-                        onClick={() => handleRowsPerPageChange(size)}
-                        className={rowsPerPage === size ? 'bg-gray-100' : ''}
-                      >
-                        {size}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handlePageChange(currentPage - 1)}
-                disabled={currentPage === 1}
-              >
-                Previous
-              </Button>
-              <div className="flex items-center gap-1">
-                {/* Show page numbers */}
-                {totalPages <= 7 ? (
-                  // Show all pages if 7 or fewer
-                  Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
-                    <Button
-                      key={page}
-                      variant={currentPage === page ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => handlePageChange(page)}
-                      className="w-8 h-8 p-0"
-                    >
-                      {page}
-                    </Button>
-                  ))
-                ) : (
-                  // Show ellipsis for many pages
-                  <>
-                    {currentPage > 3 && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handlePageChange(1)}
-                          className="w-8 h-8 p-0"
-                        >
-                          1
-                        </Button>
-                        {currentPage > 4 && <span className="px-1">...</span>}
-                      </>
-                    )}
-                    {Array.from({ length: 5 }, (_, i) => {
-                      const page = currentPage - 2 + i
-                      if (page < 1 || page > totalPages) return null
-                      return (
-                        <Button
-                          key={page}
-                          variant={currentPage === page ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => handlePageChange(page)}
-                          className="w-8 h-8 p-0"
-                        >
-                          {page}
-                        </Button>
-                      )
-                    })}
-                    {currentPage < totalPages - 2 && (
-                      <>
-                        {currentPage < totalPages - 3 && <span className="px-1">...</span>}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handlePageChange(totalPages)}
-                          className="w-8 h-8 p-0"
-                        >
-                          {totalPages}
-                        </Button>
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handlePageChange(currentPage + 1)}
-                disabled={currentPage === totalPages}
-              >
-                Next
-              </Button>
-            </div>
-          </div>
-        )}
       </CardContent>
     </Card>
   )

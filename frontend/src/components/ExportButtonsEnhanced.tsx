@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { cn } from '@/utils/cn'
 
 import { Button } from './ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
@@ -64,7 +65,7 @@ export function ExportButtonsEnhanced({
   // Generate CSV content with proper escaping
   const generateCSVContent = (): string => {
     const header = data.columns.map(escapeCSVValue).join(',')
-    const rows = data.rows.map(row => 
+    const rows = data.rows.map(row =>
       row.map(escapeCSVValue).join(',')
     ).join('\n')
     return `${header}\n${rows}`

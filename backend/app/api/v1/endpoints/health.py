@@ -718,6 +718,28 @@ async def get_mcp_tools_status() -> Dict[str, Any]:
     
     result["servers"]["doris"] = doris_tools
     
+    # Check PostgreSQL MCP Server
+    postgres_tools = {
+        "server_name": "Postgres MCP",
+        "server_status": "disabled",
+        "tools": []
+    }
+    
+    if settings.POSTGRES_ENABLED:
+        from app.core.postgres_client import postgres_client
+        is_healthy = await postgres_client.ping()
+        postgres_tools["server_status"] = "connected" if is_healthy else "disconnected"
+        
+        tool_names = ["query", "get_schema", "list_tables", "describe_table", "analyze_query"]
+        for tool_name in tool_names:
+            postgres_tools["tools"].append({
+                "name": tool_name,
+                "status": "available" if is_healthy else "unavailable",
+                "description": _get_tool_description("postgres", tool_name)
+            })
+    
+    result["servers"]["postgres"] = postgres_tools
+    
     # Add response time
     result["response_time_ms"] = round((time.time() - start_time) * 1000, 2)
     
@@ -761,9 +783,19 @@ def _get_tool_description(server_type: str, tool_name: str) -> str:
         "exec_adbc_query": "Execute query via ADBC",
         "get_adbc_connection_info": "Get ADBC connection info"
     }
+
+    postgres_descriptions = {
+        "query": "Execute PostgreSQL SQL queries",
+        "get_schema": "Fetch detailed database schema",
+        "list_tables": "List all tables in the database",
+        "describe_table": "Get column details for a table",
+        "analyze_query": "Explain analyze a SQL statement"
+    }
     
     if server_type == "oracle":
         return oracle_descriptions.get(tool_name, "")
-    else:
+    elif server_type == "doris":
         return doris_descriptions.get(tool_name, "")
+    else:
+        return postgres_descriptions.get(tool_name, "")
 

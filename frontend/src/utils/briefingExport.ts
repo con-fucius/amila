@@ -4,94 +4,100 @@
  */
 
 export interface BriefingData {
-  title: string
-  queries: Array<{
-    question: string
-    answer: string
-    sql?: string
-    result?: {
-      columns: string[]
-      rows: any[][]
-      rowCount: number
-    }
-    chart?: any
-  }>
-  timestamp: Date
+    title: string
+    queries: Array<{
+        question: string
+        answer: string
+        sql?: string
+        result?: {
+            columns: string[]
+            rows: any[][]
+            rowCount: number
+        }
+        chart?: any
+    }>
+    timestamp: Date
 }
 
 /**
  * Generate HTML executive brief
  */
 export function generateHTMLBrief(data: BriefingData): string {
-  const html = `
+    const html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${data.title}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cantarell&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
+            font-family: 'Kumbh Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.4;
             color: #1f2937;
-            max-width: 1200px;
+            max-width: 1000px;
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 24px 20px;
             background: #f9fafb;
+            font-size: 13px;
         }
         .header {
             background: linear-gradient(135deg, #10b981 0%, #059669 100%);
             color: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         .header h1 {
-            font-size: 28px;
+            font-size: 21px;
             font-weight: 700;
-            margin-bottom: 8px;
+            margin-bottom: 4px;
         }
         .header .meta {
-            font-size: 14px;
+            font-size: 11px;
             opacity: 0.9;
         }
         .query-section {
             background: white;
-            border-radius: 12px;
-            padding: 24px;
-            margin-bottom: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+            border: 1px solid #e5e7eb;
         }
         .query-section h2 {
-            font-size: 18px;
+            font-size: 14px;
             color: #059669;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
             font-weight: 600;
         }
         .answer {
-            font-size: 15px;
+            font-size: 13px;
             color: #374151;
-            margin-bottom: 16px;
-            line-height: 1.7;
+            margin-bottom: 12px;
+            line-height: 1.5;
         }
         .data-table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 16px;
-            font-size: 13px;
+            margin-top: 12px;
+            font-size: 11px;
         }
         .data-table th {
             background: #f3f4f6;
-            padding: 10px;
+            padding: 6px 8px;
             text-align: left;
             font-weight: 600;
             border-bottom: 2px solid #e5e7eb;
         }
         .data-table td {
-            padding: 10px;
+            padding: 6px 8px;
             border-bottom: 1px solid #e5e7eb;
         }
         .data-table tr:hover {
@@ -100,12 +106,12 @@ export function generateHTMLBrief(data: BriefingData): string {
         .sql-code {
             background: #1f2937;
             color: #10b981;
-            padding: 12px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
+            padding: 8px;
+            border-radius: 4px;
+            font-family: 'Cantarell', monospace;
+            font-size: 10px;
             overflow-x: auto;
-            margin-top: 12px;
+            margin-top: 8px;
         }
         .footer {
             text-align: center;
@@ -166,38 +172,38 @@ export function generateHTMLBrief(data: BriefingData): string {
 </body>
 </html>
   `
-  
-  return html
+
+    return html
 }
 
 /**
  * Download HTML brief as file
  */
 export function downloadHTMLBrief(data: BriefingData, filename: string = 'executive-brief') {
-  const html = generateHTMLBrief(data)
-  const blob = new Blob([html], { type: 'text/html' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${filename}-${Date.now()}.html`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+    const html = generateHTMLBrief(data)
+    const blob = new Blob([html], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${filename}-${Date.now()}.html`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
 }
 
 /**
  * Print HTML brief
  */
 export function printHTMLBrief(data: BriefingData) {
-  const html = generateHTMLBrief(data)
-  const printWindow = window.open('', '_blank')
-  if (printWindow) {
-    printWindow.document.write(html)
-    printWindow.document.close()
-    printWindow.focus()
-    setTimeout(() => {
-      printWindow.print()
-    }, 250)
-  }
+    const html = generateHTMLBrief(data)
+    const printWindow = window.open('', '_blank')
+    if (printWindow) {
+        printWindow.document.write(html)
+        printWindow.document.close()
+        printWindow.focus()
+        setTimeout(() => {
+            printWindow.print()
+        }, 250)
+    }
 }

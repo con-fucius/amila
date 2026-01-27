@@ -1,4 +1,5 @@
 import { Button } from './ui/button'
+import { cn } from '@/utils/cn'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,7 +30,7 @@ export function ChatTopBar({
   const currentChatId = useCurrentChatId()
   const currentChat = chats.find(c => c.id === currentChatId)
   const messages = currentChat?.messages || []
-  
+
   // Extract completed queries for briefing
   const completedQueries = messages
     .filter((m: any) => m.type === 'assistant' && m.toolCall?.status === 'completed' && m.toolCall.result)
@@ -46,7 +47,7 @@ export function ChatTopBar({
         } : undefined
       }
     })
-  
+
   return (
     <header className="h-14 bg-white/80 dark:bg-slate-950/70 backdrop-blur-xl shadow-md flex items-center justify-between px-6 border-b border-emerald-100/60 dark:border-emerald-500/30 flex-shrink-0">
       <div className="flex items-center gap-4">

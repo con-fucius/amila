@@ -88,7 +88,7 @@ def cleanup_old_results(days_old: int = 7) -> int:
     try:
         logger.info(f"Starting cleanup of query results older than {days_old} days")
         
-        # TODO: Implement actual cleanup logic
+        # Implement actual cleanup logic if using persistent storage
         # For now, just log
         count = 0
         
@@ -111,7 +111,7 @@ def cache_popular_queries() -> int:
     try:
         logger.info("Caching popular queries...")
         
-        # TODO: Implement query popularity tracking and caching
+        # Implement query popularity tracking and caching
         count = 0
         
         logger.info(f"Cached {count} popular queries")

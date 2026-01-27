@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Postgres Database Initialization Script
+Oracle Database Initialization Script
 Populates CUSTOMER_DATA table with 10,000 realistic records for BI Agent testing.
 
 Usage:
-    python scripts/init_postgres_data.py
+    python scripts/init_oracle_data.py
 
 Prerequisites:
-    - Postgres container must be running and healthy
-    - pip install psycopg[binary] faker
+    - Oracle 23ai Free container must be running and healthy
+    - pip install oracledb faker
 """
 
 import random
@@ -17,12 +17,15 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import List, Tuple
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 try:
-    import psycopg
-    from psycopg import sql
+    import oracledb
 except ImportError:
-    print("ERROR: psycopg not installed. Run: pip install \"psycopg[binary]\"")
+    print("ERROR: oracledb not installed. Run: pip install oracledb")
     sys.exit(1)
 
 try:
@@ -32,11 +35,11 @@ except ImportError:
     sys.exit(1)
 
 # Configuration
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
-POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
-POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
-POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "postgres")
+ORACLE_HOST = os.getenv("ORACLE_HOST", "127.0.0.1")
+ORACLE_PORT = int(os.getenv("ORACLE_PORT", 1521))
+ORACLE_USER = os.getenv("ORACLE_USERNAME", "system")
+ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD", "password")
+ORACLE_SERVICE_NAME = os.getenv("ORACLE_SERVICE_NAME", "FREEPDB1")
 
 # Data generation constants
 PRODUCTS = [
@@ -139,10 +142,10 @@ def generate_records(num_records: int, faker: Faker) -> List[Tuple]:
             customer["tribe"],
             customer["squad"],
             customer["sector"],
-            str(revenue),
-            str(used_resources),
-            str(balance_resources),
-            str(value_balances),
+            revenue,
+            used_resources,
+            balance_resources,
+            value_balances,
         )
         records.append(record)
         
@@ -151,89 +154,94 @@ def generate_records(num_records: int, faker: Faker) -> List[Tuple]:
     
     return records
 
-def wait_for_postgres(max_retries: int = 30, retry_interval: int = 2) -> bool:
-    """Wait for Postgres to be ready with automatic localhost fallback."""
-    import socket
-    current_host = POSTGRES_HOST
-    print(f"Waiting for Postgres at {current_host}:{POSTGRES_PORT}...")
+def wait_for_oracle(max_retries: int = 180, retry_interval: int = 5) -> bool:
+    """
+    Wait for Oracle to be ready with extended timeout (up to 15 minutes).
+    Oracle 23ai Free can take several minutes to initialize on first boot.
+    """
+    print(f"Waiting for Oracle at {ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE_NAME}...")
+    print("NOTE: Oracle 23ai can take 5-10 minutes to initialize the PDB on first run. Please be patient.")
     
     for attempt in range(max_retries):
         try:
-            conn = psycopg.connect(
-                host=current_host,
-                port=POSTGRES_PORT,
-                user=POSTGRES_USER,
-                password=POSTGRES_PASSWORD,
-                dbname="postgres",
-                connect_timeout=5,
+            conn = oracledb.connect(
+                user=ORACLE_USER,
+                password=ORACLE_PASSWORD,
+                dsn=f"{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE_NAME}"
             )
             conn.close()
-            print(f"\n[OK] Postgres is ready at {current_host}!")
+            print("\n[OK] Oracle is ready!")
             return True
         except Exception as e:
-            error_msg = str(e)
-            # Handle resolution errors for local execution
-            if ("getaddrinfo failed" in error_msg or "could not connect to server" in error_msg) and current_host != "127.0.0.1":
-                if attempt == 0:
-                    print(f"  Note: Could not resolve '{current_host}'. Falling back to 127.0.0.1 for local execution.")
-                current_host = "127.0.0.1"
+            error_msg = str(e).strip()
+            # If we see DPY-6001 or DPY-6005, it means host is up but service isn't ready
+            if "DPY-6001" in error_msg or "DPY-6005" in error_msg:
+                status_note = "Listener up, but service not yet registered"
+            elif "DPY-4001" in error_msg:
+                status_note = "Network unreachable (check host/port)"
+            else:
+                status_note = "Initializing..."
 
             if attempt < max_retries - 1:
-                if attempt % 5 == 0:
-                    print(f"  Attempt {attempt + 1}/{max_retries}: Waiting for Postgres... ({error_msg[:100]})")
+                # Show full error every 10 attempts, otherwise just status
+                if attempt % 10 == 0:
+                    print(f"  Attempt {attempt + 1}/{max_retries}: {status_note} ({error_msg[:150]}...)")
                 else:
                     sys.stdout.write(".")
                     sys.stdout.flush()
                 time.sleep(retry_interval)
             else:
-                print(f"\n[FAIL] Postgres not ready after {max_retries} attempts")
+                print(f"\n[FAIL] Oracle not ready after {max_retries} attempts. Last error: {error_msg}")
                 return False
     return False
 
 def init_database():
     """Initialize the database and create table."""
     print("\n" + "=" * 60)
-    print("POSTGRES DATABASE INITIALIZATION")
+    print("ORACLE DATABASE INITIALIZATION")
     print("=" * 60)
     
-    if not wait_for_postgres():
-        print("\nERROR: Postgres is not available.")
+    if not wait_for_oracle():
+        print("\nERROR: Oracle is not available.")
         sys.exit(1)
     
     # Connect
-    conn_info = f"host={POSTGRES_HOST} port={POSTGRES_PORT} user={POSTGRES_USER} password={POSTGRES_PASSWORD} dbname={POSTGRES_DATABASE}"
     try:
-        conn = psycopg.connect(conn_info, autocommit=True)
-    except psycopg.OperationalError:
-        # If DB doesn't exist, connect to postgres and create it
-        print(f"Database '{POSTGRES_DATABASE}' not found, creating...")
-        tmp_conn = psycopg.connect(f"host={POSTGRES_HOST} port={POSTGRES_PORT} user={POSTGRES_USER} password={POSTGRES_PASSWORD} dbname=postgres", autocommit=True)
-        tmp_conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(POSTGRES_DATABASE)))
-        tmp_conn.close()
-        conn = psycopg.connect(conn_info, autocommit=True)
+        conn = oracledb.connect(
+            user=ORACLE_USER,
+            password=ORACLE_PASSWORD,
+            dsn=f"{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE_NAME}"
+        )
+        cursor = conn.cursor()
+    except Exception as e:
+        print(f"ERROR: Failed to connect to Oracle: {e}")
+        sys.exit(1)
 
-    cursor = conn.cursor()
-    
     # Drop and Create Table
     print("Preparing CUSTOMER_DATA table...")
-    cursor.execute("DROP TABLE IF EXISTS CUSTOMER_DATA")
-    
+    try:
+        cursor.execute("DROP TABLE CUSTOMER_DATA")
+    except oracledb.DatabaseError as e:
+        error, = e.args
+        if error.code != 942: # ORA-00942: table or view does not exist
+            raise
+
     create_table_sql = """
     CREATE TABLE CUSTOMER_DATA (
-        DATE VARCHAR(20),
-        MONTH VARCHAR(10),
-        PRODUCT VARCHAR(50),
-        SUB_PRODUCT VARCHAR(100),
-        CUSTOMER_ID VARCHAR(30),
-        CUSTOMER VARCHAR(200),
-        SEGMENT VARCHAR(30),
-        TRIBE VARCHAR(50),
-        SQUAD VARCHAR(50),
-        SECTOR VARCHAR(50),
-        REVENUE NUMERIC(20, 2),
-        USED_RESOURCES INTEGER,
-        BALANCE_RESOURCES INTEGER,
-        VALUE_BALANCES NUMERIC(20, 2)
+        "DATE" VARCHAR2(20),
+        "MONTH" VARCHAR2(10),
+        PRODUCT VARCHAR2(50),
+        SUB_PRODUCT VARCHAR2(100),
+        CUSTOMER_ID VARCHAR2(30),
+        CUSTOMER VARCHAR2(200),
+        SEGMENT VARCHAR2(30),
+        TRIBE VARCHAR2(50),
+        SQUAD VARCHAR2(50),
+        SECTOR VARCHAR2(50),
+        REVENUE NUMBER(20, 2),
+        USED_RESOURCES NUMBER(20),
+        BALANCE_RESOURCES NUMBER(20),
+        VALUE_BALANCES NUMBER(20, 2)
     )
     """
     cursor.execute(create_table_sql)
@@ -250,14 +258,15 @@ def init_database():
     print("\nInserting records...")
     insert_sql = """
     INSERT INTO CUSTOMER_DATA 
-    (DATE, MONTH, PRODUCT, SUB_PRODUCT, CUSTOMER_ID, CUSTOMER, SEGMENT, TRIBE, SQUAD, SECTOR, REVENUE, USED_RESOURCES, BALANCE_RESOURCES, VALUE_BALANCES)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ("DATE", "MONTH", PRODUCT, SUB_PRODUCT, CUSTOMER_ID, CUSTOMER, SEGMENT, TRIBE, SQUAD, SECTOR, REVENUE, USED_RESOURCES, BALANCE_RESOURCES, VALUE_BALANCES)
+    VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14)
     """
     
     batch_size = 1000
     for i in range(0, len(records), batch_size):
         batch = records[i:i + batch_size]
         cursor.executemany(insert_sql, batch)
+        conn.commit()
         print(f"  Inserted {i + len(batch):,} / {len(records):,} records...")
     
     # Verification
@@ -267,7 +276,7 @@ def init_database():
     
     conn.close()
     print("\n" + "=" * 60)
-    print("[OK] DATABASE INITIALIZATION COMPLETE")
+    print("[OK] ORACLE INITIALIZATION COMPLETE")
     print("=" * 60)
 
 if __name__ == "__main__":

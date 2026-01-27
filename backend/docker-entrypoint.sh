@@ -17,7 +17,7 @@ if [ -x "/opt/sqlcl/bin/sql" ]; then
         echo "Creating Oracle connection: ${ORACLE_DEFAULT_CONNECTION:-$ORACLE_USERNAME}"
         
         CONN_NAME="${ORACLE_DEFAULT_CONNECTION:-$ORACLE_USERNAME}"
-        CONN_STRING="${ORACLE_USERNAME}/${ORACLE_PASSWORD}@${ORACLE_HOST}:${ORACLE_PORT:-1521}/${ORACLE_SERVICE_NAME:-XEPDB1}"
+        CONN_STRING="${ORACLE_USERNAME}/${ORACLE_PASSWORD}@${ORACLE_HOST}:${ORACLE_PORT:-1521}/${ORACLE_SERVICE_NAME:-FREEPDB1}"
         
         # Create connection using SQLcl (non-interactive)
         echo "conn -save ${CONN_NAME} -savepwd ${CONN_STRING}

@@ -18,6 +18,7 @@ import { ExecutionTimeline } from '@/components/ExecutionTimeline'
 import { LineageView } from '@/components/LineageView'
 import { AlertTriangle, Info } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { DatabaseSelector } from '@/components/DatabaseSelector'
 
 export function QueryBuilder() {
   const [sql, setSQL] = useState<string>('')
@@ -136,27 +137,39 @@ export function QueryBuilder() {
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900">
-      <header className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-gray-200/70 dark:border-slate-800/70 px-6 py-3">
+      <header className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-gray-200/70 dark:border-slate-800/70 px-6 py-4">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="chat-header-subtitle font-semibold text-gray-900">Advanced Query Builder</h1>
-            <p className="section-subtext text-gray-500 mt-1">Write and execute custom SQL queries</p>
+          <div className="space-y-1">
+            <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-gray-50">Advanced Query Builder</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Write and execute custom SQL queries with real-time analysis</p>
           </div>
-          <div className="flex items-center gap-3 text-sm">
-            <Badge variant="outline" className="text-xs">
-              <Database className="h-3 w-3 mr-1" />
-              {databaseType === 'oracle' ? 'Oracle' : 'Doris'}
-            </Badge>
-            <label className="text-gray-600 dark:text-gray-300">Connection</label>
-            <select
-              value={connection || ''}
-              onChange={(e) => setConnection(e.target.value || undefined)}
-              className="border rounded px-2 py-1 text-sm bg-white dark:bg-slate-900 border-gray-300 dark:border-slate-700"
-            >
-              {connections.map((c) => (
-                <option key={c.name} value={c.name}>{c.name}</option>
-              ))}
-            </select>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Database</span>
+              <DatabaseSelector variant="header" />
+            </div>
+
+            <div className="h-8 w-[1px] bg-gray-200 dark:bg-slate-800" />
+
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connection</span>
+              <select
+                value={connection || ''}
+                onChange={(e) => setConnection(e.target.value || undefined)}
+                className="h-9 min-w-[160px] border rounded-lg px-3 py-1 text-sm bg-white dark:bg-slate-950 border-gray-200 dark:border-slate-800 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none transition-all shadow-sm"
+              >
+                {connections
+                  .filter(c => {
+                    if (databaseType === 'oracle') return c.type === 'oracle' || !c.type
+                    if (databaseType === 'doris') return c.type === 'doris'
+                    if (databaseType === 'postgres') return c.type === 'postgres'
+                    return true
+                  })
+                  .map((c) => (
+                    <option key={c.name} value={c.name}>{c.name}</option>
+                  ))}
+              </select>
+            </div>
           </div>
         </div>
       </header>

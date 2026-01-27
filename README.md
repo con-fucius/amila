@@ -21,62 +21,153 @@ Amila is an AI-powered business intelligence agent that orchestrates natural lan
 
 ## Architecture
 
-### Backend (FastAPI + LangGraph)
-*   **Orchestrator**: Manages state, validation loops, and HITL (Human-in-the-Loop) approvals.
-*   **Services**: 
-    *   `DatabaseRouter`: Routes queries to appropriate engines.
-    *   `SkillsLoader`: Injects YAML-based SQL skills and rules.
-    *   `DiagnosticService`: Real-time system health probing.
-*   **Infrastructure**: Redis (Cache/Session), Graphiti (FalkorDB context), Celery (Async tasks).
+- **Backend (FastAPI + LangGraph)**: Multi-stage orchestrator (Intent → SQL Gen → HITL → Execute). Includes `DatabaseRouter`, `SkillsLoader`, and `DiagnosticService`.
+- **Frontend (React + TypeScript)**: Interactive interface with Monaco editor, Plotly charts, and Schema Browser.
+- **Design System**: Compact, high-density enterprise UI with prioritized typography (`Figtree`, `Segoe UI`, `Cantarell`).
 
-### Frontend (React + TypeScript)
-*   **RealChatInterface**: Split-pane view for chat and reasoning.
-*   **QueryBuilder**: Advanced SQL editor with result visualization.
-*   **Visualizations**: Auto-generated Plotly charts based on data types.
+## Setup Guide
 
-## Quick Start
+Follow these steps meticulously to start the Amila platform. All commands should be run from the project root directory unless specified otherwise.
 
-### Prerequisites
-*   Docker Desktop
-*   Python 3.12+ (managed via `uv`)
-*   Node.js 18+ (managed via `pnpm`)
+### 1. Start Infrastructure Services
+Start the core databases and monitoring infrastructure using Docker Compose. Ensure Docker Desktop is running before proceeding.
 
-### 1. Configuration
-Copy `.env.example` to `.env` in both root and `backend/` directories.
-
-```bash
-# Key variables
-QUERY_LLM_PROVIDER=mistral  # or gemini, bedrock, qwen
-MISTRAL_API_KEY=your_key
-POSTGRES_ENABLED=true
+```powershell
+# Command to start Redis, FalkorDB, Doris, Postgres, Otel-Collector, Grafana, Prometheus, and Oracle
+docker-compose --profile full --profile observability up -d redis falkordb doris postgres otel-collector grafana prometheus oracle
 ```
 
-### 2. Oracle Setup (Optional)
-Create `.dbtools/connections.json` with your Oracle connection strings. See `.dbtools/README.md`.
+> [!IMPORTANT]
+> Initializing Oracle and Doris can take up to 60 seconds. Wait until the containers are reported as `healthy` in Docker or via `docker-compose ps`.
 
-### 3. Launch
-Start the minimal development stack:
+### 2. Populate Databases
+Populate the Doris and Postgres databases with sample data using the unified population script. This requires a Python virtual environment with backend dependencies installed.
 
-```bash
-docker compose up -d backend frontend redis falkordb doris
+```powershell
+# 1. Initialize backend virtual environment (if not already done)
+cd backend
+uv sync --all-extras
+.\.venv\Scripts\activate
+
+# 2. Run the unified population script from project root
+cd ..
+python scripts/populate_all_dbs.py --reset
 ```
 
-**Access Points:**
-*   **Frontend**: [http://localhost:3000](http://localhost:3000)
-*   **Backend API**: [http://localhost:8000/docs](http://localhost:8000/docs)
-*   **Diagnostics**: [http://localhost:8000/api/v1/diagnostics/status](http://localhost:8000/api/v1/diagnostics/status)
+### 3. Start the Backend
+Start the FastAPI backend orchestrator in a new terminal.
 
-## Observability
+```powershell
+# Access backend directory and activate environment
+cd backend
+.\.venv\Scripts\activate
 
-Amila includes a comprehensive observability stack (disabled by default for speed).
-
-To enable full monitoring (Prometheus, Grafana, OpenTelemetry):
-```bash
-docker compose --profile full up -d
+# Start the FastAPI server on port 8000
+python main.py
 ```
 
-## Development
+### 4. Start the Frontend
+Start the React development server in a new terminal.
 
-*   **Backend**: `cd backend && uv sync && uvicorn app.main:app --reload`
-*   **Frontend**: `cd frontend && pnpm install && pnpm dev`
-*   **Monitoring**: See `/api/v1/diagnostics/status` for system health.
+```powershell
+# Access frontend directory and start Dev server
+cd frontend
+npm install
+npm run dev
+```
+The UI will be available at [http://localhost:3000](http://localhost:3000).
+
+### 5. Start Celery
+Start the Celery worker to handle background tasks and report exports. Run this in a new terminal.
+
+```powershell
+# Access backend directory and activate environment
+cd backend
+.\.venv\Scripts\activate
+
+# Start Celery worker with solo pool for Windows compatibility
+celery -A app.core.celery_app worker --loglevel=info --pool=solo
+```
+
+---
+
+## Important Usage Notes
+
+- **Diagnostics**: Once all services are running, verify system health at [http://localhost:3000/settings](http://localhost:3000/settings) or via the API check: `GET http://localhost:8000/api/v1/health`.
+- **Port Cleanup**: If you encounter "Port already in use" errors, use the cleanup utility:
+  ```powershell
+  .\scripts\fix_startup.ps1
+  ```
+
+---
+
+## Important Notes
+
+- **Local Development**: Because you are running the backend manually, ensure your `.env` file reflects `localhost` or `127.0.0.1` for service hosts (Redis, Doris, etc.) rather than the Docker service names.
+- **Langfuse Cloud**: If using Langfuse Cloud, ensure your keys are set in `.env`.
+
+## Access Points
+
+| Component | URL |
+|-----------|-----|
+| **Frontend UI** | [http://localhost:3000](http://localhost:3000) |
+| **Backend API** | [http://localhost:8000](http://localhost:8000) |
+| **API Documentation** | [http://localhost:8000/docs](http://localhost:8000/docs) |
+| **Flower (Celery Monitor)** | [http://localhost:5555](http://localhost:5555) |
+
+## Troubleshooting
+
+### Container & Network Issues
+
+**Error:** `"Error response from daemon: failed to set up container networking: network '______' not found"` or `"Network bi-agent-network Resource is still in use"`
+
+**Solution:**
+Identify the running container, stop it, and remove it before attempting to remove the network.
+1.  **Stop and remove specific containers**: `docker stop bi-agent-postgres` then `docker rm bi-agent-postgres`
+2.  **Stop and remove all Amila-related containers**:
+    ```bash
+    docker rm -f bi-agent-backend bi-agent-redis bi-agent-falkordb bi-agent-doris bi-agent-postgres bi-agent-prometheus bi-agent-otel-collector bi-agent-grafana bi-agent-celery-worker bi-agent-flower
+    ```
+3.  **Remove the network**: `docker network rm bi-agent-network`
+
+**Error:** `"Error response from daemon: error while removing network: ... has active endpoints"`
+
+**Solution:**
+1.  **Stop and remove offending containers**: `docker stop bi-agent-prometheus bi-agent-grafana bi-agent-postgres`
+2.  **Clean up**: `docker rm bi-agent-prometheus bi-agent-grafana bi-agent-postgres`
+3.  **Remove network**: `docker network rm bi-agent-network`
+
+### Database-Specific Issues
+
+**Oracle: `ORA-01017: invalid username/password; logon denied`**
+- **Cause**: Script is using hardcoded defaults or the wrong service name.
+- **Solution**: Ensure your `.env` file is in the root directory and contains correct `ORACLE_USERNAME`, `ORACLE_PASSWORD`, and `ORACLE_SERVICE_NAME` (use `FREEPDB1` for 23ai). The initialization scripts now use `load_dotenv()` to automatically pick up these settings.
+
+**Oracle: `ORA-28000: The account is locked`**
+- **Cause**: Too many failed login attempts during setup.
+- **Solution**: Unlock the account directly via `docker exec`:
+  ```bash
+  "ALTER USER system ACCOUNT UNLOCK; ALTER USER system IDENTIFIED BY password; EXIT;" | docker exec -i bi-agent-oracle sqlplus / as sysdba
+  ```
+
+### Database Provisioning
+
+**Unified Database Provisioner** (`scripts/populate_all_dbs.py`):
+1. **Start Services**: `docker-compose --profile full up -d`
+2. **Wait ~60s**: Allow Oracle and Doris to initialize.
+3. **Provision Data**: Use the backend virtual environment:
+   ```powershell
+   cd backend
+   uv sync
+   .\.venv\Scripts\activate
+   cd ..
+   python scripts/populate_all_dbs.py --reset
+   ```
+- This script populates **10,000 rows** across **full year 2025** into Oracle, Doris, and Postgres simultaneously.
+
+**Oracle: `DPY-6001: Service "XE" not found`**
+- **Cause**: Incorrect service name for the 23ai Free edition.
+- **Solution**: Set `ORACLE_SERVICE_NAME=FREEPDB1` in your `.env`.
+
+**Frontend: Fonts not rendering correctly**
+- **Note**: The system prioritizes `Figtree` for UI and `Cantarell`/`Consolas` for SQL. Ensure you have an internet connection for Google Fonts or have these fonts installed locally.

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { cn } from '@/utils/cn'
 import { Search, Table, Key, RefreshCw, Database, BarChart3, Loader2 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -16,6 +17,7 @@ import {
 import { apiService } from '@/services/apiService'
 import { useDatabaseType } from '@/stores/chatStore'
 import { useBackendHealth } from '@/hooks/useBackendHealth'
+import { DatabaseSelector } from '@/components/DatabaseSelector'
 
 interface ColumnInfo {
   name: string
@@ -123,19 +125,22 @@ export function SchemaBrowser() {
   return (
     <div className="h-screen flex flex-col bg-gray-50 dark:bg-slate-950">
       {/* Header */}
-      <header className="bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 px-6 py-4">
+      <header className="bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 px-6 py-6 backdrop-blur-md">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="chat-header-subtitle font-semibold text-gray-900 dark:text-gray-50">Schema Browser</h1>
-            <p className="section-subtext text-gray-500 dark:text-gray-400 mt-1">Explore database tables and relationships</p>
+          <div className="space-y-1">
+            <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-gray-50">Schema Browser</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Explore database tables, columns, and relationships</p>
           </div>
-          <div className="flex items-center gap-3">
-            <Badge variant="outline" className="text-xs">
-              <Database className="h-3 w-3 mr-1" />
-              {databaseType === 'oracle' ? 'Oracle' : 'Doris'}
-            </Badge>
-            <Button variant="outline" size="sm" onClick={fetchSchema} disabled={loading}>
-              <RefreshCw className="h-4 w-4 mr-1" />
+          <div className="flex items-center gap-4">
+            <DatabaseSelector variant="header" className="mr-2" />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchSchema}
+              disabled={loading}
+              className="h-9 px-4 border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800"
+            >
+              <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               {loading ? 'Refreshing...' : 'Refresh Schema'}
             </Button>
           </div>
@@ -147,57 +152,65 @@ export function SchemaBrowser() {
         {/* Left Panel - Table List */}
         <aside className="w-80 bg-white dark:bg-slate-900/80 border-r border-gray-200 dark:border-slate-800 overflow-y-auto">
           <div className="p-4">
-            <div className="mb-4">
+            <div className="mb-6">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-gray-500" />
                 <Input
                   placeholder="Search tables..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9"
+                  className="pl-10 h-10 bg-gray-50 dark:bg-slate-800 border-gray-200 dark:border-slate-700 focus:ring-emerald-500 rounded-xl"
                 />
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1">
               {filteredTables.map((table) => (
                 <button
                   key={table.name}
                   onClick={() => setSelectedTable(table)}
-                  className={`w-full text-left p-3 rounded-lg border transition-all ${selectedTable?.name === table.name
-                    ? 'border-green-500 bg-green-50 dark:bg-emerald-900/20'
-                    : 'hover:bg-gray-50 dark:hover:bg-slate-800 border-transparent'
-                    }`}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all duration-200 group relative",
+                    selectedTable?.name === table.name
+                      ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-200 dark:ring-emerald-800/50"
+                      : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-800"
+                  )}
                 >
-                  <div className="flex items-center gap-2 mb-1">
-                    <Table className="h-4 w-4 text-gray-600 dark:text-gray-300" />
-                    <span className="font-medium text-sm text-gray-800 dark:text-gray-100">{table.name}</span>
-                    <Badge variant="secondary" className="text-xs ml-auto">
-                      {table.type}
-                    </Badge>
+                  <div className={cn(
+                    "p-1.5 rounded-lg transition-colors",
+                    selectedTable?.name === table.name
+                      ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400"
+                      : "bg-gray-100 dark:bg-slate-800 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300"
+                  )}>
+                    <Table className="h-4 w-4" />
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {table.columns.length} columns
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold truncate uppercase tracking-tight">
+                      {table.name}
+                    </p>
+                    <p className="text-[10px] opacity-60">
+                      {table.rowCount} rows detected
+                    </p>
                   </div>
+                  {selectedTable?.name === table.name && (
+                    <div className="absolute right-3 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  )}
                 </button>
               ))}
+
+              {filteredTables.length === 0 && (
+                <div className="text-center py-10 px-4">
+                  <Table className="h-10 w-10 mx-auto text-gray-300 dark:text-gray-700 mb-3 opacity-50" />
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No tables found matching your search</p>
+                </div>
+              )}
             </div>
           </div>
         </aside>
 
         {/* Center - Table Details */}
         <div className="flex-1 overflow-auto p-6 relative">
-          <div className="absolute top-6 right-6 z-10">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm">
-              <Database className="h-3.5 w-3.5 text-emerald-500" />
-              <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
-                {databaseType === 'oracle' ? 'Oracle Database' : 'Doris OLAP'}
-              </span>
-              <div className={`w-2 h-2 rounded-full ${(databaseType === 'oracle' && (components?.sqlcl_pool === 'active' || components?.sqlcl_pool === 'connected')) ||
-                (databaseType === 'doris' && (components?.doris_mcp === 'active' || components?.doris_mcp === 'connected'))
-                ? 'bg-green-500' : 'bg-amber-500'
-                }`} />
-            </div>
+          <div className="absolute top-6 right-6 z-10 hidden sm:flex">
           </div>
           {error && (
             <div className="mb-4">
@@ -210,24 +223,46 @@ export function SchemaBrowser() {
           )}
           {selectedTable ? (
             <div className="space-y-4">
-              <Card>
-                <CardHeader>
+              <Card className="overflow-hidden border-gray-200 dark:border-slate-800 shadow-sm">
+                <div className="h-1 bg-gradient-to-r from-emerald-500 to-green-500" />
+                <CardHeader className="py-5">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">{selectedTable.name}</h2>
-                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                        {selectedTable.columns.length} columns
+                      <div className="flex items-center gap-2 mb-1">
+                        <Database className="h-4 w-4 text-emerald-500" />
+                        <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50 tracking-tight">{selectedTable.name}</h2>
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        {selectedTable.type} &bull; {selectedTable.columns.length} columns defined
                       </p>
                     </div>
-                    <Badge variant="secondary">{selectedTable.type}</Badge>
+                    <div className="flex flex-col items-end gap-1">
+                      <Badge variant="secondary" className="bg-emerald-100/50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 border-emerald-200/50 dark:border-emerald-800/30 font-semibold px-2 py-0.5">
+                        Active Schema
+                      </Badge>
+                    </div>
                   </div>
                 </CardHeader>
               </Card>
 
               <Tabs defaultValue="columns">
-                <TabsList>
-                  <TabsTrigger value="columns">Columns</TabsTrigger>
-                  <TabsTrigger value="stats" onClick={() => !stats.length && setShowStatsWarning(true)}>
+                <TabsList className="bg-gray-100/50 dark:bg-slate-900/50 p-1">
+                  <TabsTrigger
+                    value="columns"
+                    className="data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-600 dark:data-[state=active]:text-emerald-400"
+                  >
+                    Columns
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="stats"
+                    onClick={(e) => {
+                      if (!stats.length) {
+                        e.preventDefault();
+                        setShowStatsWarning(true);
+                      }
+                    }}
+                    className="data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-600 dark:data-[state=active]:text-emerald-400"
+                  >
                     Statistics
                   </TabsTrigger>
                 </TabsList>
@@ -237,36 +272,40 @@ export function SchemaBrowser() {
                     <CardContent className="p-0">
                       <div className="overflow-x-auto">
                         <table className="w-full">
-                          <thead className="bg-gray-50 dark:bg-slate-900/70 border-b border-gray-200 dark:border-slate-800">
+                          <thead className="bg-gray-50/50 dark:bg-slate-900/50 border-b border-gray-200 dark:border-slate-800">
                             <tr>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-200">Column Name</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-200">Data Type</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-200">Nullable</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-gray-200">Keys</th>
+                              <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Column Name</th>
+                              <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Data Type</th>
+                              <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nullable</th>
+                              <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Keys</th>
                             </tr>
                           </thead>
                           <tbody>
                             {selectedTable.columns.map((column, idx) => (
-                              <tr key={idx} className="border-b border-gray-100 dark:border-slate-800 hover:bg-gray-50 dark:hover:bg-slate-900/60">
-                                <td className="px-4 py-3 text-sm font-mono text-gray-800 dark:text-gray-100">{column.name}</td>
-                                <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{column.dataType}</td>
-                                <td className="px-4 py-3 text-sm">
+                              <tr key={idx} className="border-b border-gray-100 dark:border-slate-800/60 hover:bg-gray-50/30 dark:hover:bg-slate-900/40 transition-colors">
+                                <td className="px-5 py-3 text-sm font-mono text-gray-800 dark:text-gray-100 font-medium tracking-tight">
+                                  {column.name}
+                                </td>
+                                <td className="px-5 py-3 text-[11px] text-gray-500 dark:text-gray-400 font-mono italic">
+                                  {column.dataType}
+                                </td>
+                                <td className="px-5 py-3">
                                   {column.nullable ? (
-                                    <Badge variant="outline" className="text-xs">NULL</Badge>
+                                    <Badge variant="outline" className="text-[9px] h-5 font-normal border-gray-200 dark:border-slate-700 text-gray-400">NULLABLE</Badge>
                                   ) : (
-                                    <Badge variant="secondary" className="text-xs">NOT NULL</Badge>
+                                    <Badge variant="secondary" className="text-[9px] h-5 font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">NOT NULL</Badge>
                                   )}
                                 </td>
-                                <td className="px-4 py-3 text-sm">
+                                <td className="px-5 py-3 text-sm">
                                   <div className="flex gap-1">
                                     {column.isPrimaryKey && (
-                                      <Badge variant="default" className="text-xs flex items-center gap-1">
-                                        <Key className="h-3 w-3" />PK
+                                      <Badge className="text-[9px] h-5 bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 flex items-center gap-1">
+                                        <Key className="h-2.5 w-2.5" /> PRIMARY
                                       </Badge>
                                     )}
                                     {column.isForeignKey && (
-                                      <Badge variant="outline" className="text-xs flex items-center gap-1">
-                                        <Key className="h-3 w-3" />FK
+                                      <Badge variant="outline" className="text-[9px] h-5 border-blue-200 text-blue-600 flex items-center gap-1">
+                                        <Key className="h-2.5 w-2.5" /> FOREIGN
                                       </Badge>
                                     )}
                                   </div>
@@ -292,25 +331,25 @@ export function SchemaBrowser() {
                       ) : stats.length > 0 ? (
                         <div className="overflow-x-auto">
                           <table className="w-full">
-                            <thead className="bg-gray-50 dark:bg-slate-900/70 border-b">
+                            <thead className="bg-gray-50/50 dark:bg-slate-900/50 border-b">
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-semibold">Column</th>
-                                <th className="px-4 py-3 text-left text-xs font-semibold">Type</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold">Distinct</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold">Nulls</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold">Min</th>
-                                <th className="px-4 py-3 text-right text-xs font-semibold">Max</th>
+                                <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Column</th>
+                                <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
+                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Distinct</th>
+                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nulls</th>
+                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Min</th>
+                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Max</th>
                               </tr>
                             </thead>
                             <tbody>
                               {stats.map((stat, idx) => (
-                                <tr key={idx} className="border-b border-gray-100 dark:border-slate-800">
-                                  <td className="px-4 py-3 text-sm font-mono">{stat.column}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-500">{stat.type}</td>
-                                  <td className="px-4 py-3 text-sm text-right">{stat.distinct_count?.toLocaleString() ?? '-'}</td>
-                                  <td className="px-4 py-3 text-sm text-right">{stat.null_count?.toLocaleString() ?? '-'}</td>
-                                  <td className="px-4 py-3 text-sm text-right font-mono">{stat.min ?? '-'}</td>
-                                  <td className="px-4 py-3 text-sm text-right font-mono">{stat.max ?? '-'}</td>
+                                <tr key={idx} className="border-b border-gray-100 dark:border-slate-800/60 hover:bg-gray-50/30 dark:hover:bg-slate-900/40 transition-colors">
+                                  <td className="px-5 py-3 text-sm font-mono font-medium text-gray-800 dark:text-gray-100">{stat.column}</td>
+                                  <td className="px-5 py-3 text-sm text-gray-500 dark:text-gray-400 font-mono text-xs">{stat.type}</td>
+                                  <td className="px-5 py-3 text-sm text-right font-mono">{stat.distinct_count?.toLocaleString() ?? '-'}</td>
+                                  <td className="px-5 py-3 text-sm text-right font-mono text-gray-500">{stat.null_count?.toLocaleString() ?? '-'}</td>
+                                  <td className="px-5 py-3 text-sm text-right font-mono text-blue-600 dark:text-blue-400 truncate max-w-[120px]">{stat.min ?? '-'}</td>
+                                  <td className="px-5 py-3 text-sm text-right font-mono text-purple-600 dark:text-purple-400 truncate max-w-[120px]">{stat.max ?? '-'}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -347,7 +386,7 @@ export function SchemaBrowser() {
             </Card>
           )}
         </div>
-      </div>
+      </div >
 
       <Dialog open={showStatsWarning} onOpenChange={setShowStatsWarning}>
         <DialogContent>
@@ -369,6 +408,6 @@ export function SchemaBrowser() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </div >
   )
 }

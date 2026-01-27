@@ -202,22 +202,29 @@ async def get_table_stats(
         
         # 3. Calculate Stats (Optimized)
         stats = []
-        # Limit to first 10 columns to prevent massive queries, as per safety requirements
-        target_columns = table_columns[:10]
+        # Limit to first 20 columns to prevent massive queries, as per safety requirements
+        target_columns = table_columns[:20]
         
         for col in target_columns:
             col_name = col.get("name") if isinstance(col, dict) else col[0]
             col_type = col.get("type") if isinstance(col, dict) else (col[1] if len(col) > 1 else "UNKNOWN")
             
-            is_numeric = any(t in col_type.upper() for t in ["NUMBER", "INT", "DECIMAL", "FLOAT", "DOUBLE"])
+            is_numeric = any(t in col_type.upper() for t in ["NUMBER", "INT", "DECIMAL", "FLOAT", "DOUBLE", "NUMERIC", "BIGINT"])
             
-            # Use approximate counts for performance
-            if database_type.lower() == "doris":
+            # Use approximate counts for performance where available
+            db_type_lower = database_type.lower()
+            if db_type_lower == "doris":
                 # Doris: NDV() is approximate count distinct
                 if is_numeric:
                     sql = f"SELECT MIN({col_name}), MAX({col_name}), NDV({col_name}), SUM(CASE WHEN {col_name} IS NULL THEN 1 ELSE 0 END) FROM {table_name}"
                 else:
                     sql = f"SELECT NDV({col_name}), SUM(CASE WHEN {col_name} IS NULL THEN 1 ELSE 0 END) FROM {table_name}"
+            elif db_type_lower in ["postgres", "postgresql"]:
+                # Postgres: No built-in approximate distinct count like NDV in core, use regular count(DISTINCT)
+                if is_numeric:
+                    sql = f'SELECT MIN("{col_name}"), MAX("{col_name}"), COUNT(DISTINCT "{col_name}"), COUNT(*) - COUNT("{col_name}") FROM "{table_name}"'
+                else:
+                    sql = f'SELECT COUNT(DISTINCT "{col_name}"), COUNT(*) - COUNT("{col_name}") FROM "{table_name}"'
             else:
                 # Oracle: APPROX_COUNT_DISTINCT
                 if is_numeric:
@@ -227,16 +234,15 @@ async def get_table_stats(
             
             try:
                 # Execute with RetryableExecutor for robustness
+                exec_db_type = DatabaseType.ORACLE
+                if db_type_lower == "doris":
+                    exec_db_type = DatabaseType.DORIS
+                elif db_type_lower in ["postgres", "postgresql"]:
+                    exec_db_type = DatabaseType.POSTGRES
+
                 executor = RetryableExecutor(
-                    database_type=DatabaseType.DORIS if database_type.lower() == "doris" else DatabaseType.ORACLE
+                    database_type=exec_db_type
                 )
-                
-                # We need to wrap the DatabaseRouter call to use the executor's policy
-                # But DatabaseRouter.execute_sql doesn't take a policy. 
-                # Ideally we'd modify DatabaseRouter, but here we can just call it and let the router handle it
-                # OR we can use the executor to wrap the call.
-                # Since DatabaseRouter doesn't expose the underlying client easily for the executor to wrap directly without a lambda,
-                # we will rely on the router's internal error handling but use the executor to manage retries if the router fails.
                 
                 async def _exec():
                     return await DatabaseRouter.execute_sql(
@@ -244,7 +250,7 @@ async def get_table_stats(
                         sql_query=sql,
                     )
                 
-                result = await executor.execute_with_retry(_exec)
+                result = await executor.execute_with_retry(_exec, database_type=exec_db_type)
                 
                 if result.get("status") == "success" and result.get("rows"):
                     row = result["rows"][0]

@@ -376,38 +376,43 @@ async def process_query(
         pass
     
     # Pre-load schema metadata so downstream nodes always have baseline context
+    # CRITICAL: Use DatabaseRouter for ALL database types (Oracle, Postgres, Doris)
     base_schema_metadata: Dict[str, Any] = {}
     base_schema_source: str | None = None
-    if database_type == "oracle":
-        try:
-            from app.services.schema_service import SchemaService
-
-            schema_result = await SchemaService.get_database_schema(use_cache=True)
-            if schema_result.get("status") == "success":
-                base_schema_metadata = schema_result.get("schema") or {}
-                base_schema_source = schema_result.get("source")
+    try:
+        from app.services.database_router import DatabaseRouter
+        
+        logger.info(f"Pre-hydrating schema for database_type={database_type}")
+        schema_result = await DatabaseRouter.get_database_schema(
+            database_type=database_type,
+            use_cache=True
+        )
+        
+        if schema_result.get("status") == "success":
+            base_schema_metadata = schema_result.get("schema") or {}
+            base_schema_source = schema_result.get("source")
+            table_count = len(base_schema_metadata.get("tables", {}))
+            logger.info(f"Schema pre-hydration successful: {table_count} tables from {base_schema_source}")
+        else:
+            logger.warning(
+                f"Cached schema load failed ({schema_result.get('error') or 'unknown error'}) - attempting live refresh"
+            )
+            # Attempt live refresh
+            live_schema_result = await DatabaseRouter.get_database_schema(
+                database_type=database_type,
+                use_cache=False
+            )
+            if live_schema_result.get("status") == "success":
+                base_schema_metadata = live_schema_result.get("schema") or {}
+                base_schema_source = live_schema_result.get("source")
+                table_count = len(base_schema_metadata.get("tables", {}))
+                logger.info(f"Live schema refresh successful: {table_count} tables")
             else:
-                logger.warning(
-                    " Cached schema load failed (%s) - attempting live refresh",
-                    schema_result.get("error") or "unknown error",
+                logger.error(
+                    f"Live schema refresh failed: {live_schema_result.get('error') or 'unknown error'}"
                 )
-
-            if not base_schema_metadata or not base_schema_metadata.get("tables"):
-                live_schema_result = await SchemaService.get_database_schema(use_cache=False)
-                if live_schema_result.get("status") == "success":
-                    base_schema_metadata = live_schema_result.get("schema") or {}
-                    base_schema_source = live_schema_result.get("source")
-                else:
-                    logger.error(
-                        " Live schema refresh failed: %s",
-                        live_schema_result.get("error") or "unknown error",
-                    )
-        except Exception as schema_err:
-            logger.error(f"Failed to hydrate schema metadata before orchestration: %s", schema_err, exc_info=True)
-    else:
-        # For non-Oracle backends (e.g. Doris) we rely on downstream dynamic schema
-        # discovery nodes instead of preloading the Oracle catalog here.
-        logger.info("Skipping Oracle schema pre-hydration for database_type=%s", database_type)
+    except Exception as schema_err:
+        logger.error(f"Failed to hydrate schema metadata before orchestration: {schema_err}", exc_info=True)
 
     initial_context: Dict[str, Any] = {
         "schema_metadata": base_schema_metadata or {},

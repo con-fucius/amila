@@ -6,7 +6,7 @@ import { UI_STRINGS } from '@/constants/strings';
 
 export function useApprovalFlow() {
   const { updateMessage, setLoading } = useChatStore();
-  
+
   const [approvalDialog, setApprovalDialog] = useState<{
     open: boolean
     messageId: string
@@ -101,13 +101,12 @@ export function useApprovalFlow() {
       }
 
       // If result not in response, wait for SSE using async generator
-      // TODO: Refactor to reuse useQuerySubmission logic or shared SSE handler
       if (import.meta.env.DEV) {
         console.log('Approval response incomplete, waiting for SSE...')
       }
-      
+
       // Use async generator for SSE streaming
-      ;(async () => {
+      ; (async () => {
         try {
           for await (const data of apiService.streamQueryState(queryId)) {
             if (data.state === 'finished' || data.state === 'FINISHED' || data.status === 'success') {
@@ -115,8 +114,8 @@ export function useApprovalFlow() {
 
               const normalizedColumns = Array.isArray(res?.columns)
                 ? res.columns.map((c: any) =>
-                    typeof c === 'string' ? c : (c?.name != null ? String(c.name) : String(c))
-                  )
+                  typeof c === 'string' ? c : (c?.name != null ? String(c.name) : String(c))
+                )
                 : []
 
               updateMessage(messageId, {

@@ -37,9 +37,27 @@ class PostgresSchemaService:
         try:
             schema_info = await postgres_client.get_schema_info(schema_name)
             
+            # Build schema in standardized format matching Oracle/Doris services
+            # Expected format: {"tables": {"TABLE_NAME": [{"name": "COL", "type": "TYPE", ...}, ...]}, "views": {}}
+            standardized_tables = {}
+            for table_name, table_info in schema_info["tables"].items():
+                columns = []
+                for col in table_info.get("columns", []):
+                    columns.append({
+                        "name": col.get("name"),
+                        "type": col.get("type"),
+                        "nullable": col.get("nullable", True),
+                        "requires_quoting": False,
+                    })
+                standardized_tables[table_name.upper()] = columns
+            
             return {
                 "status": "success",
                 "source": "postgres",
+                "schema": {
+                    "tables": standardized_tables,
+                    "views": {}
+                },
                 "schema_data": {
                     "schema": schema_info["schema"],
                     "tables": schema_info["tables"],
@@ -73,9 +91,26 @@ class PostgresSchemaService:
         try:
             schema_info = await postgres_client.get_schema_info(schema_name)
             
+            # Build schema in standardized format matching Oracle/Doris services
+            standardized_tables = {}
+            for table_name, table_info in schema_info["tables"].items():
+                columns = []
+                for col in table_info.get("columns", []):
+                    columns.append({
+                        "name": col.get("name"),
+                        "type": col.get("type"),
+                        "nullable": col.get("nullable", True),
+                        "requires_quoting": False,
+                    })
+                standardized_tables[table_name.upper()] = columns
+            
             return {
                 "status": "success",
                 "source": "postgres",
+                "schema": {
+                    "tables": standardized_tables,
+                    "views": {}
+                },
                 "schema_data": {
                     "schema": schema_info["schema"],
                     "tables": schema_info["tables"],
