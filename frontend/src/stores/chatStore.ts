@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { devtools, persist } from 'zustand/middleware'
+import type { DatabaseType } from '../types/domain'
 
-// Database type for global selection
-export type DatabaseType = 'oracle' | 'doris' | 'postgres'
+export type { DatabaseType }
 
 // Chat message types
 export interface ToolCallSummary {
@@ -29,7 +29,9 @@ export interface ChatMessage {
     result?: any
     status: 'pending' | 'approved' | 'rejected' | 'completed' | 'error'
     error?: string
-    metadata?: Record<string, any>
+    metadata?: Record<string, any> & {
+      error_taxonomy?: string // For error classification
+    }
     summary?: ToolCallSummary
   }
 }
@@ -111,7 +113,7 @@ interface ChatState {
   setPendingApproval: (messageId: string | null) => void
   setCurrentInput: (input: string) => void
   clearMessages: () => void
-  
+
   // Computed selector for messages (eliminates duplication)
   getMessages: () => ChatMessage[]
 }
@@ -129,7 +131,7 @@ export const useChatStore = create<ChatState>()(
         isLoading: false,
         pendingApproval: null,
         currentInput: '',
-        
+
         // Computed selector - always derives from current chat (eliminates duplication)
         getMessages: () => {
           const state = get()
@@ -137,22 +139,27 @@ export const useChatStore = create<ChatState>()(
           return currentChat?.messages || []
         },
 
-        // Database selection with URL sync and cache invalidation
+        // Database selection with URL sync, persistence, and cache invalidation
         setDatabaseType: (type: DatabaseType) => {
           const currentType = get().databaseType
           if (currentType !== type) {
+            // Fix 8: Enhanced Database Selection Persistence
             // Update URL query param for bookmark-friendly state (browser-only)
             if (typeof window !== 'undefined' && window.location) {
               try {
                 const url = new URL(window.location.href)
                 url.searchParams.set('db', type)
                 window.history.replaceState({}, '', url.toString())
+
+                // Also store in sessionStorage for cross-tab consistency
+                sessionStorage.setItem('amila_last_db', type)
               } catch (e) {
                 console.warn('[chatStore] Failed to update URL:', e)
               }
             }
-            
+
             // Clear schema cache in localStorage when switching databases
+            // This ensures schema browser shows correct data for selected database
             if (typeof localStorage !== 'undefined') {
               try {
                 const keysToRemove: string[] = []
@@ -172,6 +179,14 @@ export const useChatStore = create<ChatState>()(
               } catch (e) {
                 console.warn('[chatStore] Failed to clear schema cache:', e)
               }
+            }
+
+            // Trigger storage event for cross-tab synchronization
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new StorageEvent('storage', {
+                key: 'amila-db-change',
+                newValue: type
+              }))
             }
           }
           set({ databaseType: type }, false, 'setDatabaseType')
@@ -243,9 +258,9 @@ export const useChatStore = create<ChatState>()(
           return id
         },
         updateMessage: (id, updates) => set((state) => ({
-          chats: state.chats.map(c => 
-            c.id === state.currentChatId 
-              ? { ...c, messages: c.messages.map(m => m.id === id ? { ...m, ...updates } : m) } 
+          chats: state.chats.map(c =>
+            c.id === state.currentChatId
+              ? { ...c, messages: c.messages.map(m => m.id === id ? { ...m, ...updates } : m) }
               : c
           )
         }), false, 'updateMessage'),
@@ -331,17 +346,28 @@ export const useChatStore = create<ChatState>()(
 
           const current = chats.find((c: any) => c.id === data.state?.currentChatId) || chats[0] || null
 
-          // Check URL for database type override (bookmark-friendly) - SSR safe
+          // Fix 8: Enhanced Database Selection Persistence
+          // Check multiple sources for database type (priority: URL > sessionStorage > persisted > default)
           let databaseType = data.state?.databaseType || 'doris'
+
           if (typeof window !== 'undefined' && window.location) {
             try {
+              // First priority: URL parameter for bookmark sharing
               const urlParams = new URLSearchParams(window.location.search)
               const urlDb = urlParams.get('db')
-              if (urlDb === 'oracle' || urlDb === 'doris') {
-                databaseType = urlDb
+              if (urlDb === 'oracle' || urlDb === 'doris' || urlDb === 'postgres' || urlDb === 'qlik' || urlDb === 'superset') {
+                databaseType = urlDb as DatabaseType
+
+              } else {
+                // Second priority: sessionStorage for cross-tab consistency
+                const sessionDb = sessionStorage.getItem('amila_last_db')
+                if (sessionDb === 'oracle' || sessionDb === 'doris' || sessionDb === 'postgres' || sessionDb === 'qlik' || sessionDb === 'superset') {
+                  databaseType = sessionDb as DatabaseType
+
+                }
               }
             } catch {
-              // Ignore URL parsing errors
+              // Ignore URL/storage parsing errors
             }
           }
 

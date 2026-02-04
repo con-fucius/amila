@@ -129,6 +129,8 @@ async def create_query_orchestrator(checkpointer):
         route_after_validation_with_probe,
         {
             "await_approval": "await_approval",  # Route to approval node
+            "execute": "execute",  # Auto-approved queries
+            "probe_sql": "probe_sql",  # Auto-approved queries needing probe
             "error": "error",
         }
     )

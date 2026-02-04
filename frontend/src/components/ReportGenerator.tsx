@@ -189,7 +189,18 @@ export function ReportGenerator({ queryResults, userQueries, title, className = 
       )}
 
       {/* Preview Dialog */}
-      <Dialog open={showPreview} onOpenChange={setShowPreview}>
+      <Dialog 
+        open={showPreview} 
+        onOpenChange={(open) => {
+          // Fix 10: Report Generator exit cleanup handler
+          if (!open) {
+            // Reset state when dialog closes
+            setPreviewContent('')
+            setError(null)
+          }
+          setShowPreview(open)
+        }}
+      >
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <div className="flex items-center justify-between">
@@ -202,7 +213,12 @@ export function ReportGenerator({ queryResults, userQueries, title, className = 
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setShowPreview(false)}
+                onClick={() => {
+                  setShowPreview(false)
+                  // Cleanup on close
+                  setPreviewContent('')
+                  setError(null)
+                }}
                 className="h-8 w-8 p-0"
               >
                 <X className="h-4 w-4" />

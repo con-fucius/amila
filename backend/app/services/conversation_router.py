@@ -31,6 +31,27 @@ class IntentType(str, Enum):
     UNKNOWN = "unknown"
 
 
+class QueryTaxonomy(str, Enum):
+    """
+    Query taxonomy for classification and routing
+    
+    This taxonomy categorizes data queries to enable:
+    - Optimized SQL generation strategies per category
+    - Resource allocation and prioritization
+    - Query intent understanding for better results
+    """
+    EXPLORATORY = "exploratory"  # Open-ended exploration ("what's in this table?")
+    TARGETED = "targeted"  # Specific data retrieval ("show me customer X")
+    COMPARATIVE = "comparative"  # Comparison queries ("compare A vs B")
+    AGGREGATE = "aggregate"  # Summary statistics ("total sales by region")
+    TREND = "trend"  # Time-series analysis ("monthly revenue trend")
+    ANOMALY = "anomaly"  # Finding outliers ("unusual transactions")
+    RELATIONSHIP = "relationship"  # Joins/relationships ("orders with customer details")
+    EXECUTIVE = "executive"  # High-level KPIs ("dashboard summary")
+    VALIDATION = "validation"  # Data quality checks ("check for duplicates")
+    UNKNOWN = "unknown"
+
+
 class ConversationRouter:
     """
     Routes user inputs to appropriate handlers
@@ -655,12 +676,53 @@ Respond with ONLY the letter (A-J) and confidence (0-100), like: "F 85"
             return intent, confidence, None
     
     @classmethod
+    async def analyze_sentiment(
+        cls,
+        user_input: str,
+        user_id: str,
+        query_id: str = ""
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Analyze user sentiment and detect frustration.
+        
+        Args:
+            user_input: User's message
+            user_id: User identifier
+            query_id: Optional query ID for tracking
+            
+        Returns:
+            Sentiment analysis result or None if analysis failed
+        """
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            
+            # Record the interaction start for adaptive routing (no outcome yet)
+            sentiment_result = await SentimentTracker.record_interaction_start(
+                user_id=user_id,
+                query_text=user_input,
+                query_id=query_id
+            )
+            
+            return {
+                "is_frustrated": sentiment_result.is_frustrated,
+                "frustration_level": sentiment_result.frustration_level,
+                "recommended_action": sentiment_result.recommended_action,
+                "should_escalate": sentiment_result.should_escalate,
+                "indicators": sentiment_result.indicators
+            }
+        except Exception as e:
+            logger.debug(f"Sentiment analysis failed (non-fatal): {e}")
+            return None
+    
+    @classmethod
     async def route_with_context(
         cls,
         user_input: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         schema_context: Optional[Dict[str, Any]] = None,
-        use_llm: bool = True
+        use_llm: bool = True,
+        user_id: str = "anonymous",
+        query_id: str = ""
     ) -> Dict[str, Any]:
         """
         Enhanced routing with LLM classification and context awareness
@@ -670,6 +732,7 @@ Respond with ONLY the letter (A-J) and confidence (0-100), like: "F 85"
             conversation_history: Previous messages for context
             schema_context: Available schema info
             use_llm: Whether to use LLM for classification
+            user_id: User identifier for sentiment tracking
             
         Returns:
             Dict with routing decision, response, and suggestions
@@ -681,7 +744,29 @@ Respond with ONLY the letter (A-J) and confidence (0-100), like: "F 85"
             "requires_sql": False,
             "response": None,
             "suggestion": None,
+            "sentiment": None,
         }
+        
+        # Analyze sentiment before routing
+        sentiment = await cls.analyze_sentiment(user_input, user_id, query_id=query_id)
+        if sentiment:
+            result["sentiment"] = sentiment
+            
+            # Log frustration detection
+            if sentiment.get("is_frustrated"):
+                logger.warning(
+                    f"Frustration detected for user {user_id}: "
+                    f"level={sentiment['frustration_level']:.2f}, "
+                    f"action={sentiment['recommended_action']}"
+                )
+                
+                # Adjust response based on frustration
+                if sentiment.get("should_escalate"):
+                    result["escalation_recommended"] = True
+                    result["escalation_reason"] = "User frustration detected"
+            
+            # Include adaptive response recommendation
+            result["adaptive_response"] = sentiment.get("recommended_action")
         
         # Try LLM classification first if enabled
         if use_llm:

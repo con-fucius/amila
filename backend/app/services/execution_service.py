@@ -13,6 +13,13 @@ from app.core.langfuse_client import (
 )
 from app.core.audit import audit_query_execution
 from app.core.resilience import circuit_breaker_context, CircuitBreakerConfig, CircuitBreakerOpenError
+from app.core.redis_client import redis_client
+from app.services.query_results_store import (
+    compute_query_hash,
+    register_query_result_ref,
+    store_query_result,
+)
+from app.core.sql_utils import normalize_sql
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,33 @@ class ExecutionService:
             except Exception:
                 pass
 
+        # Query result caching (direct SQL path)
+        cache_enabled = trace_metadata.get("enable_query_cache", True)
+        database_type = trace_metadata.get("database", "unknown")
+        if cache_enabled and redis_client.is_available():
+            try:
+                query_hash = compute_query_hash(query_text, database_type)
+                cached = await redis_client.get_cached_query_result(query_hash)
+                if cached:
+                    await register_query_result_ref(
+                        query_id=query_id,
+                        sql_query=query_text,
+                        database_type=database_type,
+                    )
+                    cached.setdefault("cache_status", "cached")
+                    record_trace("success", result_dict={"results": cached})
+                    return {
+                        "status": "success",
+                        "results": cached,
+                        "query_id": query_id,
+                        "trace_id": trace_identifier,
+                        "cache_status": "cached",
+                        "database_type": database_type,
+                    }
+            except Exception:
+                # Cache should never block execution
+                pass
+
         # Circuit Breaker Configuration
         cb_config = CircuitBreakerConfig(
             name=circuit_breaker_name,
@@ -134,6 +168,21 @@ class ExecutionService:
 
                         logger.info(f"Query executed successfully ({circuit_breaker_name})")
                         record_trace("success", result_dict=result)
+
+                        # Cache results for reuse (best effort)
+                        if cache_enabled and redis_client.is_available():
+                            try:
+                                results_block = result.get("results") if isinstance(result, dict) else None
+                                if isinstance(results_block, dict):
+                                    await store_query_result(
+                                        query_id=query_id,
+                                        sql_query=query_text,
+                                        database_type=database_type,
+                                        result=results_block,
+                                    )
+                                    result["cache_status"] = "fresh"
+                            except Exception:
+                                pass
 
                         # Audit successful execution
                         # We use trace_metadata to get user context if available

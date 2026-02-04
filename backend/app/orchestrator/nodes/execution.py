@@ -4,7 +4,6 @@ Orchestrator Node: Execution
 
 import logging
 import time
-import hashlib
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -24,7 +23,13 @@ from app.orchestrator.utils import (
 from app.core.config import settings
 from app.core.client_registry import registry
 from app.core.redis_client import redis_client
+from app.services.query_results_store import (
+    compute_query_hash,
+    register_query_result_ref,
+    store_query_result,
+)
 from app.core.error_normalizer import normalize_database_error
+from app.services.data_quality_service import DataQualityService
 
 # SSE state management
 try:
@@ -135,26 +140,44 @@ async def _execute_query_node_inner(state: QueryState, span: dict) -> QueryState
         })
 
     db_type = state.get("database_type", "oracle")
+    query_id = state.get("query_id")
 
     # Check cache first (normalize SQL before hashing)
-    try:
-        from app.core.sql_utils import normalize_sql
-        norm_sql = normalize_sql(state["sql_query"])
-    except Exception:
-        norm_sql = state["sql_query"]
-
     # Include database_type in cache key to avoid cross-database collisions
-    query_hash_input = f"{db_type}:{norm_sql}"
-    query_hash = hashlib.sha256(query_hash_input.encode()).hexdigest()
+    query_hash = compute_query_hash(state["sql_query"], db_type)
     span["output"]["sql_hash"] = query_hash
     cached_result = await redis_client.get_cached_query_result(query_hash)
 
     if cached_result:
         logger.info(f"Query result retrieved from cache")
+        try:
+            if isinstance(cached_result, dict) and cached_result.get("data_quality") is None:
+                cached_result["data_quality"] = DataQualityService.profile_results(
+                    columns=cached_result.get("columns", []) or [],
+                    rows=cached_result.get("rows", []) or [],
+                    row_count=cached_result.get("row_count", len(cached_result.get("rows", []) or [])),
+                )
+                try:
+                    await store_query_result(
+                        query_id=query_id,
+                        sql_query=state["sql_query"],
+                        database_type=db_type,
+                        result=cached_result,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
         span["output"].update({
             "cache_hit": True,
             "row_count": cached_result.get("row_count", 0),
         })
+        await register_query_result_ref(
+            query_id=query_id,
+            sql_query=state["sql_query"],
+            database_type=db_type,
+        )
+        state["execution_cache_status"] = "cached"
         state["execution_result"] = cached_result
         state["next_action"] = "format_results"
         return state
@@ -168,9 +191,55 @@ async def _execute_query_node_inner(state: QueryState, span: dict) -> QueryState
         connection_name = settings.oracle_default_connection if db_type == "oracle" else None
         span["output"]["connection"] = connection_name
         span["output"]["database_type"] = db_type
-
-        logger.info(f"ORCHESTRATOR EXECUTION DEBUG:")
-        logger.info(f"  SQL Query: {state['sql_query'][:300]}...")
+        
+        # CRITICAL: Database-specific SQL normalization - FINAL safety net before execution
+        # This ensures SQL is compatible with the target database
+        if db_type in ["postgres", "postgresql"]:
+            # PostgreSQL: Convert uppercase identifiers to lowercase (PostgreSQL is case-insensitive but treats unquoted as lowercase)
+            import re
+            original_sql = state['sql_query']
+            
+            # Pattern 1: Table names after FROM, JOIN, INTO, UPDATE
+            normalized_sql = re.sub(
+                r'\b(FROM|JOIN|INTO|UPDATE)\s+([A-Z_][A-Z0-9_]*)\b',
+                lambda m: f"{m.group(1)} {m.group(2).lower()}",
+                original_sql,
+                flags=re.IGNORECASE
+            )
+            
+            # Pattern 2: Ensure LIMIT syntax (not FETCH FIRST)
+            normalized_sql = re.sub(
+                r'FETCH\s+FIRST\s+(\d+)\s+ROWS?\s+ONLY',
+                r'LIMIT \1',
+                normalized_sql,
+                flags=re.IGNORECASE
+            )
+            
+            if normalized_sql != original_sql:
+                logger.info(f"PostgreSQL normalization applied at execution")
+                logger.info(f"  Before: {original_sql[:100]}...")
+                logger.info(f"  After:  {normalized_sql[:100]}...")
+                state['sql_query'] = normalized_sql
+        
+        elif db_type == "doris":
+            # Doris: Ensure LIMIT syntax (MySQL-compatible)
+            import re
+            original_sql = state['sql_query']
+            
+            normalized_sql = re.sub(
+                r'FETCH\s+FIRST\s+(\d+)\s+ROWS?\s+ONLY',
+                r'LIMIT \1',
+                original_sql,
+                flags=re.IGNORECASE
+            )
+            
+            if normalized_sql != original_sql:
+                logger.info(f"Doris normalization applied at execution")
+                state['sql_query'] = normalized_sql
+        
+        # Oracle: No normalization needed - uppercase is standard
+        
+        logger.info(f"SQL Query: {state['sql_query'][:300]}...")
         logger.info(f"  Database type: {db_type}")
         logger.info(f"  Connection: {connection_name or 'n/a'}")
         logger.info(f"  User: {state.get('user_id', 'unknown')}")
@@ -190,10 +259,6 @@ async def _execute_query_node_inner(state: QueryState, span: dict) -> QueryState
         logger.debug(
             f"Raw execution result keys: {list(mcp_result.keys()) if isinstance(mcp_result, dict) else type(mcp_result)}"
         )
-        logger.debug(
-            f"Execution result type: {type(mcp_result)}, status: {mcp_result.get('status') if isinstance(mcp_result, dict) else 'N/A'}"
-        )
-
         if mcp_result.get("status") == "success":
             mcp_results = mcp_result.get("results", {})
             row_count = mcp_results.get("row_count", 0)
@@ -216,53 +281,147 @@ async def _execute_query_node_inner(state: QueryState, span: dict) -> QueryState
                 "execution_time_ms": mcp_results.get("execution_time_ms", 0),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-
-            await redis_client.cache_query_result(
-                query_hash,
-                result,
-                result_size=result["row_count"]
-            )
-
-            state["execution_result"] = result
-            state["next_action"] = "format_results"
-
-            if METRICS_AVAILABLE:
-                db_duration = time.time() - db_exec_start
-                record_db_execution(db_duration, "success")
-                record_query_result(result['row_count'], state.get('user_id', 'unknown'))
-
-            span["output"].update({
-                "status": "success",
-                "cache_hit": False,
-                "row_count": row_count,
-                "column_count": len(columns),
-                "execution_time_ms": result["execution_time_ms"],
-                "db_duration_ms": round((time.time() - db_exec_start) * 1000, 2),
-            })
-
-            logger.info(
-                " Query executed successfully: %d rows in %sms",
-                result['row_count'],
-                result['execution_time_ms'],
-            )
             
-            # Add thinking step
-            if "llm_metadata" not in state or not isinstance(state["llm_metadata"], dict):
-                state["llm_metadata"] = {}
-            if "thinking_steps" not in state["llm_metadata"]:
-                state["llm_metadata"]["thinking_steps"] = []
-            state["llm_metadata"]["thinking_steps"].append({
-                "content": f"Executed query successfully: {result['row_count']} rows returned in {result['execution_time_ms']}ms",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "stage": "execute"
-            })
+            # Check if sandbox should be used for this query
+            use_sandbox = False
+            sandbox_result = None
+            try:
+                from app.services.query_sandbox import QuerySandbox
+                
+                user_role = state.get("user_role", "viewer")
+                query_risk_score = state.get("validation_result", {}).get("risk_score", 0)
+                
+                use_sandbox = QuerySandbox.should_use_sandbox(
+                    user_role=user_role,
+                    query_risk_score=query_risk_score,
+                    is_new_user=False  # Could be determined from user history
+                )
+                
+                if use_sandbox:
+                    logger.info(f"Using query sandbox for {user_role} role")
+                    sandbox_result = await QuerySandbox.execute_sandboxed(
+                        sql=state["sql_query"],
+                        connection_name=connection_name,
+                        database_type=db_type,
+                        row_limit=QuerySandbox.DEFAULT_ROW_LIMIT,
+                        timeout_ms=QuerySandbox.DEFAULT_TIMEOUT_MS
+                    )
+                    
+                    if sandbox_result.success:
+                        # Use sandbox result
+                        result = {
+                            "status": "success",
+                            "columns": sandbox_result.columns,
+                            "rows": sandbox_result.rows,
+                            "row_count": sandbox_result.row_count,
+                            "execution_time_ms": sandbox_result.execution_time_ms,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sandboxed": True,
+                            "truncated": sandbox_result.truncated
+                        }
+                        span["output"]["sandbox"] = {
+                            "applied": True,
+                            "truncated": sandbox_result.truncated,
+                            "row_limit": QuerySandbox.DEFAULT_ROW_LIMIT
+                        }
+                    else:
+                        # Sandbox execution failed
+                        logger.error(f"Sandbox execution failed: {sandbox_result.error}")
+                        span["output"]["sandbox_error"] = sandbox_result.error
+                        # Fall through to normal execution
+                        use_sandbox = False
+                        
+            except Exception as e:
+                logger.warning(f"Sandbox check failed (non-fatal): {e}")
+                span["output"]["sandbox_error"] = str(e)
             
-            # Mark node as completed
-            await update_node_history(state, "execute", "completed", thinking_steps=[
-                {"id": "step-1", "content": f"Query executed: {result['row_count']} rows in {result['execution_time_ms']}ms", "status": "completed", "timestamp": datetime.now(timezone.utc).isoformat()}
-            ])
-            
-            return state
+            # Apply data masking based on user role
+            if not use_sandbox or sandbox_result is None:
+                try:
+                    from app.services.data_masking_service import DataMaskingService
+                    
+                    user_role = state.get("user_role", "viewer")
+                    masked_result = DataMaskingService.mask_query_result(
+                        result=result,
+                        user_role=user_role
+                    )
+                    
+                    # Log masking summary
+                    if masked_result.get("masked"):
+                        masked_cols = masked_result.get("masked_columns", [])
+                        if masked_cols:
+                            logger.info(f"Applied data masking for {user_role} role. Masked columns: {masked_cols}")
+                        span["output"]["data_masking"] = {
+                            "applied": True,
+                            "role": user_role,
+                            "masked_columns": masked_cols
+                        }
+                    
+                    result = masked_result
+                except Exception as e:
+                    logger.warning(f"Data masking failed (non-fatal): {e}")
+                    span["output"]["data_masking_error"] = str(e)
+
+                try:
+                    if isinstance(result, dict):
+                        result["data_quality"] = DataQualityService.profile_results(
+                            columns=result.get("columns", []) or [],
+                            rows=result.get("rows", []) or [],
+                            row_count=result.get("row_count", len(result.get("rows", []) or [])),
+                        )
+                except Exception:
+                    pass
+
+                await store_query_result(
+                    query_id=query_id,
+                    sql_query=state["sql_query"],
+                    database_type=db_type,
+                    result=result,
+                )
+                state["execution_cache_status"] = "fresh"
+
+                state["execution_result"] = result
+                state["next_action"] = "format_results"
+
+                if METRICS_AVAILABLE:
+                    db_duration = time.time() - db_exec_start
+                    record_db_execution(db_duration, "success")
+                    record_query_result(result['row_count'], state.get('user_id', 'unknown'))
+
+                span["output"].update({
+                    "status": "success",
+                    "cache_hit": False,
+                    "row_count": row_count,
+                    "column_count": len(columns),
+                    "execution_time_ms": result["execution_time_ms"],
+                    "db_duration_ms": round((time.time() - db_exec_start) * 1000, 2),
+                })
+
+                logger.info(
+                    " Query executed successfully: %d rows in %sms",
+                    result['row_count'],
+                    result['execution_time_ms'],
+                )
+                
+                # Add thinking step
+                if "llm_metadata" not in state or not isinstance(state["llm_metadata"], dict):
+                    state["llm_metadata"] = {}
+                if "thinking_steps" not in state["llm_metadata"]:
+                    state["llm_metadata"]["thinking_steps"] = []
+                state["llm_metadata"]["thinking_steps"].append({
+                    "content": f"Executed query successfully: {result['row_count']} rows returned in {result['execution_time_ms']}ms",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "stage": "execute"
+                })
+                
+                # Mark node as completed
+                await update_node_history(state, "execute", "completed", thinking_steps=[
+                    {"id": "step-1", "content": f"Query executed: {result['row_count']} rows in {result['execution_time_ms']}ms", "status": "completed", "timestamp": datetime.now(timezone.utc).isoformat()}
+                ])
+                
+                return state
+
+
 
         # Failure path - use error normalizer for consistent error handling across databases
         logger.debug(f"Full MCP error result: {mcp_result}")

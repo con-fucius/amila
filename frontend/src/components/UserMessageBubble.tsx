@@ -1,5 +1,4 @@
 import { Card, CardContent } from './ui/card'
-import { cn } from '@/utils/cn'
 import type { ChatMessage } from '@/stores/chatStore'
 
 interface UserMessageBubbleProps {

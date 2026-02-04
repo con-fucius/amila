@@ -27,6 +27,9 @@ from app.core.langfuse_client import (
     update_trace,
 )
 from .models import QueryRequest, QueryResponse
+from app.services.query_results_store import build_transport_payload, store_query_result
+from app.services.data_quality_service import DataQualityService
+from app.services.query_state_manager import get_query_state_manager, QueryState as ExecState
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -152,6 +155,25 @@ async def submit_query(
         
         # Execute with timeout enforcement
         query_id = f"direct_sql_{uuid.uuid4().hex[:12]}"
+
+        # Register with QueryStateManager (enables webhook terminal events + SSE subscription)
+        try:
+            state_manager = await get_query_state_manager()
+            await state_manager.register_query(
+                query_id=query_id,
+                user_id=user["username"],
+                username=user["username"],
+                session_id=None,
+                database_type=(request.database_type or "oracle").lower(),
+                trace_id=None,
+            )
+            await state_manager.update_state(
+                query_id,
+                ExecState.RECEIVED,
+                {"user_id": user["username"], "database_type": (request.database_type or "oracle").lower()},
+            )
+        except Exception:
+            pass
         langfuse_client = get_langfuse_client()
         trace_metadata = {
             "entrypoint": "direct_sql_submit",
@@ -241,19 +263,87 @@ async def submit_query(
                 status_code=504,
                 detail="Query execution timeout - Consider optimizing query"
             )
+
+        # Mark as executing (best-effort)
+        try:
+            state_manager = await get_query_state_manager()
+            await state_manager.update_state(
+                query_id,
+                ExecState.EXECUTING,
+                {"user_id": user["username"], "database_type": (request.database_type or "oracle").lower()},
+            )
+        except Exception:
+            pass
         
         execution_time = int((time.time() - start_time) * 1000)
         
         if execution_result.get("status") == "success":
-            row_count = execution_result.get("results", {}).get("row_count", 0)
+            results_block = execution_result.get("results")
+            if not isinstance(results_block, dict):
+                # Normalize top-level result structure (e.g., PostgreSQL client)
+                results_block = {
+                    "columns": execution_result.get("columns", []),
+                    "rows": execution_result.get("rows", []),
+                    "row_count": execution_result.get("row_count", len(execution_result.get("rows", []) or [])),
+                    "execution_time_ms": execution_result.get("execution_time_ms", 0),
+                    "timestamp": execution_result.get("timestamp", timestamp),
+                    "status": execution_result.get("status", "success"),
+                }
+            try:
+                if isinstance(results_block, dict) and results_block.get("data_quality") is None:
+                    results_block["data_quality"] = DataQualityService.profile_results(
+                        columns=results_block.get("columns", []) or [],
+                        rows=results_block.get("rows", []) or [],
+                        row_count=results_block.get("row_count", len(results_block.get("rows", []) or [])),
+                    )
+            except Exception:
+                pass
+            row_count = results_block.get("row_count", 0)
             logger.info(f"Query executed successfully: {row_count} rows in {execution_time}ms")
+
+            # Cache results for retrieval and paging
+            try:
+                await store_query_result(
+                    query_id=query_id,
+                    sql_query=request.query.strip(),
+                    database_type=(request.database_type or "oracle").lower(),
+                    result=results_block,
+                )
+            except Exception:
+                pass
+
+            trimmed_result, result_ref, results_truncated = build_transport_payload(
+                query_id=query_id,
+                result=results_block,
+                cache_status=execution_result.get("cache_status"),
+            )
+
+            # Emit terminal state for SSE + webhook notifications
+            try:
+                state_manager = await get_query_state_manager()
+                await state_manager.update_state(
+                    query_id,
+                    ExecState.FINISHED,
+                    {
+                        "user_id": user["username"],
+                        "database_type": (request.database_type or "oracle").lower(),
+                        "sql": execution_result.get("sql", request.query),
+                        "result": trimmed_result,
+                        "result_ref": result_ref,
+                        "results_truncated": results_truncated,
+                    },
+                )
+            except Exception:
+                pass
             
             response = QueryResponse(
-                query_id=execution_result.get("query_id", f"query_{hash(request.query) % 10000}"),
+                query_id=query_id,
                 status="success",
                 message="Query executed successfully",
                 sql=execution_result.get("sql", request.query),
-                results=execution_result.get("results"),
+                results=trimmed_result,
+                result_ref=result_ref,
+                results_truncated=results_truncated,
                 execution_time_ms=execution_time,
                 timestamp=timestamp
             )
@@ -285,6 +375,22 @@ async def submit_query(
                 or "Query execution failed"
             )
             logger.error("Query execution failed: %s", error_message)
+
+            # Emit terminal error state for SSE + webhook notifications
+            try:
+                state_manager = await get_query_state_manager()
+                await state_manager.update_state(
+                    query_id,
+                    ExecState.ERROR,
+                    {
+                        "user_id": user["username"],
+                        "database_type": (request.database_type or "oracle").lower(),
+                        "sql": execution_result.get("sql", request.query),
+                        "error": error_message,
+                    },
+                )
+            except Exception:
+                pass
             
             if langfuse_client:
                 try:

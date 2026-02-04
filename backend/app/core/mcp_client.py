@@ -141,62 +141,42 @@ class SQLclMCPClient:
         self._response_buffer = ""
         
     async def initialize(self) -> bool:
-        """
-        Initialize the SQLcl MCP server subprocess
-        
-        Returns:
-            True if initialization successful, False otherwise
-        """
+        """Initialize the SQLcl MCP server subprocess"""
         try:
-            logger.info(f"Starting SQLcl MCP server: {self.sqlcl_path} {' '.join(self.sqlcl_args)}")
+            logger.info(f"Starting SQLcl MCP: {self.sqlcl_path}")
             
-            # Start SQLcl subprocess with MCP flag
             self.process = subprocess.Popen(
                 [self.sqlcl_path] + self.sqlcl_args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Combine stderr with stdout
+                stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1  # Line buffered
+                bufsize=1
             )
             
-            # Skip startup banner (exactly 4 lines) - synchronously like robust_mcp_test.py
-            logger.info(f"Skipping SQLcl startup banner...")
+            # Skip startup banner (4 lines)
             for i in range(4):
-                banner_line = self.process.stdout.readline()
-                logger.debug(f"Banner line {i+1}: {banner_line.strip()}")
+                self.process.stdout.readline()
             
-            logger.info(f"Startup banner skipped, ready for JSON-RPC")
-            
-            # Start reader thread for stdout (synchronous reading in background thread)
+            # Start reader thread
             self._running = True
             self.reader_thread = threading.Thread(target=self._read_output_sync, daemon=True)
             self.reader_thread.start()
-            
-            # Start async task to process responses from queue
             asyncio.create_task(self._process_responses())
-            
-            # Small delay to let reader thread start
             await asyncio.sleep(0.5)
             
-            # Send initialization request
+            # Initialize
             response = await self._send_request(MCPRequest(
                 method="initialize",
                 params={
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {
-                        "name": "bi-agent-mvp",
-                        "version": "1.0.0"
-                    }
+                    "clientInfo": {"name": "bi-agent-mvp", "version": "1.0.0"}
                 }
             ))
             
             if response and not response.is_error():
-                logger.info(f"Initialize successful: {response.result.get('serverInfo', {}).get('name')}")
-                
-                # Send required notifications/initialized message
-                logger.info(f"Sending notifications/initialized...")
+                # Send notifications/initialized
                 def send_notification():
                     notification_json = json.dumps({
                         "jsonrpc": "2.0",
@@ -207,30 +187,27 @@ class SQLclMCPClient:
                     self.process.stdin.flush()
                 
                 await asyncio.get_event_loop().run_in_executor(None, send_notification)
-                await asyncio.sleep(0.5)  # Small delay after notification
+                await asyncio.sleep(0.5)
                 
-                # Test connection by listing available tools
-                tools_response = await self._send_request(MCPRequest(
-                    method="tools/list",
-                    params={}
-                ))
+                # List tools
+                tools_response = await self._send_request(MCPRequest(method="tools/list", params={}))
                 
                 if tools_response and not tools_response.is_error():
                     tools = tools_response.result.get('tools', [])
-                    logger.info(f"SQLcl MCP server initialized successfully with {len(tools)} tools")
+                    logger.info(f"SQLcl MCP ready: {len(tools)} tools")
                     self._connected = True
                     return True
                 else:
-                    logger.error(f"Failed to list tools: {tools_response.error if tools_response else 'No response'}")
+                    logger.error(f"Tools list failed: {tools_response.error if tools_response else 'No response'}")
                     await self.close()
                     return False
             else:
-                logger.error(f"Failed to initialize: {response.error if response else 'No response'}")
+                logger.error(f"Init failed: {response.error if response else 'No response'}")
                 await self.close()
                 return False
                 
         except Exception as e:
-            logger.error(f"Failed to start SQLcl MCP server: {e}", exc_info=True)
+            logger.error(f"SQLcl MCP start failed: {e}")
             await self.close()
             return False
     
@@ -718,7 +695,6 @@ AND status = 'ACTIVE'
                 # Parse SQL results
                 return self._parse_sql_results(response.result, sql)
             else:
-                # DEBUG: Log full response for error diagnosis
                 logger.error(f"MCP Error Response: {json.dumps({'response': str(response), 'error': response.error if response else None}, indent=2)}")
                 error_msg = response.error.get("message", "Unknown error") if response and response.error else "No response"
                 return {
@@ -907,20 +883,10 @@ AND status = 'ACTIVE'
                         
                         # Handle both \r\n (Windows) and \n (Unix) line endings
                         lines = text_payload.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-                        # Detailed CSV diagnostics are DEBUG-only to avoid noisy console logs
-                        logger.debug(
-                            "CSV PARSING DEBUG: Total lines after normalization: %d",
-                            len(lines),
-                        )
-                        logger.debug(
-                            "CSV PARSING DEBUG: First 10 lines: %s", lines[:10]
-                        )
+                        
                         if lines:
                             # Detect delimiter (pipe preferred if present)
                             delimiter = '|' if '|' in lines[0] else ','
-                            logger.debug(
-                                "CSV PARSING DEBUG: Detected delimiter: '%s'", delimiter
-                            )
                             
                             # Use Python's csv module for proper parsing of quoted fields
                             csv_text = '\n'.join(lines)
@@ -934,7 +900,6 @@ AND status = 'ACTIVE'
                                 if idx == 0:
                                     # First row is headers
                                     headers = [h.strip() for h in row]
-                                    logger.debug("CSV PARSING DEBUG: Headers: %s", headers)
                                     continue
                                 
                                 if not row or not any(cell.strip() for cell in row):
@@ -957,18 +922,13 @@ AND status = 'ACTIVE'
                                 
                                 if len(cleaned_row) == len(headers):
                                     rows.append(cleaned_row)
-                                    logger.debug(
-                                        "CSV PARSING DEBUG: Added row %d with %d columns",
-                                        idx,
-                                        len(cleaned_row),
-                                    )
                                 else:
                                     # Log mismatched row for debugging
                                     skipped_lines.append(
                                         f"Line {idx}: column mismatch ({len(cleaned_row)} vs {len(headers)}): {cleaned_row[:3]}"
                                     )
                                     logger.warning(
-                                        "CSV PARSING DEBUG: Skipping row %d with %d columns (expected %d): %s",
+                                        "Skipping row %d with %d columns (expected %d): %s",
                                         idx,
                                         len(cleaned_row),
                                         len(headers),
@@ -977,11 +937,6 @@ AND status = 'ACTIVE'
                             
                             logger.debug(
                                 "CSV PARSING DEBUG: Total rows parsed: %d", len(rows)
-                            )
-                            logger.debug(
-                                "CSV PARSING DEBUG: Skipped %d lines: %s",
-                                len(skipped_lines),
-                                skipped_lines[:10],
                             )
                             # Concise summary at INFO level for quick inspection
                             logger.info(

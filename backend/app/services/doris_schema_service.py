@@ -74,8 +74,19 @@ class DorisSchemaService:
                 }
             
             # Use MCP tool to get table schema
+            # CRITICAL FIX: Handle both tool name variations and improve error handling
+            tool_name = getattr(doris_client, "get_table_schema_tool", None) or "get_table_schema"
+            if hasattr(doris_client, "list_tools"):
+                available_tools = await doris_client.list_tools()
+                # Find the correct tool name from available tools
+                for tool in available_tools:
+                    tool_name_str = tool.get("name", "") if isinstance(tool, dict) else str(tool)
+                    if "schema" in tool_name_str.lower() and "table" in tool_name_str.lower():
+                        tool_name = tool_name_str
+                        break
+            
             tool_result = await doris_client.call_tool(
-                getattr(doris_client, "get_table_schema_tool", "get_table_schema"),
+                tool_name,
                 {"table_name": table_name},
             )
             
@@ -116,7 +127,8 @@ class DorisSchemaService:
                 return {
                     "status": "error",
                     "error": f"Table '{table_name}' not found or has no columns",
-                    "schema": {"tables": {}, "views": {}}
+                    "schema": {"tables": {}, "views": {}},
+                    "hint": "Verify table name spelling and check Doris database connection"
                 }
             
             # Build schema structure
@@ -173,17 +185,20 @@ class DorisSchemaService:
         # Common patterns for table mentions (case-insensitive)
         patterns = [
             r'from\s+[`"]?(\w+)[`"]?',  # FROM clause
+            r'table\s+[`"]?([A-Z][A-Z0-9_]+)[`"]?',  # TABLE keyword followed by uppercase name
             r'in\s+[`"]?(\w+)[`"]?\s+table',  # IN table
-            r'table\s+[`"]?(\w+)[`"]?',  # TABLE keyword
-            r'[`"]?(\w+)[`"]?\s+table',  # table name before "table"
-            r'of\s+[`"]?(\w+)[`"]?',  # "rows of TABLE_NAME"
-            r'rows\s+of\s+[`"]?(\w+)[`"]?',  # "rows of TABLE_NAME"
+            r'of\s+[`"]?([A-Z][A-Z0-9_]+)[`"]?',  # "rows of TABLE_NAME"
+            r'rows\s+of\s+[`"]?([A-Z][A-Z0-9_]+)[`"]?',  # "rows of TABLE_NAME"
         ]
         
         for pattern in patterns:
             match = re.search(pattern, combined_text, re.IGNORECASE)
             if match:
-                return match.group(1).upper()
+                table_candidate = match.group(1).upper()
+                # Filter out common non-table words
+                non_tables = {'THE', 'AND', 'FOR', 'FROM', 'WITH', 'SHOW', 'SELECT', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'TABLE'}
+                if table_candidate not in non_tables and len(table_candidate) > 3:
+                    return table_candidate
         
         # Look for UPPER_CASE or CamelCase words that look like table names
         # Match words with underscores (TABLE_NAME) or all caps (TABLENAME)
@@ -191,7 +206,7 @@ class DorisSchemaService:
         matches = re.findall(table_pattern, combined_text)
         if matches:
             # Filter out common non-table words
-            non_tables = {'THE', 'AND', 'FOR', 'FROM', 'WITH', 'SHOW', 'SELECT', 'WHERE', 'ORDER', 'GROUP', 'LIMIT'}
+            non_tables = {'THE', 'AND', 'FOR', 'FROM', 'WITH', 'SHOW', 'SELECT', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'TABLE'}
             for match in matches:
                 if match not in non_tables and len(match) > 3:
                     return match.upper()

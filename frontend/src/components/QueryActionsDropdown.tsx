@@ -1,5 +1,5 @@
-import { ChevronDown, BarChart2, Table, Pin, FileText, Download, Copy, Check, Eye } from 'lucide-react'
-import { cn } from '@/utils/cn'
+import { ChevronDown, BarChart2, Table, Pin, FileText, Download, Copy, Check, Eye, LayoutDashboard } from 'lucide-react'
+
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -23,6 +23,7 @@ interface QueryActionsDropdownProps {
     onCopyCSV: () => void
     onToggleReasoning?: () => void
     isReasoningOpen?: boolean
+    onSaveDashboard?: () => void
     disabled?: boolean
 }
 
@@ -36,6 +37,7 @@ export function QueryActionsDropdown({
     onCopyCSV,
     onToggleReasoning,
     isReasoningOpen,
+    onSaveDashboard,
     disabled
 }: QueryActionsDropdownProps) {
     const [copied, setCopied] = useState(false)
@@ -110,6 +112,16 @@ export function QueryActionsDropdown({
                         <DropdownMenuItem onClick={() => onGenerateReport('docx')} className="cursor-pointer">Word Document</DropdownMenuItem>
                     </DropdownMenuSubContent>
                 </DropdownMenuSub>
+
+                {onSaveDashboard && (
+                    <>
+                        <DropdownMenuSeparator className="bg-gray-100 dark:bg-slate-800" />
+                        <DropdownMenuItem onClick={onSaveDashboard} className="gap-2 py-2.5 cursor-pointer text-xs">
+                            <LayoutDashboard className="h-4 w-4 text-gray-500" />
+                            <span>Save as Dashboard</span>
+                        </DropdownMenuItem>
+                    </>
+                )}
 
                 <DropdownMenuSeparator className="bg-gray-100 dark:bg-slate-800" />
 

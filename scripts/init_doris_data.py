@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 Doris Database Initialization Script
-Populates CUSTOMER_DATA table with 10,000 realistic records for BI Agent testing.
+Creates and populates test tables for BI Agent testing.
+
+Tables:
+    - TEST_INFORMAT_CALL_DETLS (50,000 rows)
+    - TEST_AGG_EBU_IFRS_DAY (50,000 rows)
+    - TEST_ALLOT_DATA_HOUR (50,000 rows)
 
 Usage:
     python scripts/init_doris_data.py
@@ -37,129 +42,191 @@ DORIS_PASSWORD = os.getenv("DORIS_DB_PASSWORD", "")
 DORIS_DATABASE = os.getenv("DORIS_DB_DATABASE", "demo")
 
 # Data generation constants
-PRODUCTS = [
-    ("ICT_SOLUTIONS", ["Cybersecurity Audit", "Managed IT Services", "Cloud Migration", "Data Analytics Platform", "Network Infrastructure"]),
-    ("FINANCIAL_SERVICES", ["Payment Gateway", "Invoice Financing", "Trade Finance", "Cash Management", "FX Solutions"]),
-    ("TELECOM", ["Enterprise Voice", "Data Connectivity", "IoT Platform", "Unified Communications", "Mobile Solutions"]),
-    ("CLOUD_SERVICES", ["IaaS", "PaaS", "SaaS Integration", "Disaster Recovery", "Hybrid Cloud"]),
-    ("CONSULTING", ["Digital Transformation", "Process Optimization", "Strategy Advisory", "Change Management", "Training Services"]),
-]
+TOTAL_ROWS = 50000
+BATCH_SIZE = 100
+DATE_START = datetime(2024, 1, 1)
+DATE_END = datetime(2025, 12, 31)
+DATE_RANGE_DAYS = (DATE_END - DATE_START).days
 
-SEGMENTS = ["STARTUP", "SME", "LARGE ENTERPRISE", "CORPORATE", "GOVERNMENT"]
+CALLER_PURPOSES = ["Inquiry", "Complaint", "Activation", "Billing", "Support", "Retention"]
+GV_EXIT_CODES = ["0", "1", "2", "3", "4"]
+TECH_RESULTS = ["SUCCESS", "FAILED", "TIMEOUT", "BUSY", "TRANSFERRED"]
+RESULT_REASONS = ["User Hangup", "Network Error", "Agent Transfer", "Completed", "System Error"]
+RESOURCE_ROLES = ["AGENT", "IVR", "QUEUE", "SUPERVISOR", "BOT"]
+PLACE_NAMES = ["Main Office", "Branch", "Call Center", "Remote", "HQ"]
+LANGUAGES = ["EN", "AR", "FR", "ES"]
+SUBSCRIBER_TYPES = ["PREPAID", "POSTPAID", "BUSINESS"]
+VB_THRESHOLDS = ["LOW", "MEDIUM", "HIGH"]
+VB_VERIFIED_VALUES = ["Y", "N"]
+SWITCH_NAMES = ["SWITCH_A", "SWITCH_B", "SWITCH_C", "SWITCH_D"]
+MEDIA_NAMES = ["VOICE", "CHAT", "EMAIL", "SOCIAL"]
+INTERACTION_TYPES = ["INBOUND", "OUTBOUND", "INTERNAL"]
+SERVICE_SUBTYPES = ["GENERAL", "TECH", "BILLING", "RETENTION", "SALES"]
+VIRTUAL_QUEUES = ["QUEUE_SUPPORT", "QUEUE_SALES", "QUEUE_BILLING", "QUEUE_VIP"]
+DISPOSITION_CODES = ["COMPLETE", "TRANSFER", "ABANDON", "CALLBACK"]
+CUSTOMER_SEGMENTS = ["CONSUMER", "SMB", "ENTERPRISE", "VIP"]
+IVR_SS_ROUTES = ["ROUTE_A", "ROUTE_B", "ROUTE_C", "ROUTE_D"]
+STOP_REASONS = ["NORMAL", "TIMEOUT", "AGENT_END", "CUSTOMER_END"]
 
-TRIBES = ["ENTERPRISE SOLUTIONS", "DIGITAL BANKING", "RETAIL SERVICES", "WHOLESALE MARKETS", "PUBLIC SECTOR"]
+REVN_TYPES = ["SERVICE", "USAGE", "SUBSCRIPTION", "ONE_TIME"]
+REVN_SUB_TYPES = ["VOICE", "DATA", "SMS", "ROAMING", "VAS"]
+PRODUCTS = ["MOBILE", "BROADBAND", "IOT", "CLOUD", "SECURITY"]
+PAY_TYPES = ["PREPAID", "POSTPAID", "HYBRID"]
+SEGMENTS = ["SMB", "ENTERPRISE", "PUBLIC", "CONSUMER"]
+TRIBES = ["CORE", "DIGITAL", "ENTERPRISE", "PARTNER"]
+SQUADS = ["SQUAD_A", "SQUAD_B", "SQUAD_C", "SQUAD_D"]
+SECTORS = ["FINANCE", "RETAIL", "GOVERNMENT", "HEALTH", "EDU"]
+REGIONS = ["NORTH", "SOUTH", "EAST", "WEST", "CENTRAL"]
 
-SQUADS = [
-    "ICT,MEDIA & ENTERTAINMENT",
-    "FINANCIAL SERVICES",
-    "HEALTHCARE & PHARMA",
-    "RETAIL & DISTRIBUTION",
-    "ENERGY & UTILITIES",
-    "TRANSPORTATION & LOGISTICS",
-    "EDUCATION & RESEARCH",
-]
-
-SECTORS = [
-    "MANUFACTURING",
-    "ICT & TECHNOLOGY",
-    "BANKING & FINANCE",
-    "HEALTHCARE",
-    "RETAIL",
-    "ENERGY",
-    "GOVERNMENT",
-    "EDUCATION",
-    "AGRICULTURE",
-    "REAL ESTATE",
-]
-
-CUSTOMER_PREFIXES = ["1-CORP-", "1-SME-", "1-GOV-", "1-ENT-", "1-STR-"]
-
-
-def generate_customer_id(segment: str) -> str:
-    """Generate a customer ID based on segment."""
-    prefix_map = {
-        "STARTUP": "1-STR-",
-        "SME": "1-SME-",
-        "LARGE ENTERPRISE": "1-ENT-",
-        "CORPORATE": "1-CORP-",
-        "GOVERNMENT": "1-GOV-",
-    }
-    prefix = prefix_map.get(segment, "1-CORP-")
-    return f"{prefix}{random.randint(100000000, 999999999)}"
+PRODUCT_LINES = ["MOBILE", "FIXED", "IOT", "CLOUD", "SECURITY"]
+SERVICE_PLANS = ["BASIC", "STANDARD", "PREMIUM", "ENTERPRISE"]
+APPLICATION_NAMES = ["STREAMING", "BROWSING", "VPN", "GAMING", "VOIP"]
+APPLICATION_FAMILIES = ["MEDIA", "PRODUCTIVITY", "COMMUNICATION", "SECURITY"]
 
 
-def generate_month_string(date: datetime) -> str:
-    """Generate month string like '25-Jul' from date."""
-    year_short = str(date.year)[-2:]
-    month_abbr = date.strftime("%b")
-    return f"{year_short}-{month_abbr}"
+def truncate(value: str, max_len: int) -> str:
+    if value is None:
+        return ""
+    return str(value)[:max_len]
 
 
-def generate_records(num_records: int, faker: Faker) -> List[Tuple]:
-    """Generate realistic CUSTOMER_DATA records."""
-    records = []
-    
-    # Generate a pool of customers (about 500 unique customers)
-    num_customers = min(500, num_records // 20)
-    customers = []
-    for _ in range(num_customers):
-        segment = random.choice(SEGMENTS)
-        customers.append({
-            "customer_id": generate_customer_id(segment),
-            "customer_name": faker.company(),
-            "segment": segment,
-            "tribe": random.choice(TRIBES),
-            "squad": random.choice(SQUADS),
-            "sector": random.choice(SECTORS),
-        })
-    
-    # Generate date range (full year 2025)
-    start_date = datetime(2025, 1, 1)
-    end_date = datetime(2025, 12, 31)
-    date_range = (end_date - start_date).days
-    
-    for i in range(num_records):
-        # Random date in range
-        random_days = random.randint(0, date_range)
-        record_date = start_date + timedelta(days=random_days)
-        date_str = record_date.strftime("%d/%m/%Y")
-        month_str = generate_month_string(record_date)
-        
-        # Random product and sub-product
-        product, sub_products = random.choice(PRODUCTS)
-        sub_product = random.choice(sub_products)
-        
-        # Random customer from pool
-        customer = random.choice(customers)
-        
-        # Financial data with realistic distributions
-        revenue = round(random.uniform(1000, 150000), 2)
-        used_resources = random.randint(1000, 100000)
-        balance_resources = random.randint(1000, 80000)
-        value_balances = round(random.uniform(500, 50000), 2)
-        
-        record = (
-            date_str,
-            month_str,
-            product,
-            sub_product,
-            customer["customer_id"],
-            customer["customer_name"],
-            customer["segment"],
-            customer["tribe"],
-            customer["squad"],
-            customer["sector"],
-            str(revenue),
-            str(used_resources),
-            str(balance_resources),
-            str(value_balances),
-        )
-        records.append(record)
-        
-        if (i + 1) % 1000 == 0:
-            print(f"  Generated {i + 1:,} records...")
-    
-    return records
+def random_date() -> datetime:
+    return DATE_START + timedelta(days=random.randint(0, DATE_RANGE_DAYS))
+
+
+def random_datetime() -> datetime:
+    base_date = random_date()
+    seconds = random.randint(0, 86399)
+    microseconds = random.randint(0, 999999)
+    return base_date + timedelta(seconds=seconds, microseconds=microseconds)
+
+
+def date_key(dt: datetime) -> int:
+    return int(dt.strftime("%Y%m%d"))
+
+
+def generate_call_details_row(faker: Faker) -> Tuple:
+    start_time = random_datetime()
+    routing = random.randint(0, 60)
+    queue = random.randint(0, 120)
+    ring = random.randint(0, 30)
+    talk = random.randint(30, 900)
+    hold = random.randint(0, 120)
+    after_call = random.randint(0, 300)
+    customer_talk = max(talk - hold, 0)
+    total_duration = routing + queue + ring + talk + hold + after_call
+    end_time = start_time + timedelta(seconds=total_duration)
+
+    return (
+        date_key(start_time),
+        start_time,
+        end_time,
+        total_duration,
+        random.randint(100000000, 999999999),
+        random.randint(100000, 999999),
+        truncate(faker.phone_number(), 50),
+        truncate(faker.phone_number(), 50),
+        random.randint(100000, 999999),
+        random.choice(CALLER_PURPOSES),
+        random.choice(GV_EXIT_CODES),
+        random.choice(TECH_RESULTS),
+        random.choice(RESULT_REASONS),
+        random.choice(RESOURCE_ROLES),
+        random.choice(PLACE_NAMES),
+        truncate(faker.name(), 50),
+        f"EMP{random.randint(10000, 99999)}",
+        random.choice(LANGUAGES),
+        random.choice(SUBSCRIBER_TYPES),
+        f"SUB{random.randint(1000000, 9999999)}",
+        random.choice(VB_THRESHOLDS),
+        random.choice(VB_VERIFIED_VALUES),
+        random.choice(SWITCH_NAMES),
+        routing,
+        queue,
+        ring,
+        talk,
+        customer_talk,
+        hold,
+        after_call,
+        random.choice(MEDIA_NAMES),
+        random.choice(INTERACTION_TYPES),
+        random.choice(SERVICE_SUBTYPES),
+        truncate(random.choice(VIRTUAL_QUEUES), 150),
+        random.choice(DISPOSITION_CODES),
+        random.randint(1, 5),
+        random.choice(CUSTOMER_SEGMENTS),
+        random.choice(IVR_SS_ROUTES),
+        random.choice(STOP_REASONS),
+    )
+
+
+def generate_ebu_ifrs_row(faker: Faker) -> Tuple:
+    dt = random_date()
+    gross = round(random.uniform(1000, 200000), 2)
+    net = round(gross * random.uniform(0.6, 0.95), 2)
+    return (
+        date_key(dt),
+        random.choice(REVN_TYPES),
+        random.choice(REVN_SUB_TYPES),
+        random.choice(PRODUCTS),
+        random.randint(1000, 999999),
+        f"SBSC{random.randint(100000, 999999)}",
+        random.choice(PAY_TYPES),
+        random.randint(100000, 999999),
+        f"CHD{random.randint(1000, 9999)}",
+        f"PRT{random.randint(1000, 9999)}",
+        truncate(faker.company(), 300),
+        f"EBU-{random.randint(1000, 9999)}",
+        f"HOLD-{random.randint(1000, 9999)}",
+        random.randint(0, 1),
+        random.choice(SEGMENTS),
+        random.choice(TRIBES),
+        random.choice(SQUADS),
+        random.choice(SECTORS),
+        random.choice(REGIONS),
+        gross,
+        net,
+    )
+
+
+def generate_allot_data_row() -> Tuple:
+    dt = random_date()
+    hour = random.randint(0, 23)
+    live_connections = random.randint(50, 5000)
+    new_connections = random.randint(0, live_connections)
+    dl_mb = round(random.uniform(10, 5000), 2)
+    ul_mb = round(random.uniform(5, 2000), 2)
+    activity_time = random.randint(60, 3600)
+    rtx = random.randint(1000, 100000)
+    total = rtx + random.randint(0, 200000)
+    return (
+        date_key(dt),
+        hour,
+        random.choice(PRODUCT_LINES),
+        random.choice(SERVICE_PLANS),
+        f"CUST-{random.randint(100000, 999999)}",
+        random.choice(APPLICATION_NAMES),
+        random.choice(APPLICATION_FAMILIES),
+        live_connections,
+        new_connections,
+        dl_mb,
+        ul_mb,
+        activity_time,
+        rtx,
+        total,
+    )
+
+
+def populate_table(cursor, table_name: str, insert_sql: str, row_fn, total_rows: int, batch_size: int):
+    print(f"\nPopulating {table_name} with {total_rows:,} rows...")
+    inserted = 0
+    while inserted < total_rows:
+        current_batch = min(batch_size, total_rows - inserted)
+        batch = [row_fn() for _ in range(current_batch)]
+        cursor.executemany(insert_sql, batch)
+        inserted += current_batch
+        if inserted % (batch_size * 5) == 0 or inserted == total_rows:
+            print(f"  Inserted {inserted:,} / {total_rows:,} rows into {table_name}...")
 
 
 def wait_for_doris(max_retries: int = 60, retry_interval: int = 5) -> bool:
@@ -205,20 +272,20 @@ def wait_for_doris(max_retries: int = 60, retry_interval: int = 5) -> bool:
 
 
 def init_database():
-    """Initialize the database and create table."""
+    """Initialize the database and create tables."""
     print("\n" + "=" * 60)
     print("DORIS DATABASE INITIALIZATION")
     print("=" * 60)
-    
+
     # Wait for Doris
     if not wait_for_doris():
         print("\nERROR: Doris is not available. Make sure the container is running:")
         print("  docker-compose up -d doris")
         print("  docker ps --filter 'name=doris'  # Should show 'healthy'")
         sys.exit(1)
-    
+
     # Connect to Doris
-    print(f"\nConnecting to Doris...")
+    print("\nConnecting to Doris...")
     conn = pymysql.connect(
         host=DORIS_HOST,
         port=DORIS_PORT,
@@ -227,110 +294,220 @@ def init_database():
         autocommit=True,
     )
     cursor = conn.cursor()
-    
+
     # Create database
     print(f"Creating database '{DORIS_DATABASE}'...")
     cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DORIS_DATABASE}")
     cursor.execute(f"USE {DORIS_DATABASE}")
     print(f"[OK] Database '{DORIS_DATABASE}' ready")
-    
-    # Drop existing table if exists
-    print("Dropping existing CUSTOMER_DATA table if exists...")
-    cursor.execute("DROP TABLE IF EXISTS CUSTOMER_DATA")
-    
-    # Create table with proper Doris schema
-    print("Creating CUSTOMER_DATA table...")
-    create_table_sql = """
-    CREATE TABLE CUSTOMER_DATA (
-        DATE VARCHAR(20) COMMENT 'Transaction date in DD/MM/YYYY format',
-        MONTH VARCHAR(10) COMMENT 'Month in YY-Mon format',
-        PRODUCT VARCHAR(50) COMMENT 'Product category',
-        SUB_PRODUCT VARCHAR(100) COMMENT 'Sub-product name',
-        CUSTOMER_ID VARCHAR(30) COMMENT 'Unique customer identifier',
-        CUSTOMER VARCHAR(200) COMMENT 'Customer company name',
-        SEGMENT VARCHAR(30) COMMENT 'Customer segment',
-        TRIBE VARCHAR(50) COMMENT 'Business tribe',
-        SQUAD VARCHAR(50) COMMENT 'Business squad',
-        SECTOR VARCHAR(50) COMMENT 'Industry sector',
-        REVENUE VARCHAR(20) COMMENT 'Revenue amount',
-        USED_RESOURCES VARCHAR(20) COMMENT 'Used resources count',
-        BALANCE_RESOURCES VARCHAR(20) COMMENT 'Balance resources count',
-        VALUE_BALANCES VARCHAR(20) COMMENT 'Value of balances'
-    ) ENGINE=OLAP
-    DUPLICATE KEY(DATE, MONTH, PRODUCT)
-    COMMENT 'Customer transaction data for BI analytics'
-    DISTRIBUTED BY HASH(CUSTOMER_ID) BUCKETS 4
-    PROPERTIES (
-        "replication_num" = "1"
+
+    print("Preparing test tables...")
+    for table in [
+        "TEST_INFORMAT_CALL_DETLS",
+        "TEST_AGG_EBU_IFRS_DAY",
+        "TEST_ALLOT_DATA_HOUR",
+    ]:
+        cursor.execute(f"DROP TABLE IF EXISTS {table}")
+
+    cursor.execute(
+        """
+        CREATE TABLE TEST_INFORMAT_CALL_DETLS (
+            ID_DATE BIGINT,
+            INTERACTION_ID BIGINT,
+            START_TIME DATETIME,
+            END_TIME DATETIME,
+            TOTAL_CALL_DURATION BIGINT,
+            INTERACTION_RESOURCE_ID BIGINT,
+            SOURCE_ADDRESS VARCHAR(50),
+            TARGET_ADDRESS VARCHAR(50),
+            CONNID BIGINT,
+            CALLERPURPOSE VARCHAR(50),
+            GVPEXITCODE VARCHAR(50),
+            TECHNICAL_RESULT VARCHAR(50),
+            RESULT_REASON VARCHAR(50),
+            RESOURCE_ROLE VARCHAR(50),
+            PLACE_NAME VARCHAR(50),
+            RESOURCE_NAME VARCHAR(50),
+            EMPLOYEE_ID VARCHAR(50),
+            LANGUAGE VARCHAR(50),
+            SUBSCRIBERTYPE VARCHAR(50),
+            SUBSCRIBERVALUE VARCHAR(50),
+            VB_THRESHOLD VARCHAR(50),
+            VB_VERIFIED VARCHAR(50),
+            SWITCH_NAME VARCHAR(50),
+            ROUTING_POINT_DURATION BIGINT,
+            QUEUE_DURATION BIGINT,
+            RING_DURATION BIGINT,
+            TALK_DURATION BIGINT,
+            CUSTOMER_TALK_DURATION BIGINT,
+            HOLD_DURATION BIGINT,
+            AFTER_CALL_WORK_DURATION BIGINT,
+            MEDIA_NAME VARCHAR(50),
+            INTERACTION_TYPE VARCHAR(50),
+            SERVICE_SUBTYPE VARCHAR(50),
+            VIRTUAL_QUEUE VARCHAR(150),
+            DISPOSITION_CODE VARCHAR(50),
+            HANDLE_COUNT BIGINT,
+            CUSTOMER_SEGMENT VARCHAR(200),
+            IVR_SS_ROUTE VARCHAR(255),
+            STOP_REASON VARCHAR(255)
+        ) ENGINE=OLAP
+        DUPLICATE KEY(ID_DATE, INTERACTION_ID)
+        DISTRIBUTED BY HASH(INTERACTION_ID) BUCKETS 8
+        PROPERTIES (
+            "replication_num" = "1"
+        )
+        """
+    )
+    print("[OK] TEST_INFORMAT_CALL_DETLS table created")
+
+    cursor.execute(
+        """
+        CREATE TABLE TEST_AGG_EBU_IFRS_DAY (
+            ID_DATE BIGINT NOT NULL,
+            ID_PDSV BIGINT,
+            REVN_TYPE VARCHAR(30),
+            REVN_SUB_TYPE VARCHAR(150),
+            PRODUCT VARCHAR(250),
+            NR_SBSC VARCHAR(40),
+            SBSC_PAY_TYPE VARCHAR(50),
+            ID_CST BIGINT,
+            CHILD_ACCT VARCHAR(30),
+            PARENT_ACCT VARCHAR(50),
+            PARENT_ACCT_NAME VARCHAR(300),
+            EBU_CST_ID VARCHAR(800),
+            EBU_HOLD_CST VARCHAR(800),
+            ENTREPRISE_FLAG_OLD BIGINT,
+            EBU_CST_SGMN VARCHAR(800),
+            EBU_CST_TRIBE VARCHAR(800),
+            EBU_CST_SQUAD VARCHAR(800),
+            EBU_CST_SECTOR VARCHAR(800),
+            EBU_CST_REGION CHAR(20),
+            GROSS_REVENUE DOUBLE,
+            NET_REVENUE DOUBLE
+        ) ENGINE=OLAP
+        DUPLICATE KEY(ID_DATE, ID_PDSV)
+        DISTRIBUTED BY HASH(ID_PDSV) BUCKETS 8
+        PROPERTIES (
+            "replication_num" = "1"
+        )
+        """
+    )
+    print("[OK] TEST_AGG_EBU_IFRS_DAY table created")
+
+    cursor.execute(
+        """
+        CREATE TABLE TEST_ALLOT_DATA_HOUR (
+            ID_DATE BIGINT,
+            ID_HOUR BIGINT,
+            CUSTOMER_IDENTIFIER VARCHAR(200),
+            PRODUCT_LINE VARCHAR(100),
+            SERVICE_PLAN VARCHAR(100),
+            APPLICATION_NAME VARCHAR(200),
+            APPLICATION_FAMILY VARCHAR(200),
+            LIVE_CONNECTIONS BIGINT,
+            NEW_CONNECTIONS BIGINT,
+            DL_MB DOUBLE,
+            UL_MB DOUBLE,
+            NETWORK_ACTIVITY_TIME_SEC BIGINT,
+            RTX_TCP_DATASEG_IN BIGINT,
+            TOTAL_TCP_DATASEG_IN BIGINT
+        ) ENGINE=OLAP
+        DUPLICATE KEY(ID_DATE, ID_HOUR, CUSTOMER_IDENTIFIER)
+        DISTRIBUTED BY HASH(CUSTOMER_IDENTIFIER) BUCKETS 8
+        PROPERTIES (
+            "replication_num" = "1"
+        )
+        """
+    )
+    print("[OK] TEST_ALLOT_DATA_HOUR table created")
+
+    faker = Faker()
+    Faker.seed(42)
+    random.seed(42)
+
+    insert_call_details = """
+    INSERT INTO TEST_INFORMAT_CALL_DETLS (
+        ID_DATE, START_TIME, END_TIME, TOTAL_CALL_DURATION, INTERACTION_ID,
+        INTERACTION_RESOURCE_ID, SOURCE_ADDRESS, TARGET_ADDRESS, CONNID,
+        CALLERPURPOSE, GVPEXITCODE, TECHNICAL_RESULT, RESULT_REASON,
+        RESOURCE_ROLE, PLACE_NAME, RESOURCE_NAME, EMPLOYEE_ID, LANGUAGE,
+        SUBSCRIBERTYPE, SUBSCRIBERVALUE, VB_THRESHOLD, VB_VERIFIED, SWITCH_NAME,
+        ROUTING_POINT_DURATION, QUEUE_DURATION, RING_DURATION, TALK_DURATION,
+        CUSTOMER_TALK_DURATION, HOLD_DURATION, AFTER_CALL_WORK_DURATION,
+        MEDIA_NAME, INTERACTION_TYPE, SERVICE_SUBTYPE, VIRTUAL_QUEUE,
+        DISPOSITION_CODE, HANDLE_COUNT, CUSTOMER_SEGMENT, IVR_SS_ROUTE, STOP_REASON
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s
     )
     """
-    cursor.execute(create_table_sql)
-    print("[OK] CUSTOMER_DATA table created")
-    
-    # Generate data
-    print("\nGenerating 100,000 records...")
-    faker = Faker()
-    Faker.seed(42)  # For reproducibility
-    random.seed(42)
-    records = generate_records(10000, faker)
-    
-    # Insert data in batches
-    print("\nInserting records into CUSTOMER_DATA...")
-    batch_size = 500
-    total_inserted = 0
-    
-    insert_sql = """
-    INSERT INTO CUSTOMER_DATA 
-    (DATE, MONTH, PRODUCT, SUB_PRODUCT, CUSTOMER_ID, CUSTOMER, SEGMENT, TRIBE, SQUAD, SECTOR, REVENUE, USED_RESOURCES, BALANCE_RESOURCES, VALUE_BALANCES)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+
+    insert_ebu = """
+    INSERT INTO TEST_AGG_EBU_IFRS_DAY (
+        ID_DATE, REVN_TYPE, REVN_SUB_TYPE, PRODUCT, ID_PDSV, NR_SBSC,
+        SBSC_PAY_TYPE, ID_CST, CHILD_ACCT, PARENT_ACCT, PARENT_ACCT_NAME,
+        EBU_CST_ID, EBU_HOLD_CST, ENTREPRISE_FLAG_OLD, EBU_CST_SGMN,
+        EBU_CST_TRIBE, EBU_CST_SQUAD, EBU_CST_SECTOR, EBU_CST_REGION,
+        GROSS_REVENUE, NET_REVENUE
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    )
     """
-    
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
-        cursor.executemany(insert_sql, batch)
-        total_inserted += len(batch)
-        print(f"  Inserted {total_inserted:,} / {len(records):,} records...")
-    
-    print(f"[OK] Inserted {total_inserted:,} records")
-    
-    # Verify data
-    print("\nVerifying data...")
-    cursor.execute("SELECT COUNT(*) FROM CUSTOMER_DATA")
-    count = cursor.fetchone()[0]
-    print(f"[OK] CUSTOMER_DATA contains {count:,} records")
-    
-    # Show sample
-    print("\nSample data (first 3 rows):")
-    cursor.execute("SELECT * FROM CUSTOMER_DATA LIMIT 3")
-    columns = [desc[0] for desc in cursor.description]
-    print(f"  Columns: {', '.join(columns)}")
-    for row in cursor.fetchall():
-        print(f"  {row[:5]}...")  # Show first 5 fields
-    
-    # Show summary stats
-    print("\nData summary:")
-    cursor.execute("SELECT COUNT(DISTINCT CUSTOMER_ID) as customers FROM CUSTOMER_DATA")
-    print(f"  Unique customers: {cursor.fetchone()[0]}")
-    
-    cursor.execute("SELECT COUNT(DISTINCT PRODUCT) as products FROM CUSTOMER_DATA")
-    print(f"  Products: {cursor.fetchone()[0]}")
-    
-    cursor.execute("SELECT COUNT(DISTINCT SEGMENT) as segments FROM CUSTOMER_DATA")
-    print(f"  Segments: {cursor.fetchone()[0]}")
-    
-    cursor.execute("SELECT COUNT(DISTINCT MONTH) as months FROM CUSTOMER_DATA")
-    print(f"  Months: {cursor.fetchone()[0]}")
-    
+
+    insert_allot = """
+    INSERT INTO TEST_ALLOT_DATA_HOUR (
+        ID_DATE, ID_HOUR, PRODUCT_LINE, SERVICE_PLAN, CUSTOMER_IDENTIFIER,
+        APPLICATION_NAME, APPLICATION_FAMILY, LIVE_CONNECTIONS, NEW_CONNECTIONS,
+        DL_MB, UL_MB, NETWORK_ACTIVITY_TIME_SEC, RTX_TCP_DATASEG_IN,
+        TOTAL_TCP_DATASEG_IN
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    )
+    """
+
+    populate_table(
+        cursor,
+        "TEST_INFORMAT_CALL_DETLS",
+        insert_call_details,
+        lambda: generate_call_details_row(faker),
+        TOTAL_ROWS,
+        BATCH_SIZE,
+    )
+    populate_table(
+        cursor,
+        "TEST_AGG_EBU_IFRS_DAY",
+        insert_ebu,
+        lambda: generate_ebu_ifrs_row(faker),
+        TOTAL_ROWS,
+        BATCH_SIZE,
+    )
+    populate_table(
+        cursor,
+        "TEST_ALLOT_DATA_HOUR",
+        insert_allot,
+        generate_allot_data_row,
+        TOTAL_ROWS,
+        BATCH_SIZE,
+    )
+
+    for table in [
+        "TEST_INFORMAT_CALL_DETLS",
+        "TEST_AGG_EBU_IFRS_DAY",
+        "TEST_ALLOT_DATA_HOUR",
+    ]:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cursor.fetchone()[0]
+        print(f"[OK] {table} contains {count:,} records")
+
     conn.close()
-    
+
     print("\n" + "=" * 60)
     print("[OK] DATABASE INITIALIZATION COMPLETE")
     print("=" * 60)
-    print("\nYou can now start the backend and test queries like:")
-    print('  "Show me the first 5 rows of CUSTOMER_DATA"')
-    print('  "What is the total revenue by segment?"')
-    print('  "List all products and their sub-products"')
-    print()
 
 
 if __name__ == "__main__":

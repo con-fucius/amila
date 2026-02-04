@@ -2,13 +2,11 @@ import { useState, useContext, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
     ChevronLeft,
-    Check,
     RefreshCw,
     Mail,
     Shield,
     Building2,
     LogOut,
-    Wrench,
     Info,
     ExternalLink,
     Terminal,
@@ -16,12 +14,13 @@ import {
     ChevronDown,
     ChevronUp
 } from 'lucide-react'
+import { AdminPanel } from '../components/AdminPanel'
 import { cn } from '@/utils/cn'
 import { ColorModeContext } from '@/App'
 import { useBackendHealth } from '@/hooks/useBackendHealth'
 import { apiService } from '@/services/apiService'
 
-type SettingsSection = 'account' | 'appearance' | 'preferences' | 'connections' | 'tools' | 'about'
+type SettingsSection = 'account' | 'appearance' | 'preferences' | 'connections' | 'tools' | 'about' | 'admin'
 
 interface SettingToggleProps {
     label: string
@@ -98,7 +97,7 @@ export function Settings() {
     const navigate = useNavigate()
     const colorMode = useContext(ColorModeContext)
     const isDark = colorMode.mode === 'dark'
-    const { components, recheckHealth, lastCheck } = useBackendHealth(10000)
+    const { components, diagnostics, recheckHealth, lastCheck } = useBackendHealth(10000)
     const [isRefreshing, setIsRefreshing] = useState(false)
     const [activeSection, setActiveSection] = useState<SettingsSection>('account')
     const [profile, setProfile] = useState<any>(null)
@@ -178,12 +177,15 @@ export function Settings() {
         compactMode: localStorage.getItem('compactMode') === 'true',
         developerMode: localStorage.getItem('developerMode') === 'true',
         showSQLPreview: localStorage.getItem('showSQLPreview') !== 'false',
+        disableSqlApproval: localStorage.getItem('disableSqlApproval') === 'true',
+        enableQueryEnhancement: localStorage.getItem('enableQueryEnhancement') !== 'false',
     })
 
     // Persist settings changes
     const updateSetting = (key: keyof typeof settings, value: boolean) => {
         setSettings(prev => ({ ...prev, [key]: value }))
         localStorage.setItem(key, String(value))
+        window.dispatchEvent(new Event('settings-changed'))
     }
 
     const handleThemeChange = (theme: 'light' | 'dark' | 'system') => {
@@ -204,14 +206,15 @@ export function Settings() {
 
     const themePreference = localStorage.getItem('themePreference') || (isDark ? 'dark' : 'light')
 
-    const sections: { id: SettingsSection; label: string }[] = [
+    const sections = [
         { id: 'account', label: 'Account' },
         { id: 'appearance', label: 'Appearance' },
         { id: 'preferences', label: 'Preferences' },
         { id: 'connections', label: 'Connections' },
         { id: 'tools', label: 'Tools' },
+        { id: 'admin', label: 'Admin Panel', hidden: profile?.role !== 'Admin' && profile?.role !== 'admin' },
         { id: 'about', label: 'About' },
-    ]
+    ].filter(s => !s.hidden) as { id: SettingsSection; label: string }[]
 
     return (
         <div className="h-full bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 overflow-auto">
@@ -227,9 +230,9 @@ export function Settings() {
                     <h1 className="text-xl font-bold text-white">Settings</h1>
                 </div>
 
-                <div className="flex gap-6">
+                <div className="flex flex-col lg:flex-row gap-6">
                     {/* Sidebar Navigation */}
-                    <div className="w-48 flex-shrink-0">
+                    <div className="w-full lg:w-48 flex-shrink-0">
                         <nav className="space-y-0.5">
                             {sections.map((section) => (
                                 <button
@@ -292,10 +295,10 @@ export function Settings() {
                                     </div>
                                 </div>
 
-                                <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 p-4">
+                                <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-4">
                                     <button
                                         onClick={handleLogout}
-                                        className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-red-900/40 text-red-400 hover:bg-red-900/60 transition-colors text-[12px] font-medium"
+                                        className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-red-900/30 border border-red-500/30 text-red-400 hover:bg-red-900/50 hover:border-red-500/50 transition-colors text-[12px] font-medium"
                                     >
                                         <LogOut className="w-4 h-4" />
                                         Sign out
@@ -345,6 +348,12 @@ export function Settings() {
                                             onChange={(v) => updateSetting('showReasoningSteps', v)}
                                         />
                                         <SettingToggle
+                                            label="Enable Query Enhancement"
+                                            description="Allow the enhance button to refine your query before sending"
+                                            enabled={settings.enableQueryEnhancement}
+                                            onChange={(v) => updateSetting('enableQueryEnhancement', v)}
+                                        />
+                                        <SettingToggle
                                             label="Show SQL Preview"
                                             description="Preview SQL before execution"
                                             enabled={settings.showSQLPreview}
@@ -367,6 +376,12 @@ export function Settings() {
                                             description="Skip manual approval for low-risk SELECTs (Admin only)"
                                             enabled={settings.autoApproveSimple}
                                             onChange={(v) => updateSetting('autoApproveSimple', v)}
+                                        />
+                                        <SettingToggle
+                                            label="Disable SQL Approval Pop-up"
+                                            description="Bypass manual approval for non-technical users"
+                                            enabled={settings.disableSqlApproval}
+                                            onChange={(v) => updateSetting('disableSqlApproval', v)}
                                         />
                                     </div>
                                 </div>
@@ -432,30 +447,59 @@ export function Settings() {
                                     <div className="space-y-1.5">
                                         <ConnectionStatus
                                             name="Oracle Database"
-                                            status={getStatus(components?.sqlcl_pool) || components?.mcp_client || 'unknown'}
+                                            status={getStatus(components?.sqlcl_pool || components?.mcp_client)}
                                             details="SQLcl MCP Connection Pool"
                                         />
                                         <ConnectionStatus
                                             name="Doris Database"
-                                            status={getStatus(components?.doris) || 'unknown'}
+                                            status={getStatus(components?.doris || components?.doris_mcp)}
                                             details="HTTP MCP Connection"
                                         />
                                         <ConnectionStatus
+                                            name="Postgres Database"
+                                            status={getStatus(components?.postgres)}
+                                            details="psycopg3 Connection Pool"
+                                        />
+                                        <ConnectionStatus
                                             name="Redis"
-                                            status={getStatus(components?.redis) || 'unknown'}
+                                            status={getStatus(components?.redis)}
                                             details="Cache, Sessions, Celery"
                                         />
                                         <ConnectionStatus
                                             name="Graphiti"
-                                            status={getStatus(components?.graphiti) || getStatus(components?.falkordb) || 'unknown'}
+                                            status={getStatus(components?.graphiti || components?.falkordb)}
                                             details="Knowledge Graph Storage"
                                         />
                                         <ConnectionStatus
                                             name="LLM Provider"
-                                            status={getStatus(components?.llm) || 'unknown'}
+                                            status={getStatus(components?.llm)}
                                             details="Gemini / Bedrock / OpenRouter"
                                         />
                                     </div>
+                                </div>
+
+                                <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 p-4">
+                                    <h3 className="text-sm font-semibold text-white mb-2">Connection Pools</h3>
+                                    {diagnostics?.connection_pools && diagnostics.connection_pools.length > 0 ? (
+                                        <div className="space-y-2">
+                                            {diagnostics.connection_pools.map((pool: any, idx: number) => (
+                                                <div key={idx} className="flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-gray-800/20 transition-colors">
+                                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                        <p className="font-medium text-white text-[12px] flex-shrink-0">{pool.database?.toUpperCase?.() || pool.database}</p>
+                                                        <span className="text-gray-600 text-[10px]">•</span>
+                                                        <p className="text-[11px] text-gray-400 truncate">
+                                                            {pool.active_connections}/{pool.total_connections} active
+                                                        </p>
+                                                    </div>
+                                                    <div className="text-[10px] text-gray-500">
+                                                        Idle: {pool.idle_connections}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <p className="text-gray-400 text-[11px] leading-relaxed">No pool metrics available.</p>
+                                    )}
                                 </div>
 
                                 <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 p-4">
@@ -584,7 +628,15 @@ export function Settings() {
                                 </div>
                             </div>
                         )}
+
+                        {/* Admin Section */}
+                        {activeSection === 'admin' && (
+                            <div className="space-y-3">
+                                <AdminPanel />
+                            </div>
+                        )}
                     </div>
+
                 </div>
             </div>
         </div>

@@ -92,10 +92,12 @@ class PostgreSQLClient:
                 raise ExternalServiceException(f"PostgreSQL pool initialization failed: {e}", service_name="postgres")
     
     @asynccontextmanager
-    async def get_connection(self):
+    async def get_connection(self, read_only: Optional[bool] = None):
         """
-        Get connection from pool with transaction-level read-only enforcement.
-        This provides defense-in-depth against write operations.
+        Get connection from pool with transaction-level read-only enforcement if requested.
+        
+        Args:
+            read_only: Whether to force read-only. If None, uses settings.POSTGRES_READ_ONLY.
         """
         if not self._initialized:
             raise ExternalServiceException("PostgreSQL client not initialized", service_name="postgres")
@@ -104,8 +106,11 @@ class PostgreSQLClient:
             raise ExternalServiceException("Connection pool not available", service_name="postgres")
         
         async with self._pool.connection() as conn:
-            if settings.POSTGRES_READ_ONLY:
+            is_readonly = read_only if read_only is not None else settings.POSTGRES_READ_ONLY
+            if is_readonly:
                 await conn.execute("SET TRANSACTION READ ONLY")
+            else:
+                await conn.execute("SET TRANSACTION READ WRITE")
             yield conn
     
     async def execute_query(

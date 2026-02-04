@@ -40,18 +40,24 @@ def clean_oracle():
         user = os.getenv("ORACLE_USERNAME", "system")
         pwd = os.getenv("ORACLE_PASSWORD", "password")
         svc = os.getenv("ORACLE_SERVICE_NAME", "FREEPDB1")
-        
+
         conn = oracledb.connect(user=user, password=pwd, dsn=f"{host}:{port}/{svc}")
         cursor = conn.cursor()
-        try:
-            cursor.execute("DROP TABLE CUSTOMER_DATA")
-            logger.info("Oracle: Dropped CUSTOMER_DATA")
-        except oracledb.DatabaseError as e:
-            error, = e.args
-            if error.code == 942: # Table doesn't exist
-                logger.info("Oracle: Table did not exist")
-            else:
-                logger.error(f"Oracle Error: {e}")
+        tables = [
+            "TEST_INFORMAT_CALL_DETLS",
+            "TEST_AGG_EBU_IFRS_DAY",
+            "TEST_ALLOT_DATA_HOUR",
+        ]
+        for table in tables:
+            try:
+                cursor.execute(f"DROP TABLE {table}")
+                logger.info("Oracle: Dropped %s", table)
+            except oracledb.DatabaseError as e:
+                error, = e.args
+                if error.code == 942:  # Table doesn't exist
+                    logger.info("Oracle: %s did not exist", table)
+                else:
+                    logger.error("Oracle Error dropping %s: %s", table, e)
         conn.close()
         return True
     except ImportError:
@@ -70,11 +76,17 @@ def clean_doris():
         user = os.getenv("DORIS_DB_USER", "root")
         pwd = os.getenv("DORIS_DB_PASSWORD", "")
         db = os.getenv("DORIS_DB_DATABASE", "demo")
-        
+
         conn = pymysql.connect(host=host, port=port, user=user, password=pwd, database=db)
         cursor = conn.cursor()
-        cursor.execute("DROP TABLE IF EXISTS CUSTOMER_DATA")
-        logger.info("Doris: Dropped CUSTOMER_DATA")
+        tables = [
+            "TEST_INFORMAT_CALL_DETLS",
+            "TEST_AGG_EBU_IFRS_DAY",
+            "TEST_ALLOT_DATA_HOUR",
+        ]
+        for table in tables:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            logger.info("Doris: Dropped %s", table)
         conn.close()
         return True
     except ImportError:
@@ -113,12 +125,18 @@ def clean_postgres():
 
         logger.info("Cleaning Postgres...")
         conn = conn_func()
-        if hasattr(conn, "autocommit"): # psycopg2 requires manual autocommit set
+        if hasattr(conn, "autocommit"):  # psycopg2 requires manual autocommit set
             conn.autocommit = True
-            
+
         cursor = conn.cursor()
-        cursor.execute("DROP TABLE IF EXISTS CUSTOMER_DATA")
-        logger.info("Postgres: Dropped CUSTOMER_DATA")
+        tables = [
+            "TEST_INFORMAT_CALL_DETLS",
+            "TEST_AGG_EBU_IFRS_DAY",
+            "TEST_ALLOT_DATA_HOUR",
+        ]
+        for table in tables:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            logger.info("Postgres: Dropped %s", table)
         conn.close()
         return True
     except Exception as e:

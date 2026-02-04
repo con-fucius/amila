@@ -18,16 +18,17 @@ class ErrorCategory(str, Enum):
     PERMISSION_DENIED = "permission_denied"
     CONNECTION_ERROR = "connection_error"
     TIMEOUT = "timeout"
-    CONSTRAINT_VIOLATION = "constraint_violation"
     RESOURCE_EXHAUSTED = "resource_exhausted"
     NETWORK_ERROR = "network_error"
     PROTOCOL_ERROR = "protocol_error"
+    CACHE_ERROR = "cache_error"
+    CONSTRAINT_VIOLATION = "constraint_violation"
     TOOL_CALL_ERROR = "tool_call_error"
     UNKNOWN = "unknown"
 
 
 class RetryStrategy:
-    """Retry strategy for error recovery"""
+    """Strategy for retrying failed operations"""
     def __init__(
         self,
         should_retry: bool = False,
@@ -75,6 +76,142 @@ class NormalizedError:
             "is_transient": self.retry_strategy.is_transient,
             "metadata": self.metadata
         }
+
+
+def build_error_taxonomy(normalized: NormalizedError) -> Dict[str, Any]:
+    """Create a user-facing error taxonomy with recovery steps."""
+    category = normalized.category.value
+    if category == ErrorCategory.SYNTAX_ERROR.value:
+        return {
+            "category": "syntax_error",
+            "title": "SQL Syntax Error",
+            "hint": "Review the SQL near the reported error location and correct syntax.",
+            "steps": [
+                "Open the Query Builder and inspect the SQL.",
+                "Check for missing commas, parentheses, or keywords.",
+                "Simplify the query and add clauses back incrementally.",
+            ],
+        }
+    if category == ErrorCategory.INVALID_IDENTIFIER.value:
+        return {
+            "category": "invalid_identifier",
+            "title": "Invalid Table or Column",
+            "hint": "The query references a table or column that does not exist in the schema.",
+            "steps": [
+                "Open the Schema Browser and verify table/column names.",
+                "Check for case sensitivity or spelling issues.",
+                "Update the query to use valid identifiers.",
+            ],
+        }
+    if category == ErrorCategory.PERMISSION_DENIED.value:
+        return {
+            "category": "permission_denied",
+            "title": "Access Denied",
+            "hint": "Your role does not have permission to access this data.",
+            "steps": [
+                "Confirm your role permissions with your administrator.",
+                "Request access to the required tables or views.",
+                "Try a different dataset if available.",
+            ],
+        }
+    if category == ErrorCategory.CONNECTION_ERROR.value:
+        return {
+            "category": "connection_error",
+            "title": "Connection Issue",
+            "hint": "The database connection failed or is unavailable.",
+            "steps": [
+                "Check system health status for database availability.",
+                "Retry the query after a short wait.",
+                "Switch to an alternate database if configured.",
+            ],
+        }
+    if category == ErrorCategory.TIMEOUT.value:
+        return {
+            "category": "timeout",
+            "title": "Query Timeout",
+            "hint": "The query took too long to complete.",
+            "steps": [
+                "Add filters to reduce the amount of data scanned.",
+                "Limit the result size or restrict the time range.",
+                "Retry the query during off-peak hours.",
+            ],
+        }
+    if category == ErrorCategory.RESOURCE_EXHAUSTED.value:
+        return {
+            "category": "resource_exhausted",
+            "title": "Resource Limit Reached",
+            "hint": "The database is under heavy load or reached a resource limit.",
+            "steps": [
+                "Reduce query complexity or result size.",
+                "Retry the query after a short delay.",
+                "Contact an administrator if the issue persists.",
+            ],
+        }
+    if category == ErrorCategory.NETWORK_ERROR.value:
+        return {
+            "category": "network_error",
+            "title": "Network Error",
+            "hint": "A network issue prevented communication with the database.",
+            "steps": [
+                "Verify your internet connection and VPN if required.",
+                "Check if the database server is reachable from your network.",
+                "Retry the operation after a few seconds.",
+            ],
+        }
+    if category == ErrorCategory.PROTOCOL_ERROR.value:
+        return {
+            "category": "protocol_error",
+            "title": "Tool Protocol Error",
+            "hint": "The database tool returned an unexpected response.",
+            "steps": [
+                "Retry the query.",
+                "If the issue continues, contact support.",
+            ],
+        }
+
+    if category == ErrorCategory.CACHE_ERROR.value:
+        return {
+            "category": "cache_error",
+            "title": "Cache Service Unavailable",
+            "hint": "The cache service (Redis) is currently experiencing issues.",
+            "steps": [
+                "Retry the operation; the system will attempt to use in-memory fallback.",
+                "If sessions are affected, you may need to log in again.",
+                "Contact support if the issue persists.",
+            ],
+        }
+    if category == ErrorCategory.CONSTRAINT_VIOLATION.value:
+        return {
+            "category": "constraint_violation",
+            "title": "Constraint Violation",
+            "hint": "The operation violates a database constraint (e.g. unique, non-null).",
+            "steps": [
+                "Review the data being inserted or updated.",
+                "Ensure unique values do not already exist.",
+                "Check for required fields that may be missing.",
+            ],
+        }
+    if category == ErrorCategory.TOOL_CALL_ERROR.value:
+        return {
+            "category": "tool_call_error",
+            "title": "Query Execution Error",
+            "hint": "The system encountered an error while executing the query tool.",
+            "steps": [
+                "Simplify your natural language request.",
+                "Ensure all requested metrics and dimensions are valid.",
+                "Retry the request or contact support.",
+            ],
+        }
+    
+    return {
+        "category": "unknown",
+        "title": "Unknown Error",
+        "hint": "An unexpected error occurred.",
+        "steps": [
+            "Retry the query.",
+            "If the issue persists, contact support.",
+        ],
+    }
 
 
 class OracleErrorNormalizer:
@@ -508,6 +645,62 @@ class PostgreSQLErrorNormalizer:
         return ErrorCategory.UNKNOWN, False
 
 
+class RedisErrorNormalizer:
+    """Normalizes Redis errors from redis-py exceptions"""
+    
+    @staticmethod
+    def normalize(error: Exception) -> NormalizedError:
+        """Normalize Redis error from exception"""
+        error_msg = str(error)
+        error_type = type(error).__name__
+        
+        category, should_retry = RedisErrorNormalizer._classify_error(error, error_msg)
+        
+        retry_strategy = RetryStrategy(
+            should_retry=should_retry,
+            max_attempts=3 if should_retry else 1,
+            backoff_base=1.5,
+            backoff_cap=5.0,
+            is_transient=should_retry
+        )
+        
+        return NormalizedError(
+            category=category,
+            error_code=error_type,
+            message=error_msg,
+            original_error=error,
+            retry_strategy=retry_strategy,
+            user_message=f"Redis Error: {error_msg}",
+            metadata={
+                "database_type": "redis",
+                "error_type": error_type
+            }
+        )
+    
+    @staticmethod
+    def _classify_error(error: Exception, error_msg: str) -> Tuple[ErrorCategory, bool]:
+        """Classify Redis errors based on exception type and message"""
+        error_lower = error_msg.lower()
+        
+        # Connection issues
+        if "connection" in error_lower or "refused" in error_lower:
+            return ErrorCategory.CONNECTION_ERROR, True
+        
+        # Timeout issues
+        if "timeout" in error_lower or "timed out" in error_lower:
+            return ErrorCategory.TIMEOUT, True
+        
+        # Read-only or permissions
+        if "read-only" in error_lower or "permission" in error_lower:
+            return ErrorCategory.PERMISSION_DENIED, False
+        
+        # Resource issues
+        if "loading" in error_lower or "out of memory" in error_lower:
+            return ErrorCategory.RESOURCE_EXHAUSTED, True
+            
+        return ErrorCategory.UNKNOWN, False
+
+
 def normalize_database_error(database_type: str, error_response: Any) -> NormalizedError:
     """
     Unified error normalization entry point
@@ -524,20 +717,31 @@ def normalize_database_error(database_type: str, error_response: Any) -> Normali
     if db_type_lower == "oracle":
         if not isinstance(error_response, dict):
             error_response = {"message": str(error_response)}
-        return OracleErrorNormalizer.normalize(error_response)
+        normalized = OracleErrorNormalizer.normalize(error_response)
     elif db_type_lower == "doris":
         if not isinstance(error_response, dict):
             error_response = {"message": str(error_response)}
-        return DorisErrorNormalizer.normalize(error_response)
+        normalized = DorisErrorNormalizer.normalize(error_response)
     elif db_type_lower in ["postgres", "postgresql"]:
         if isinstance(error_response, dict):
             error_response = Exception(error_response.get("message", str(error_response)))
-        return PostgreSQLErrorNormalizer.normalize(error_response)
+        normalized = PostgreSQLErrorNormalizer.normalize(error_response)
+    elif db_type_lower == "redis":
+        if isinstance(error_response, dict):
+            error_response = Exception(error_response.get("message", str(error_response)))
+        normalized = RedisErrorNormalizer.normalize(error_response)
     else:
-        logger.warning(f"Unknown database type for error normalization: {database_type}")
-        return NormalizedError(
+        logger.warning(f"Unknown database/service type for error normalization: {database_type}")
+        normalized = NormalizedError(
             category=ErrorCategory.UNKNOWN,
             message=str(error_response),
             original_error=error_response,
             metadata={"database_type": database_type}
         )
+
+    # Attach error taxonomy for frontend recovery guidance
+    try:
+        normalized.metadata["error_taxonomy"] = build_error_taxonomy(normalized)
+    except Exception:
+        pass
+    return normalized

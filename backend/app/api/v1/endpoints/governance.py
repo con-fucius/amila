@@ -19,6 +19,7 @@ from app.core.rbac import (
     rbac_manager
 )
 from app.core.audit import audit_logger, AuditAction, AuditEntry
+from app.services.native_audit_service import native_audit_service
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -444,40 +445,75 @@ async def get_agent_activity(
     Allows admins to monitor requests made to AI agents and their subsequent actions.
     """
     try:
-        # Fetch raw logs
-        if user_filter:
-            entries = await audit_logger.get_user_audit_trail(user_filter, limit=limit)
-        elif action_type:
-            # Try to map string to Enum if possible, otherwise fail gracefully
-            try:
-                action_enum = AuditAction(action_type)
-                entries = await audit_logger.get_action_audit_trail(action_enum, limit=limit)
-            except ValueError:
-                entries = await audit_logger.get_recent_audit_trail(limit=limit)
-        else:
-            entries = await audit_logger.get_recent_audit_trail(limit=limit)
-
-        # Post-process for "Governance View"
-        # We want to highlight high-risk actions (SCHEMA_MODIFY, QUERY_EXECUTE)
         activity_log = []
         
-        for entry in entries:
-            # Basic entry
-            log_item = entry.to_dict()
-            
-            # Risk assessment enhancement
-            risk_level = "low"
-            if entry.action in [AuditAction.SCHEMA_MODIFY.value, AuditAction.USER_DELETE.value, AuditAction.ROLE_ASSIGN.value]:
-                risk_level = "critical"
-            elif entry.action in [AuditAction.QUERY_EXECUTE.value, AuditAction.CONFIG_UPDATE.value]:
-                risk_level = "medium"
-            
-            log_item["risk_metrics"] = {
-                "level": risk_level,
-                "requires_attention": risk_level in ["critical", "medium"] and not entry.success
-            }
-            
-            activity_log.append(log_item)
+        # Prefer native audit service for richer data (Postgres/Doris)
+        if settings.NATIVE_AUDIT_ENABLED:
+            try:
+                native_entries = await native_audit_service.query_audit_trail(
+                    session=None, # Use internal client
+                    user_id=user_filter,
+                    action=action_type,
+                    limit=limit
+                )
+                
+                for entry in native_entries:
+                    # Normalize native entry to match frontend expectations
+                    # entry is a dict
+                    
+                    # Risk assessment enhancement
+                    risk_level = "low"
+                    act = entry.get('action')
+                    success = entry.get('success')
+                    if act in [AuditAction.SCHEMA_MODIFY.value, AuditAction.USER_DELETE.value, AuditAction.ROLE_ASSIGN.value]:
+                        risk_level = "critical"
+                    elif act in [AuditAction.QUERY_EXECUTE.value, AuditAction.CONFIG_UPDATE.value]:
+                        risk_level = "medium"
+                    
+                    entry["risk_metrics"] = {
+                        "level": risk_level,
+                        "requires_attention": risk_level in ["critical", "medium"] and not success
+                    }
+                    activity_log.append(entry)
+                    
+                # If we got results, return them. If empty, fall back to Redis? 
+                # Native DB should be source of truth if enabled.
+            except Exception as e:
+                logger.error(f"Native audit query failed, falling back to Redis: {e}")
+                # Fallback to Redis below
+        
+        # Fallback to Redis if native didn't yield results or wasn't enabled/failed
+        if not activity_log:
+            # Fetch raw logs from Redis
+            if user_filter:
+                entries = await audit_logger.get_user_audit_trail(user_filter, limit=limit)
+            elif action_type:
+                # Try to map string to Enum if possible, otherwise fail gracefully
+                try:
+                    action_enum = AuditAction(action_type)
+                    entries = await audit_logger.get_action_audit_trail(action_enum, limit=limit)
+                except ValueError:
+                    entries = await audit_logger.get_recent_audit_trail(limit=limit)
+            else:
+                entries = await audit_logger.get_recent_audit_trail(limit=limit)
+
+            # Post-process for "Governance View"
+            for entry in entries:
+                log_item = entry.to_dict()
+                
+                # Risk assessment enhancement
+                risk_level = "low"
+                if entry.action in [AuditAction.SCHEMA_MODIFY.value, AuditAction.USER_DELETE.value, AuditAction.ROLE_ASSIGN.value]:
+                    risk_level = "critical"
+                elif entry.action in [AuditAction.QUERY_EXECUTE.value, AuditAction.CONFIG_UPDATE.value]:
+                    risk_level = "medium"
+                
+                log_item["risk_metrics"] = {
+                    "level": risk_level,
+                    "requires_attention": risk_level in ["critical", "medium"] and not entry.success
+                }
+                
+                activity_log.append(log_item)
 
         return {
             "status": "success",
@@ -485,7 +521,8 @@ async def get_agent_activity(
             "logs": activity_log,
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
-                "view": "governance_audit"
+                "view": "governance_audit",
+                "source": "native" if settings.NATIVE_AUDIT_ENABLED and activity_log and activity_log[0].get('database_type') else "redis"
             }
         }
 
@@ -500,27 +537,71 @@ async def get_audit_summary(
     """
     Get summary statistics for the dashboard.
     """
-    # In a real impl, this would use Redis aggregations/streams for performance.
-    # For now, we sample recent history.
-    recent_logs = await audit_logger.get_recent_audit_trail(limit=200)
-    
-    summary = {
-        "total_actions": len(recent_logs),
-        "errors": 0,
-        "query_executions": 0,
-        "schema_modifications": 0,
-        "unique_users": set()
-    }
-    
-    for log in recent_logs:
-        if not log.success:
-            summary["errors"] += 1
-        if log.action == AuditAction.QUERY_EXECUTE.value:
-            summary["query_executions"] += 1
-        if log.action == AuditAction.SCHEMA_MODIFY.value:
-            summary["schema_modifications"] += 1
-        summary["unique_users"].add(log.user)
+    try:
+        if settings.NATIVE_AUDIT_ENABLED:
+            try:
+                # Use native audit service for accurate aggregation
+                native_summary = await native_audit_service.generate_summary(session=None)
+                
+                # Transform to match frontend expectations if needed
+                # native_summary has "actions" list
+                
+                total_actions = 0
+                errors = 0
+                query_execs = 0
+                schema_mods = 0
+                unique_users = set()  # Not easily available from summary agg, maybe skip or fetch separate?
+                
+                # Native summary aggregation is by action
+                for act in native_summary.get("actions", []):
+                    cnt = act.get("count", 0)
+                    err = act.get("error_count", 0)
+                    action_name = act.get("action")
+                    
+                    total_actions += cnt
+                    errors += err
+                    
+                    if action_name == AuditAction.QUERY_EXECUTE.value:
+                        query_execs += cnt
+                    if action_name == AuditAction.SCHEMA_MODIFY.value:
+                        schema_mods += cnt
+                    
+                return {
+                    "total_actions": total_actions,
+                    "errors": errors,
+                    "query_executions": query_execs,
+                    "schema_modifications": schema_mods,
+                    "unique_users": [], # Expensive to compute from pre-aggregated summary
+                    "source": "native",
+                    "breakdown": native_summary
+                }
+            except Exception as e:
+                logger.error(f"Native audit summary failed: {e}")
+                
+        # Fallback to Redis sampling
+        recent_logs = await audit_logger.get_recent_audit_trail(limit=200)
         
-    summary["unique_users"] = list(summary["unique_users"])
-    
-    return summary
+        summary = {
+            "total_actions": len(recent_logs),
+            "errors": 0,
+            "query_executions": 0,
+            "schema_modifications": 0,
+            "unique_users": set(),
+            "source": "redis_sample"
+        }
+        
+        for log in recent_logs:
+            if not log.success:
+                summary["errors"] += 1
+            if log.action == AuditAction.QUERY_EXECUTE.value:
+                summary["query_executions"] += 1
+            if log.action == AuditAction.SCHEMA_MODIFY.value:
+                summary["schema_modifications"] += 1
+            summary["unique_users"].add(log.user)
+            
+        summary["unique_users"] = list(summary["unique_users"])
+        
+        return summary
+    except Exception as e:
+        logger.error(f"Audit summary generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

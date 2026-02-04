@@ -18,6 +18,7 @@ import json
 
 from app.utils.json_encoder import CustomJSONEncoder
 from app.core.structured_logging import get_iso_timestamp
+from app.services.webhook_dispatcher import WebhookDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,29 @@ class QueryStateManager:
             sql=meta.get("sql"),
             database_type=meta.get("database_type"),
         )
+
+        # Webhook notifications (best-effort, async)
+        if new_state in {QueryState.FINISHED, QueryState.ERROR, QueryState.REJECTED} and old_state != new_state:
+            try:
+                owner = None
+                async with self._metadata_lock:
+                    md = self._query_metadata.get(query_id)
+                    owner = md.user_id if md else meta.get("user_id")
+                if owner:
+                    event_name = f"query.{new_state.value}"
+                    payload = WebhookDispatcher.build_terminal_event_payload(
+                        query_id=query_id,
+                        state=new_state.value,
+                        timestamp=event.timestamp,
+                        metadata=meta,
+                    )
+                    WebhookDispatcher.dispatch_background(
+                        user_id=owner,
+                        event=event_name,
+                        payload=payload,
+                    )
+            except Exception:
+                pass
         
         # Notify all subscribers for this query
         await self._notify_subscribers(query_id, event)

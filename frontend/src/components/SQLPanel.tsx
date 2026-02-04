@@ -31,7 +31,7 @@ export function SQLPanel({
   onEdit,
   compact = false 
 }: SQLPanelProps) {
-  const [isOpen, setIsOpen] = useState(!compact)
+  const [isOpen, setIsOpen] = useState(false)
   const [showCost, setShowCost] = useState(false)
   const config = statusConfig[status]
   

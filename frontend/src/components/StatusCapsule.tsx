@@ -172,7 +172,7 @@ export function StatusCapsule({
                         </div>
 
                         <div className="flex items-center gap-1.5 pl-2 border-l border-white/5 ml-auto">
-                            <span className={cn("font-medium tracking-wide capitalize text-[8px]", config.color)}>
+                            <span className={cn("font-medium tracking-wide capitalize text-[7px]", config.color)}>
                                 {config.label}
                             </span>
                             <motion.div

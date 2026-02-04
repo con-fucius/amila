@@ -58,7 +58,8 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
         "graphiti_available": False,
         "enriched_schema": None,
         "sample_data": {},
-        "table_relationships": []
+        "table_relationships": [],
+        "join_paths": []
     }
     
     async with langfuse_span(
@@ -124,10 +125,62 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                 context["enriched_schema"] = enriched_schema
                 context["sample_data"] = enriched_schema.get("samples", {})
                 context["table_relationships"] = enriched_schema.get("relationships", [])
+                context["join_paths"] = enriched_schema.get("join_paths", [])
             
                 logger.info(f"Enriched schema context: {len(enriched_schema.get('tables', {}))} tables, "
                            f"{len(enriched_schema.get('samples', {}))} samples, "
                            f"{len(enriched_schema.get('relationships', []))} relationships")
+                
+                # Prepare sample data map
+                sample_data_map = {}
+                for table_name in tables_needing_descriptions[:5]:
+                    if table_name in context.get("sample_data", {}):
+                        sample_data_map[table_name] = context["sample_data"][table_name]
+
+                # Prepare tables metadata list
+                tables_metadata = []
+                for tname, tinfo in enriched_schema.get("tables", {}).items():
+                    if tname in tables_needing_descriptions:
+                        # Ensure tinfo is a dict and has name
+                        if isinstance(tinfo, dict):
+                            table_meta = tinfo.copy()
+                            table_meta["name"] = tname
+                            # Add sample data if available
+                            if tname in sample_data_map:
+                                table_meta["sample_data"] = sample_data_map[tname]
+                            tables_metadata.append(table_meta)
+                
+                # Generate descriptions
+                descriptions = await description_service.batch_generate_descriptions(
+                    tables=tables_metadata
+                )
+                
+                # Update enriched_schema with generated descriptions
+                generated_count = 0
+                for table_name, desc_info in descriptions.items():
+                    if table_name in enriched_schema["tables"]:
+                        enriched_schema["tables"][table_name]["description"] = desc_info.get("table_description", "")
+                        generated_count += 1
+                        
+                        # Also update column descriptions
+                        col_descriptions = desc_info.get("column_descriptions", {})
+                        for col_name, col_desc in col_descriptions.items():
+                            for col in enriched_schema["tables"][table_name].get("columns", []):
+                                if col.get("name") == col_name:
+                                    col["description"] = col_desc
+                                    break
+                        
+                try:
+                    if generated_count > 0:
+                        logger.info(f"Auto-generated descriptions for {generated_count} tables")
+                        context["schema_descriptions_auto_generated"] = True
+                        context["schema_descriptions_count"] = generated_count
+                        span["output"]["schema_descriptions_auto_generated"] = generated_count
+                except ImportError:
+                    logger.debug("SchemaDescriptionService not available, skipping auto-description")
+                except Exception as desc_err:
+                    logger.warning(f"Schema description auto-generation failed (non-fatal): {desc_err}")
+                    
             except Exception as e:
                 logger.warning(f"Schema enrichment failed, falling back to basic schema: {e}")
             
@@ -238,7 +291,8 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                 from app.services.semantic_schema_index_service import SemanticSchemaIndexService
                 from app.services.context_manager_service import SmartContextManager
                 sem = SemanticSchemaIndexService()
-                await sem.ensure_built_if_empty()
+                # Fix 7: Auto-discover and index new tables continuously
+                await sem.auto_discover_and_index()
                 semantic_hits = await sem.search(state["user_query"], top_k=10)
                 context["semantic_candidates"] = semantic_hits
                 user_query_upper = state["user_query"].upper()
@@ -253,7 +307,80 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                 if not explicitly_mentioned and dynamic_schema_tables:
                     explicitly_mentioned = [list(dynamic_schema_tables.keys())[0]]
                 
+                try:
+                    from app.services.schema_description_service import SchemaDescriptionService
+                    
+                    description_service = SchemaDescriptionService()
+                    tables_metadata = []
+                    
+                    # Identify tables/columns without descriptions
+                    for table_name, table_info in enriched_schema.get("tables", {}).items():
+                        # We only check table level for now to avoid too many calls
+                        if not table_info or not isinstance(table_info, dict): # Changed list to dict based on common schema structure
+                            continue
+                            
+                        # If we have descriptions in context already, skip
+                        if table_name in context.get("table_descriptions", {}):
+                            continue
+                            
+                        tables_metadata.append({
+                            "name": table_name,
+                            "columns": table_info.get("columns", []), # Access columns from dict
+                            "sample_data": context.get("sample_data", {}).get(table_name, [])
+                        })
+                    
+                    if tables_metadata:
+                        logger.info(f"Auto-generating descriptions for {len(tables_metadata)} tables")
+                        descriptions = await description_service.batch_generate_descriptions(
+                            tables=tables_metadata,
+                            use_llm=True
+                        )
+                        
+                        if not context.get("table_descriptions"):
+                            context["table_descriptions"] = {}
+                            
+                        for tname, desc_obj in descriptions.items():
+                            context["table_descriptions"][tname] = desc_obj.description
+                            
+                            # Also update the enriched schema if possible
+                            # context["enriched_schema"]["tables"][tname]
+                except Exception as e:
+                    logger.warning(f"Schema description auto-generation failed (non-fatal): {e}")
+                
                 selected_tables = explicitly_mentioned[:1]  # Only use ONE table
+                
+                # Fix 8: Apply AD Group permissions filter to selected tables
+                try:
+                    from app.services.ad_group_mapping_service import ADGroupMappingService
+                    
+                    user_roles = state.get("user_roles", [])
+                    user_email = state.get("user_email")
+                    
+                    if user_email or user_roles:
+                        resolved_perms = await ADGroupMappingService.resolve_user_permissions(
+                            user_email=user_email,
+                            ad_groups=user_roles
+                        )
+                        
+                        # Get visible tables with their permission levels
+                        visible_tables = await ADGroupMappingService.filter_schema_by_permissions(
+                            schema_tables=dynamic_schema_tables,
+                            resolved_permissions=resolved_perms
+                        )
+                        
+                        # Filter selected tables to only those user can see
+                        selected_tables = [t for t in selected_tables if t in visible_tables]
+                        
+                        context["user_permissions"] = {
+                            "resolved_groups": resolved_perms.resolved_groups,
+                            "visible_tables": list(visible_tables.keys()),
+                            "hidden_tables_count": len(dynamic_schema_tables) - len(visible_tables)
+                        }
+                        span["output"]["ad_group_permissions"] = context["user_permissions"]
+                        logger.info(f"Applied AD group permissions: {len(selected_tables)} tables accessible")
+                except Exception as ad_err:
+                    logger.warning(f"AD group permission filter failed (non-fatal): {ad_err}")
+                
                 if selected_tables and dynamic_schema_tables:
                     # Filter schema_metadata tables down to selected set
                     filtered = {t: cols for t, cols in dynamic_schema_tables.items() if t in selected_tables}
@@ -304,6 +431,7 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
             if ExecState:
                 discovered_tables = context.get("enriched_schema", {}).get("tables", {})
                 discovered_relationships = context.get("table_relationships", [])
+                join_paths = context.get("join_paths", [])
                 await emit_state_event(state, ExecState.PREPARED, {
                     "similar": len(context.get("similar_queries", [])),
                     "thinking_steps": [
@@ -314,6 +442,7 @@ async def retrieve_context_node(state: QueryState) -> QueryState:
                     "discoveries": {
                         "tables": list(discovered_tables.keys())[:5],
                         "relationships_count": len(discovered_relationships),
+                        "join_paths_count": len(join_paths),
                         "schema_enriched": context.get("enriched_schema") is not None
                     }
                 })

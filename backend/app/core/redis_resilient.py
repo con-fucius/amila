@@ -8,29 +8,43 @@ Provides fault-tolerant Redis operations with:
 - Comprehensive error handling for all operations
 - Health monitoring and recovery
 """
-
-import asyncio
 import logging
-from typing import Any, Optional, Callable
-from datetime import datetime, timezone, timedelta
+import asyncio
 from enum import Enum
+from datetime import datetime, timezone
+from typing import Optional, Any, Callable, Dict, List, TypeVar, Union
 from collections import defaultdict
 from functools import wraps
 
-try:
-    from redis.exceptions import RedisError, ConnectionError, TimeoutError
-except ImportError:
-    # Fallback for testing without redis installed
-    class RedisError(Exception):
-        pass
-    class ConnectionError(RedisError):
-        pass
-    class TimeoutError(RedisError):
-        pass
-
 from app.core.exceptions import ExternalServiceException
+from app.core.error_normalizer import normalize_database_error
+
+from tenacity import (
+    AsyncRetrying,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type
+)
+from prometheus_client import Counter, Histogram
 
 logger = logging.getLogger(__name__)
+
+# Prometheus Metrics
+REDIS_OP_TOTAL = Counter(
+    "amila_redis_operation_total",
+    "Total Redis operations by type and result",
+    ["operation", "result"]
+)
+REDIS_OP_LATENCY = Histogram(
+    "amila_redis_operation_duration_seconds",
+    "Redis operation latency in seconds",
+    ["operation"]
+)
+REDIS_CIRCUIT_STATE = Counter(
+    "amila_redis_circuit_state_changes_total",
+    "Total Redis circuit state changes",
+    ["state"]
+)
 
 
 class CircuitState(Enum):
@@ -117,6 +131,7 @@ class CircuitBreaker:
             )
             self.state = CircuitState.OPEN
             self.last_state_change = datetime.now(timezone.utc)
+            REDIS_CIRCUIT_STATE.labels(state="open").inc()
     
     def _half_open_circuit(self):
         """Half-open circuit (allow test requests)"""
@@ -124,6 +139,7 @@ class CircuitBreaker:
         self.state = CircuitState.HALF_OPEN
         self.success_count = 0
         self.last_state_change = datetime.now(timezone.utc)
+        REDIS_CIRCUIT_STATE.labels(state="half_open").inc()
     
     def _close_circuit(self):
         """Close circuit (normal operation)"""
@@ -132,6 +148,7 @@ class CircuitBreaker:
         self.failure_count = 0
         self.success_count = 0
         self.last_state_change = datetime.now(timezone.utc)
+        REDIS_CIRCUIT_STATE.labels(state="closed").inc()
     
     def get_state_info(self) -> dict:
         """Get current circuit breaker state"""
@@ -250,7 +267,7 @@ class ResilientRedisWrapper:
         **kwargs
     ) -> Any:
         """
-        Execute Redis operation with circuit breaker and fallback
+        Execute Redis operation with circuit breaker, retries, and fallback
         
         Args:
             operation: Redis operation to execute
@@ -264,32 +281,49 @@ class ResilientRedisWrapper:
         # Check circuit breaker
         if not self.circuit_breaker.can_attempt():
             logger.debug(f"Circuit breaker OPEN, using fallback for {operation_name}")
+            REDIS_OP_TOTAL.labels(operation=operation_name, result="circuit_breaker_open").inc()
             if fallback_operation:
                 result = await fallback_operation(*args, **kwargs) if asyncio.iscoroutinefunction(fallback_operation) else fallback_operation(*args, **kwargs)
                 self.operation_stats[operation_name]["fallback"] += 1
                 return result
             return None
         
-        # Attempt Redis operation
+        # Attempt Redis operation with retries
         try:
-            result = await operation(*args, **kwargs)
+            retry_config = AsyncRetrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
+                retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+                reraise=True
+            )
+            
+            with REDIS_OP_LATENCY.labels(operation=operation_name).time():
+                result = await retry_config(operation, *args, **kwargs)
+            
             self.circuit_breaker.record_success()
             self.operation_stats[operation_name]["success"] += 1
+            REDIS_OP_TOTAL.labels(operation=operation_name, result="success").inc()
             return result
             
-        except (ExternalServiceException, RedisError, ConnectionError, TimeoutError) as e:
-            logger.warning(f"Redis operation '{operation_name}' failed: {e}")
+        except (ExternalServiceException, Exception) as e:
+            # Normalize the error
+            normalized = normalize_database_error("redis", e)
+            logger.warning(f"Redis operation '{operation_name}' failed after retries: {normalized.message}")
+            
             self.circuit_breaker.record_failure()
             self.operation_stats[operation_name]["failure"] += 1
+            REDIS_OP_TOTAL.labels(operation=operation_name, result=normalized.category.value).inc()
             
             # Use fallback if available
             if fallback_operation:
                 try:
                     result = await fallback_operation(*args, **kwargs) if asyncio.iscoroutinefunction(fallback_operation) else fallback_operation(*args, **kwargs)
                     self.operation_stats[operation_name]["fallback"] += 1
+                    REDIS_OP_TOTAL.labels(operation=operation_name, result="fallback").inc()
                     return result
                 except Exception as fallback_error:
                     logger.error(f"Fallback operation failed for '{operation_name}': {fallback_error}")
+                    REDIS_OP_TOTAL.labels(operation=operation_name, result="fallback_failed").inc()
             
             return None
         
@@ -298,15 +332,18 @@ class ResilientRedisWrapper:
             logger.error(f"Unexpected error in Redis operation '{operation_name}': {e}")
             self.circuit_breaker.record_failure()
             self.operation_stats[operation_name]["failure"] += 1
+            REDIS_OP_TOTAL.labels(operation=operation_name, result="unexpected_error").inc()
             
             # Use fallback if available
             if fallback_operation:
                 try:
                     result = await fallback_operation(*args, **kwargs) if asyncio.iscoroutinefunction(fallback_operation) else fallback_operation(*args, **kwargs)
                     self.operation_stats[operation_name]["fallback"] += 1
+                    REDIS_OP_TOTAL.labels(operation=operation_name, result="fallback").inc()
                     return result
                 except Exception as fallback_error:
                     logger.error(f"Fallback operation failed for '{operation_name}': {fallback_error}")
+                    REDIS_OP_TOTAL.labels(operation=operation_name, result="fallback_failed").inc()
             
             return None
     

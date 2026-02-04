@@ -109,7 +109,30 @@ class SkillsLoaderService:
     @classmethod
     def load_schema_mapping_skills(cls) -> Optional[Dict[str, Any]]:
         """Load schema mapping skills"""
-        return cls.load_skill("schema_mapping_skills")
+        base = cls.load_skill("schema_mapping_skills") or {}
+        auto = cls.load_skill("auto_generated_mappings") or {}
+
+        if not base and not auto:
+            return None
+
+        merged = dict(base) if isinstance(base, dict) else {}
+
+        # Merge auto-generated business term mappings
+        base_mappings = merged.get("business_term_mappings", {}) if isinstance(merged, dict) else {}
+        auto_mappings = auto.get("business_term_mappings", {}) if isinstance(auto, dict) else {}
+
+        if isinstance(base_mappings, dict) and isinstance(auto_mappings, dict):
+            merged["business_term_mappings"] = {**base_mappings, **auto_mappings}
+
+        # Preserve top-level metadata if missing
+        if "name" not in merged:
+            merged["name"] = "schema_mapping_skills"
+        if "version" not in merged:
+            merged["version"] = "1.0"
+        if "enabled" not in merged:
+            merged["enabled"] = True
+
+        return merged
     
     @classmethod
     def get_dialect_hints(cls, database_type: str) -> str:

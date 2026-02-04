@@ -239,11 +239,9 @@ class GraphitiClient:
 
     async def _initialize_with_bedrock(self) -> "Graphiti":
         """Initialize Graphiti with AWS Bedrock LLM provider (Production)"""
-        # NOTE:
-        # Official Graphiti documentation (as of Nov 2025) focuses on providers
+        # Official Graphiti documentation focuses on providers
         # with strong structured-output support (e.g. Gemini, OpenAI). There is
         # no stable, documented Bedrock client wiring in graphiti-core yet.
-        #
         # To avoid a half-implemented or misleading integration, we fail fast
         # here with a descriptive error instead of attempting an ad-hoc setup.
         raise GraphitiClientError(

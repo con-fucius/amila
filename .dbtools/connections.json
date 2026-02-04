@@ -1,0 +1,40 @@
+{
+  "connections": [
+    {
+      "name": "FREEPDB1",
+      "type": "basic",
+      "user": "system",
+      "connectType": "BASIC",
+      "customUrl": "",
+      "host": "localhost",
+      "port": "1521",
+      "serviceName": "FREEPDB1",
+      "sid": "",
+      "role": "",
+      "OS_AUTHENTICATION": "false",
+      "KERBEROS_AUTHENTICATION": "false",
+      "PROXY_TYPE": "NONE",
+      "PROXY_USER_NAME": "",
+      "SAVE_PASSWORD": "true",
+      "password": "password"
+    },
+    {
+      "name": "TestUserCSV",
+      "type": "basic",
+      "user": "TestUserCSV",
+      "connectType": "BASIC",
+      "customUrl": "",
+      "host": "localhost",
+      "port": "1521",
+      "serviceName": "FREEPDB1",
+      "sid": "",
+      "role": "",
+      "OS_AUTHENTICATION": "false",
+      "KERBEROS_AUTHENTICATION": "false",
+      "PROXY_TYPE": "NONE",
+      "PROXY_USER_NAME": "",
+      "SAVE_PASSWORD": "true",
+      "password": "TestPassword123"
+    }
+  ]
+}

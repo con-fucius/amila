@@ -7,6 +7,7 @@
  */
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || ''
+import type { DatabaseType } from '@/types/domain'
 
 export class APIError extends Error {
   status: number;
@@ -56,11 +57,11 @@ function isTokenExpired(token: string, bufferSeconds: number = 300): boolean {
   try {
     const parts = token.split('.')
     if (parts.length !== 3) return true
-    
+
     const payload = JSON.parse(atob(parts[1]))
     const exp = payload.exp
     if (!exp) return true
-    
+
     const now = Math.floor(Date.now() / 1000)
     return exp < (now + bufferSeconds)
   } catch {
@@ -83,7 +84,30 @@ export interface QueryRequest {
   query: string
   user_id?: string
   session_id?: string
-  database_type?: 'oracle' | 'doris' | 'postgres'
+  database_type?: DatabaseType
+  auto_approve?: boolean
+}
+
+export interface WebhookItem {
+  webhook_id: string
+  user_id?: string
+  url: string
+  events: string[]
+  active: boolean
+  secret?: string | null
+  created_at: string
+  updated_at: string
+  last_delivery_at?: string | null
+  last_status_code?: number | null
+  last_error?: string | null
+  consecutive_failures?: number
+}
+
+export interface EnhanceQueryResponse {
+  original_query: string
+  enhanced_query: string
+  method: string
+  context_used?: boolean
 }
 /** Mirrors backend OrchestratorQueryResponse and tolerates extra/optional fields from the backend. */
 export interface QueryResponse {
@@ -102,6 +126,13 @@ export interface QueryResponse {
     // Allow backend to add extra metadata without breaking the client
     [key: string]: any
   }
+  result_ref?: {
+    query_id: string
+    row_count: number
+    columns: string[]
+    cache_status?: string
+  }
+  results_truncated?: boolean
   // Optional alternate payload some backends may use
   result?: any
   visualization?: any
@@ -120,6 +151,71 @@ export interface QueryResponse {
   message?: string
   is_conversational?: boolean
   intent?: string
+  structured_intent?: {
+    query_type: string
+    complexity: string
+    domain: string
+    temporal: string
+    expected_cardinality: string
+    tables: string[]
+    entities: Array<{
+      name: string
+      type: string
+      confidence: number
+    }>
+    time_period?: string
+    aggregations: Array<{
+      function: string
+      column: string
+      alias?: string
+    }>
+    filters: Array<{
+      column: string
+      operator: string
+      value?: string
+    }>
+    joins_count: number
+    source: string
+    confidence: number
+    measures: string[]
+    dimensions: string[]
+  }
+}
+
+export interface RepairTraceEntry {
+  type: string
+  error: string
+  action: string
+  before_sql?: string
+  after_sql?: string
+  diff?: string
+  timestamp: string
+}
+
+export interface SystemDiagnosticsSummary {
+  timestamp: string
+  overall_status: string // HEALTHY, DEGRADED, CRITICAL
+  mcp_tools: any[]
+  connection_pools: any[]
+  degraded_components: any[]
+  active_queries: number
+  recent_failures: any[]
+  performance_metrics: {
+    avg_query_latency_ms: number
+    queries_per_minute: number
+    error_rate: number
+  }
+  business_kpis: {
+    total_query_cost_24h: number
+    global_rejection_rate: number
+    high_risk_alerts_count: number
+  }
+  alerts: {
+    total_active: number
+    critical: number
+    warning: number
+    latest_alerts: any[]
+  }
 }
 
 export interface HistoryAPIResponse {
@@ -142,6 +238,13 @@ export interface DirectSQLResponse {
   message?: string
   sql?: string
   results?: DirectSQLResults
+  result_ref?: {
+    query_id: string
+    row_count: number
+    columns: string[]
+    cache_status?: string
+  }
+  results_truncated?: boolean
   error?: string
   execution_time_ms?: number
 }
@@ -151,6 +254,10 @@ export interface ApprovalRequest {
   approved: boolean
   modified_sql?: string
   rejection_reason?: string
+  decision_reason?: string
+  constraints?: {
+    max_rows?: number
+  }
 }
 
 class APIService {
@@ -215,6 +322,7 @@ class APIService {
           }
           // Refresh failed - clear tokens and notify
           this.clearAuthTokens()
+          window.dispatchEvent(new Event('auth-logout'))
           console.warn('Session expired - please log in again')
         }
 
@@ -244,7 +352,7 @@ class APIService {
       throw new APIError(error instanceof Error ? error.message : 'Network error', 0);
     }
   }
-  
+
   /**
    * Ensure we have a valid (non-expired) access token before making requests
    */
@@ -254,21 +362,21 @@ class APIService {
       await this.tryRefreshToken()
     }
   }
-  
+
   /**
    * Attempt to refresh the access token using the refresh token
    */
   private async tryRefreshToken(): Promise<boolean> {
     const refreshToken = localStorage.getItem('refresh_token')
     if (!refreshToken) return false
-    
+
     try {
       const response = await fetch(`${this.baseURL}/api/v1/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refresh_token: refreshToken }),
       })
-      
+
       if (response.ok) {
         const data = await response.json()
         localStorage.setItem('access_token', data.access_token)
@@ -281,10 +389,10 @@ class APIService {
     } catch (e) {
       console.warn('[apiService] Token refresh failed:', e)
     }
-    
+
     return false
   }
-  
+
   /**
    * Clear stored auth tokens
    */
@@ -296,7 +404,7 @@ class APIService {
   async submitQuery(request: QueryRequest): Promise<QueryResponse> {
     // Get authenticated user from token if available
     const authenticatedUserId = this.getAuthenticatedUserId()
-    
+
     return this.request<QueryResponse>('/api/v1/queries/process', {
       method: 'POST',
       body: JSON.stringify({
@@ -305,10 +413,11 @@ class APIService {
         user_id: authenticatedUserId || request.user_id || 'default_user',
         session_id: request.session_id || this.generateSessionId(),
         database_type: request.database_type || 'doris',
+        auto_approve: request.auto_approve || false,
       }),
     })
   }
-  
+
   /**
    * Extract user ID from stored JWT token
    */
@@ -316,11 +425,11 @@ class APIService {
     try {
       const token = localStorage.getItem('access_token')
       if (!token) return null
-      
+
       // Decode JWT payload (base64)
       const parts = token.split('.')
       if (parts.length !== 3) return null
-      
+
       const payload = JSON.parse(atob(parts[1]))
       return payload.sub || null
     } catch (e) {
@@ -337,6 +446,22 @@ class APIService {
         clarification: params.clarification,
         original_query: params.original_query,
         database_type: params.database_type,
+      }),
+    })
+  }
+
+  async enhanceQuery(params: {
+    query: string
+    conversation_history?: Array<{ role: string; content: string }>
+    database_type?: 'oracle' | 'doris' | 'postgres'
+  }): Promise<EnhanceQueryResponse> {
+    return this.request<EnhanceQueryResponse>('/api/v1/queries/enhance', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: params.query,
+        conversation_history: params.conversation_history || [],
+        database_type: params.database_type,
+        use_llm: true,
       }),
     })
   }
@@ -411,6 +536,7 @@ class APIService {
         approved: request.approved,
         modified_sql: request.modified_sql,
         rejection_reason: request.rejection_reason,
+        constraints: request.constraints,
       }),
     })
   }
@@ -422,6 +548,45 @@ class APIService {
     cancelled: boolean
   }> {
     return this.request(`/api/v1/queries/${queryId}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  async getRateLimitStatus(endpoints?: string[]): Promise<{ status: string; user: string; tier: string; endpoints: Record<string, any> }> {
+    const params = new URLSearchParams()
+    if (endpoints && endpoints.length) {
+      for (const ep of endpoints) params.append('endpoints', ep)
+    }
+    const qs = params.toString()
+    return this.request(`/api/v1/ratelimits/status${qs ? `?${qs}` : ''}`)
+  }
+
+  async listWebhooks(): Promise<{ status: string; webhooks: WebhookItem[] }> {
+    return this.request('/api/v1/webhooks')
+  }
+
+  async createWebhook(body: { url: string; events: string[]; active?: boolean; secret?: string }): Promise<{ status: string; webhook: WebhookItem }> {
+    return this.request('/api/v1/webhooks', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  }
+
+  async updateWebhook(webhookId: string, body: { url?: string; events?: string[]; active?: boolean; secret?: string }): Promise<{ status: string; webhook: WebhookItem }> {
+    return this.request(`/api/v1/webhooks/${encodeURIComponent(webhookId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+  }
+
+  async deleteWebhook(webhookId: string): Promise<{ status: string; deleted: string }> {
+    return this.request(`/api/v1/webhooks/${encodeURIComponent(webhookId)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async testWebhook(webhookId: string): Promise<{ status: string }> {
+    return this.request(`/api/v1/webhooks/${encodeURIComponent(webhookId)}/test`, {
       method: 'POST',
       body: JSON.stringify({}),
     })
@@ -444,7 +609,7 @@ class APIService {
     if (options?.connection_name) params.set('connection_name', options.connection_name)
     if (options?.use_cache !== undefined) params.set('use_cache', String(options.use_cache))
     if (options?.database_type) params.set('database_type', options.database_type)
-    
+
     const queryString = params.toString()
     const endpoint = `/api/v1/schema/${queryString ? `?${queryString}` : ''}`
 
@@ -485,6 +650,20 @@ class APIService {
         database_type: database_type || 'doris',
       }),
     })
+  }
+
+  async getQueryResultsPage(queryId: string, page: number, pageSize: number): Promise<{
+    status: string
+    query_id: string
+    results: { columns: string[]; rows: any[]; row_count: number; execution_time_ms: number }
+    page: number
+    page_size: number
+    total_pages: number
+  }> {
+    const params = new URLSearchParams()
+    params.set('page', String(page))
+    params.set('page_size', String(pageSize))
+    return this.request(`/api/v1/queries/${encodeURIComponent(queryId)}/results?${params.toString()}`)
   }
 
   /**
@@ -570,6 +749,62 @@ class APIService {
   }
 
   /**
+   * Create a scheduled report (cron-based)
+   */
+  async createReportSchedule(params: {
+    name: string
+    cron: string
+    sql_query: string
+    database_type: string
+    connection_name?: string
+    format: 'html' | 'pdf' | 'docx'
+    recipients: string[]
+  }): Promise<{ status: string; schedule?: any; message?: string }> {
+    return this.request('/api/v1/reports/schedule', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    })
+  }
+
+  /**
+   * List report schedules for current user
+   */
+  async listReportSchedules(limit: number = 50): Promise<{ status: string; schedules: any[] }> {
+    return this.request(`/api/v1/reports/schedules?limit=${limit}`)
+  }
+
+  /**
+   * Delete a report schedule by ID
+   */
+  async deleteReportSchedule(scheduleId: string): Promise<{ status: string; deleted: string }> {
+    return this.request(`/api/v1/reports/schedule/${encodeURIComponent(scheduleId)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  /**
+   * Save dashboard from query results
+   */
+  async createDashboardFromQuery(params: {
+    sql_query: string
+    query_results: { columns: string[]; rows: any[][]; row_count?: number }
+    title?: string
+    description?: string
+  }): Promise<{ status: string; dashboard?: any; message?: string }> {
+    return this.request('/api/v1/dashboards/generate', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    })
+  }
+
+  /**
+   * List dashboards for current user
+   */
+  async listDashboards(limit: number = 20): Promise<{ status: string; dashboards: any[]; count: number }> {
+    return this.request(`/api/v1/dashboards?limit=${limit}`)
+  }
+
+  /**
    * Report frontend errors to backend for centralized logging
    */
   async reportError(params: {
@@ -644,6 +879,287 @@ class APIService {
         }
       }
     }
+  }
+
+  // ============================================================================
+  // Budget Forecasting API Methods
+  // ============================================================================
+
+  /**
+   * Get budget forecast for current user
+   */
+  async getBudgetForecast(budgetLimit?: number): Promise<{
+    current_period: string
+    current_usage: number
+    forecasted_usage: number
+    budget_limit: number
+    projected_overrun: number | null
+    confidence_interval_low: number
+    confidence_interval_high: number
+    days_remaining: number
+    trend_direction: string
+    daily_average: number
+    recommended_daily_budget: number
+  }> {
+    const params = budgetLimit ? `?budget_limit=${budgetLimit}` : ''
+    return this.request(`/api/v1/cost/forecast${params}`)
+  }
+
+  /**
+   * Get cost anomalies for current user
+   */
+  async getCostAnomalies(days: number = 30): Promise<Array<{
+    date: string
+    cost: number
+    expected_cost: number
+    deviation_percentage: number
+    severity: string
+    description: string
+  }>> {
+    return this.request(`/api/v1/cost/anomalies?days=${days}`)
+  }
+
+  /**
+   * Get budget alerts for current user
+   */
+  async getBudgetAlerts(budgetLimit?: number): Promise<Array<{
+    alert_level: string
+    message: string
+    current_usage: number
+    budget_limit: number
+    percentage_used: number
+    recommended_action: string
+    triggered_at: string
+  }>> {
+    const params = budgetLimit ? `?budget_limit=${budgetLimit}` : ''
+    return this.request(`/api/v1/cost/budget-alerts${params}`)
+  }
+
+  /**
+   * Get cost optimization recommendations
+   */
+  async getCostOptimizationRecommendations(): Promise<Array<{
+    type: string
+    priority: string
+    message: string
+    details: string
+    potential_savings: string
+  }>> {
+    return this.request('/api/v1/cost/optimization')
+  }
+
+  // ============================================================================
+  // Skill Generator API Methods
+  // ============================================================================
+
+  /**
+   * List auto-generated skills
+   */
+  async listSkills(params?: {
+    skill_type?: string
+    min_confidence?: number
+    limit?: number
+    offset?: number
+  }): Promise<{
+    skills: Array<{
+      skill_id: string
+      skill_type: string
+      name: string
+      description: string
+      confidence: number
+      generated_at: string
+      effectiveness_score: number
+      usage_count: number
+      yaml_preview?: string
+    }>
+    total: number
+    filters_applied: Record<string, any>
+  }> {
+    const queryParams = new URLSearchParams()
+    if (params?.skill_type) queryParams.set('skill_type', params.skill_type)
+    if (params?.min_confidence) queryParams.set('min_confidence', String(params.min_confidence))
+    if (params?.limit) queryParams.set('limit', String(params.limit))
+    if (params?.offset) queryParams.set('offset', String(params.offset))
+
+    const query = queryParams.toString()
+    return this.request(`/api/v1/skills/list${query ? `?${query}` : ''}`)
+  }
+
+  /**
+   * Get skill details
+   */
+  async getSkillDetail(skillId: string): Promise<{
+    skill_id: string
+    skill_type: string
+    name: string
+    description: string
+    yaml_content: string
+    source_queries: string[]
+    confidence: number
+    generated_at: string
+    effectiveness_score: number
+    usage_count: number
+  }> {
+    return this.request(`/api/v1/skills/${skillId}`)
+  }
+
+  /**
+   * Generate skills from patterns
+   */
+  async generateSkills(params?: {
+    min_frequency?: number
+    min_confidence?: number
+    skill_type?: string
+  }): Promise<{
+    success: boolean
+    generated_count: number
+    skills: Array<{
+      skill_id: string
+      skill_type: string
+      name: string
+      confidence: number
+      generated_at: string
+    }>
+    message: string
+  }> {
+    return this.request('/api/v1/skills/generate', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    })
+  }
+
+  /**
+   * Approve or reject a skill
+   */
+  async approveSkill(skillId: string, approved: boolean, reason?: string): Promise<{
+    success: boolean
+    skill_id: string
+    approved: boolean
+    message: string
+  }> {
+    return this.request(`/api/v1/skills/${skillId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approved, reason }),
+    })
+  }
+
+  /**
+   * Delete a skill
+   */
+  async deleteSkill(skillId: string): Promise<{
+    success: boolean
+    skill_id: string
+    message: string
+  }> {
+    return this.request(`/api/v1/skills/${skillId}`, {
+      method: 'DELETE',
+    })
+  }
+
+  /**
+   * Get skill statistics
+   */
+  async getSkillStats(): Promise<{
+    total_skills: number
+    by_type: Record<string, number>
+    avg_confidence: number
+    avg_effectiveness: number
+    total_usage: number
+    recently_generated: number
+  }> {
+    return this.request('/api/v1/skills/stats/summary')
+  }
+
+  /**
+   * Export skills to YAML
+   */
+  async exportSkills(skillIds?: string[]): Promise<{
+    success: boolean
+    export_format: string
+    content: string
+    filename: string
+    skill_count: number
+  }> {
+    return this.request('/api/v1/skills/export', {
+      method: 'POST',
+      body: JSON.stringify({ skill_ids: skillIds, format: 'yaml' }),
+    })
+  }
+
+  /**
+   * Get business metrics glossary
+   */
+  async getMetricsGlossary(): Promise<{
+    status: string
+    glossary: Array<{
+      metric_id: string
+      name: string
+      description: string
+      owner: string
+      tags: string[]
+      business_definition: string
+      calculation_logic: string
+      usage_count: number
+    }>
+  }> {
+    return this.request('/api/v1/analytics/metrics/glossary')
+  }
+
+  /**
+   * Get comprehensive system diagnostics and business KPIs
+   */
+  async getSystemDiagnostics(): Promise<SystemDiagnosticsSummary> {
+    return this.request<SystemDiagnosticsSummary>('/api/v1/diagnostics/status')
+  }
+
+  /**
+   * Get SQL repair trajectory for a specific query
+   */
+  async getRepairTrace(queryId: string): Promise<RepairTraceEntry[]> {
+    return this.request<RepairTraceEntry[]>(`/api/v1/diagnostics/repair-trace/${queryId}`)
+  }
+
+  // ============================================================================
+  // Governance API Methods
+  // ============================================================================
+
+  /**
+   * Get audit summary statistics
+   */
+  async getGovernanceAuditSummary(): Promise<any> {
+    return this.request('/api/v1/governance/audit/summary')
+  }
+
+  /**
+   * Get audit activity logs
+   */
+  async getGovernanceAuditActivity(limit: number = 50, userFilter?: string, actionType?: string): Promise<any> {
+    const params = new URLSearchParams()
+    params.set('limit', limit.toString())
+    if (userFilter) params.set('user_filter', userFilter)
+    if (actionType) params.set('action_type', actionType)
+    return this.request(`/api/v1/governance/audit/activity?${params.toString()}`)
+  }
+
+  /**
+   * Get agent capabilities
+   */
+  async getAgentCapabilities(): Promise<any[]> {
+    return this.request('/api/v1/governance/capabilities/agents')
+  }
+
+  /**
+   * Get system capabilities
+   */
+  async getSystemCapabilities(): Promise<any[]> {
+    return this.request('/api/v1/governance/capabilities/systems')
+  }
+
+  /**
+   * Get misconfigurations and warnings
+   */
+  async getMisconfigurations(): Promise<any> {
+    return this.request('/api/v1/governance/capabilities/misconfigurations')
   }
 }
 

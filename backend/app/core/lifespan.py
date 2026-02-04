@@ -235,10 +235,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         success, err = await init_doris()
         app.state.doris_initialized = success
         if not success:
-            startup_errors.append(f"Doris init failed: {err}")
+            startup_errors.append(f"Doris: {err}")
             logger.warning(f"Doris init failed: {err}")
         else:
-            logger.info("Doris MCP initialized successfully")
+            logger.info("Doris MCP ready")
     
     # 1.5 PostgreSQL
     if settings.POSTGRES_ENABLED:
@@ -247,10 +247,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.postgres_initialized = success
             span["output"] = {"status": "success" if success else "error", "error": err}
             if not success:
-                startup_errors.append(f"PostgreSQL init failed: {err}")
+                startup_errors.append(f"PostgreSQL: {err}")
                 logger.warning(f"PostgreSQL init failed: {err}")
             else:
-                logger.info("PostgreSQL client initialized successfully")
+                logger.info("PostgreSQL ready")
 
     # 2. Encryption Service
     async with startup_span("startup.encryption", metadata={"component": "encryption"}) as span:
@@ -258,18 +258,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.core.encryption import get_encryption_service
             encryption_service = get_encryption_service()
             if encryption_service.is_enabled():
-                logger.info("Encryption service initialized and enabled")
+                logger.info("Encryption enabled")
                 span["output"] = {"status": "success", "enabled": True}
                 component_status["encryption"] = {"status": "success", "enabled": True}
             else:
-                logger.warning("Encryption service initialized but disabled (no key configured)")
+                logger.info("Encryption disabled (no key)")
                 span["output"] = {"status": "success", "enabled": False}
                 component_status["encryption"] = {"status": "success", "enabled": False}
         except Exception as e:
-            startup_errors.append(f"Encryption service failed: {e}")
+            startup_errors.append(f"Encryption: {e}")
             span["output"] = {"status": "error", "error": str(e)}
             component_status["encryption"] = {"status": "error", "error": str(e)}
-            logger.error(f"Encryption service initialization failed: {e}")
+            logger.error(f"Encryption init failed: {e}")
 
     # 3. Observability
     async with startup_span("startup.observability", metadata={"component": "observability"}) as span:
@@ -278,7 +278,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             span["output"] = {"status": "success"}
             component_status["observability"] = {"status": "success"}
         except Exception as e:
-            startup_errors.append(f"Observability failed: {e}")
+            startup_errors.append(f"Observability: {e}")
             span["output"] = {"status": "error", "error": str(e)}
             component_status["observability"] = {"status": "error", "error": str(e)}
 
@@ -288,7 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         status = "success" if success else "error"
         span["output"] = {"status": status, "error": err}
         component_status["redis"] = {"status": status, "error": err}
-        if not success: startup_errors.append(f"Redis failed: {err}")
+        if not success: startup_errors.append(f"Redis: {err}")
     
     # 4.5 Check Celery worker availability
     try:
@@ -297,26 +297,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         
         if celery_fallback_handler.is_celery_available():
             logger.info("Celery workers available")
-            degraded_mode_manager.update_component_status(
-                "celery",
-                ComponentStatus.OPERATIONAL
-            )
+            degraded_mode_manager.update_component_status("celery", ComponentStatus.OPERATIONAL)
         else:
-            logger.warning("Celery workers not available, using fallback execution")
+            logger.warning("Celery unavailable, using fallback")
             degraded_mode_manager.update_component_status(
-                "celery",
-                ComponentStatus.DEGRADED,
-                degradation_reason="No workers available",
-                fallback_active=True,
-                fallback_type="synchronous_execution",
-                recovery_actions=[
-                    "Start Celery workers: celery -A app.core.celery_app worker",
-                    "Check Redis broker connectivity",
-                    "Review Celery worker logs"
-                ]
+                "celery", ComponentStatus.DEGRADED,
+                degradation_reason="No workers", fallback_active=True, fallback_type="synchronous_execution",
+                recovery_actions=["Start Celery workers", "Check Redis broker", "Review worker logs"]
             )
     except Exception as e:
-        logger.warning(f"Celery health check failed: {e}")
+        logger.warning(f"Celery check failed: {e}")
 
     # 4. Semantic Index
     if component_status.get("redis", {}).get("status") == "success":
@@ -329,13 +319,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         success, err = await init_graphiti()
         app.state.graphiti_initialized = success
         span["output"] = {"status": "success" if success else "error", "error": err}
-        if not success: startup_errors.append(f"Graphiti failed: {err}")
+        if not success: startup_errors.append(f"Graphiti: {err}")
 
     # 6. SQLcl Pool
     async with startup_span("startup.sqlcl_pool", metadata={"component": "sqlcl_pool"}) as span:
         success, err = await init_sqlcl_pool()
         span["output"] = {"status": "success" if success else "error", "error": err}
-        if not success: startup_errors.append(f"SQLcl failed: {err}")
+        if not success: startup_errors.append(f"SQLcl: {err}")
 
     # 7. Orchestrator
     async with startup_span("startup.langgraph", metadata={"component": "langgraph"}) as span:
@@ -344,7 +334,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if success:
             app.state.checkpointer_context = cp_context
         else:
-            startup_errors.append(f"Orchestrator failed: {err}")
+            startup_errors.append(f"Orchestrator: {err}")
 
     # Finalize
     app.state.startup_errors = startup_errors

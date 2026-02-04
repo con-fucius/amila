@@ -85,6 +85,7 @@ class SchemaEnrichmentService:
             "tables": {},
             "samples": {},
             "relationships": [],
+            "join_paths": [],
             "derived_hints": {},
             "metadata": {
                 "enriched_at": datetime.utcnow().isoformat(),
@@ -126,15 +127,98 @@ class SchemaEnrichmentService:
                     schema_data
                 )
                 enriched_context["relationships"] = relationships
+            try:
+                enriched_context["join_paths"] = self._build_join_paths(
+                    mentioned_tables,
+                    enriched_context["relationships"],
+                    max_paths=8,
+                    max_hops=3
+                )
+            except Exception as join_err:
+                logger.warning(f"Join path ranking failed (non-fatal): {join_err}")
         
         logger.info(
             f"Enriched context: {len(enriched_context['tables'])} tables, "
             f"{len(enriched_context['samples'])} samples, "
             f"{len(enriched_context['relationships'])} relationships, "
+            f"{len(enriched_context['join_paths'])} join paths, "
             f"{sum(len(v) for v in enriched_context.get('derived_hints', {}).values())} derived hints"
         )
         
         return enriched_context
+
+    def _relationship_weight(self, relationship: Dict[str, str]) -> int:
+        rel_type = relationship.get("type", "")
+        if rel_type == "foreign_key":
+            return 0
+        if rel_type == "shared_key":
+            return 1
+        if rel_type == "foreign_key_hint":
+            return 2
+        return 3
+
+    def _build_join_paths(
+        self,
+        table_names: List[str],
+        relationships: List[Dict[str, str]],
+        max_paths: int = 5,
+        max_hops: int = 3,
+    ) -> List[Dict[str, Any]]:
+        if not table_names or not relationships:
+            return []
+
+        adjacency: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in relationships:
+            t1 = rel.get("table1")
+            t2 = rel.get("table2")
+            if not t1 or not t2:
+                continue
+            edge = {
+                "from": t1,
+                "to": t2,
+                "join_hint": rel.get("join_hint", ""),
+                "type": rel.get("type", ""),
+                "weight": self._relationship_weight(rel),
+            }
+            adjacency.setdefault(t1, []).append(edge)
+            adjacency.setdefault(t2, []).append({
+                **edge,
+                "from": t2,
+                "to": t1,
+            })
+
+        def _bfs_paths(start: str, target: str) -> List[List[Dict[str, Any]]]:
+            paths = []
+            queue = [([start], [], 0)]
+            while queue:
+                visited_tables, edges, total_weight = queue.pop(0)
+                current = visited_tables[-1]
+                if current == target:
+                    paths.append((edges, total_weight))
+                    continue
+                if len(edges) >= max_hops:
+                    continue
+                for edge in adjacency.get(current, []):
+                    if edge["to"] in visited_tables:
+                        continue
+                    queue.append((visited_tables + [edge["to"]], edges + [edge], total_weight + edge["weight"]))
+            return paths
+
+        join_paths: List[Dict[str, Any]] = []
+        for i, start in enumerate(table_names):
+            for target in table_names[i + 1:]:
+                paths = _bfs_paths(start, target)
+                for edges, total_weight in paths:
+                    join_paths.append({
+                        "from_table": start,
+                        "to_table": target,
+                        "hops": len(edges),
+                        "weight": total_weight,
+                        "path": edges,
+                    })
+
+        join_paths.sort(key=lambda p: (p["weight"], p["hops"]))
+        return join_paths[:max_paths]
     
     def _derive_column_hints(self, table_names: List[str], tables: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, str]]]:
         """Build generic, table-agnostic derived column hints for temporal features."""
@@ -238,14 +322,11 @@ class SchemaEnrichmentService:
             except Exception as e:
                 logger.debug(f"Cache miss for {table_name}: {e}")
             
-            if cache_key in self._sample_cache:
-                samples[table_name] = self._sample_cache[cache_key]
-                continue
-            
             try:
                 if database_type == "postgres":
                     from app.core.postgres_client import postgres_client
-                    sql = f"SELECT * FROM {table_name} LIMIT {limit}"
+                    # Quoting table name for case sensitivity
+                    sql = f'SELECT * FROM "{table_name}" LIMIT {limit}'
                     result = await postgres_client.execute_query(
                         sql=sql,
                         user_id="system",
@@ -257,7 +338,11 @@ class SchemaEnrichmentService:
                 elif database_type == "doris":
                     from app.core.client_registry import registry
                     mcp_client = registry.get_mcp_client()
-                    sql = f"SELECT * FROM {table_name} LIMIT {limit}"
+                    if not mcp_client:
+                        logger.warning("MCP client not found in registry, samples not available")
+                        continue
+                        
+                    sql = f'SELECT * FROM "{table_name}" LIMIT {limit}'
                     result = await mcp_client.execute_sql(sql, connection_name="doris_default")
                     if result.get("status") == "success":
                         rows = result.get("results", {}).get("rows", [])

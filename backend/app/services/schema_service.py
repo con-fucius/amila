@@ -107,6 +107,189 @@ class SchemaService:
     """Service for handling schema-related business logic"""
     
     @staticmethod
+    async def get_table_relationships(
+        table_name: str,
+        connection_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get foreign key relationships for a table.
+        
+        Args:
+            table_name: Name of the table
+            connection_name: Database connection name
+            
+        Returns:
+            List of relationship objects
+        """
+        logger.info(f"Fetching relationships for table: {table_name}")
+        
+        from app.core.config import settings
+        mcp_client = registry.get_mcp_client()
+        if not mcp_client:
+            return []
+            
+        conn = connection_name or settings.oracle_default_connection
+        
+        # SQL to find foreign keys where this table is either parent or child
+        sql = f"""
+SELECT 
+    a.constraint_name, 
+    a.table_name as child_table, 
+    a.column_name as child_column,
+    c_pk.table_name as parent_table, 
+    c_pk.column_name as parent_column
+FROM 
+    all_cons_columns a
+JOIN 
+    all_constraints c ON a.owner = c.owner AND a.constraint_name = c.constraint_name
+JOIN 
+    all_cons_columns c_pk ON c.r_owner = c_pk.owner AND c.r_constraint_name = c_pk.constraint_name
+WHERE 
+    c.constraint_type = 'R'
+    AND (a.table_name = '{table_name.upper()}' OR c_pk.table_name = '{table_name.upper()}')
+"""
+        try:
+            result = await mcp_client.execute_sql(sql, conn)
+            if result.get("status") != "success":
+                return []
+                
+            rows = result.get("results", {}).get("rows", [])
+            relationships = []
+            
+            for row in rows:
+                # Handle both dict and list results from MCP
+                if isinstance(row, dict):
+                    relationships.append({
+                        "constraint_name": row.get("CONSTRAINT_NAME"),
+                        "child_table": row.get("CHILD_TABLE"),
+                        "child_column": row.get("CHILD_COLUMN"),
+                        "parent_table": row.get("PARENT_TABLE"),
+                        "parent_column": row.get("PARENT_COLUMN")
+                    })
+                else:
+                    relationships.append({
+                        "constraint_name": row[0],
+                        "child_table": row[1],
+                        "child_column": row[2],
+                        "parent_table": row[3],
+                        "parent_column": row[4]
+                    })
+            
+            return relationships
+        except Exception as e:
+            logger.error(f"Failed to fetch relationships: {e}")
+            return []
+
+    @staticmethod
+    async def get_column_comments(
+        table_name: str,
+        connection_name: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Get comments for all columns in a table.
+        """
+        from app.core.config import settings
+        mcp_client = registry.get_mcp_client()
+        if not mcp_client:
+            return {}
+            
+        conn = connection_name or settings.oracle_default_connection
+        
+        sql = f"""
+SELECT COLUMN_NAME, COMMENTS 
+FROM ALL_COL_COMMENTS 
+WHERE TABLE_NAME = '{table_name.upper()}' AND OWNER = USER
+"""
+        try:
+            result = await mcp_client.execute_sql(sql, conn)
+            if result.get("status") != "success":
+                return {}
+                
+            rows = result.get("results", {}).get("rows", [])
+            comments = {}
+            for row in rows:
+                if isinstance(row, dict):
+                    comments[row.get("COLUMN_NAME")] = row.get("COMMENTS")
+                else:
+                    comments[row[0]] = row[1]
+            return comments
+        except Exception as e:
+            logger.error(f"Failed to fetch column comments: {e}")
+            return {}
+
+    @staticmethod
+    async def get_lightweight_stats(
+        table_name: str,
+        connection_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get lightweight statistics (NDV, Nulls) for a table's columns.
+        Uses APPROX_COUNT_DISTINCT for performance on Oracle.
+        """
+        from app.core.config import settings
+        mcp_client = registry.get_mcp_client()
+        if not mcp_client:
+            return []
+            
+        conn = connection_name or settings.oracle_default_connection
+        
+        # Get columns first to build the query
+        cols_sql = f"SELECT COLUMN_NAME, DATA_TYPE FROM ALL_TAB_COLUMNS WHERE TABLE_NAME = '{table_name.upper()}' AND OWNER = USER"
+        try:
+            cols_result = await mcp_client.execute_sql(cols_sql, conn)
+            if cols_result.get("status") != "success":
+                return []
+            
+            cols = cols_result.get("results", {}).get("rows", [])
+            if not cols:
+                return []
+                
+            # Build an optimized query for top 15 columns to avoid OOM or timeouts
+            stat_parts = []
+            target_cols = cols[:15]
+            for col in target_cols:
+                cname = col.get("COLUMN_NAME") if isinstance(col, dict) else col[0]
+                stat_parts.append(f"APPROX_COUNT_DISTINCT({cname}) as NDV_{cname}")
+                stat_parts.append(f"SUM(CASE WHEN {cname} IS NULL THEN 1 ELSE 0 END) as NULLS_{cname}")
+            
+            stats_sql = f"SELECT {', '.join(stat_parts)} FROM {table_name.upper()}"
+            stats_result = await mcp_client.execute_sql(stats_sql, conn)
+            
+            if stats_result.get("status") != "success":
+                return []
+                
+            row_data = stats_result.get("results", {}).get("rows", [])
+            if not row_data:
+                return []
+            row = row_data[0]
+            
+            stats_list = []
+            
+            for i, col in enumerate(target_cols):
+                cname = col.get("COLUMN_NAME") if isinstance(col, dict) else col[0]
+                ctype = col.get("DATA_TYPE") if isinstance(col, dict) else col[1]
+                
+                if isinstance(row, dict):
+                    stats_list.append({
+                        "column": cname,
+                        "type": ctype,
+                        "distinct_count": row.get(f"NDV_{cname}"),
+                        "null_count": row.get(f"NULLS_{cname}")
+                    })
+                else:
+                    stats_list.append({
+                        "column": cname,
+                        "type": ctype,
+                        "distinct_count": row[i*2],
+                        "null_count": row[i*2 + 1]
+                    })
+            return stats_list
+        except Exception as e:
+            logger.error(f"Failed to fetch lightweight stats: {e}")
+            return []
+
+    
+    @staticmethod
     async def get_dynamic_schema(
         user_query: str,
         intent: str = "",
@@ -148,12 +331,14 @@ class SchemaService:
         logger.info(f"Identified table: {table_name}")
         
         # Fetch schema for this specific table only
-        # CRITICAL: Use ALL_TAB_COLUMNS without OWNER = USER to find tables user has access to
-        # This handles cases where user has SELECT privilege but doesn't own the table
+        # CRITICAL FIX: Add filters to exclude system tables and improve query reliability
+        # Use ALL_TAB_COLUMNS without OWNER restriction to find tables user has SELECT privilege on
         discovery_sql = f"""
 SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, NULLABLE
 FROM ALL_TAB_COLUMNS
-WHERE OWNER = USER AND TABLE_NAME = '{table_name.upper()}'
+WHERE TABLE_NAME = '{table_name.upper()}'
+  AND TABLE_NAME NOT LIKE 'BIN$%'
+  AND TABLE_NAME NOT LIKE 'SYS_%'
 ORDER BY COLUMN_ID
 """
         
@@ -195,12 +380,16 @@ ORDER BY COLUMN_ID
                 # Try fuzzy matching to suggest alternatives
                 suggestions = await SchemaService._get_table_suggestions(table_name, conn, mcp_client)
                 
+                error_msg = f"Table '{table_name}' not found or has no columns"
+                if suggestions:
+                    error_msg += f". Did you mean: {', '.join(suggestions)}?"
+                
                 return {
                     "status": "error",
-                    "error": f"Table '{table_name}' not found or has no columns",
+                    "error": error_msg,
                     "schema": {"tables": {}, "views": {}},
                     "suggestions": suggestions,
-                    "did_you_mean": f"Did you mean: {', '.join(suggestions)}?" if suggestions else None
+                    "hint": "Check table name spelling and ensure you have SELECT privileges on the table"
                 }
             
             def get_val(r, idx, name):
@@ -473,9 +662,11 @@ WHERE OWNER = USER AND TABLE_NAME = '{table_name.upper()}'
             
             # DIRECT approach: Query ALL_TAB_COLUMNS for ALL accessible tables
             # CRITICAL: Don't restrict to OWNER = USER, get all tables user has access to
+            # We want all accessible tables, usually found in ALL_TAB_COLUMNS
             logger.info("Fetching schema directly from ALL_TAB_COLUMNS...")
             
-            where_clause = "WHERE OWNER = USER AND TABLE_NAME NOT LIKE 'BIN$%' AND TABLE_NAME NOT LIKE 'SYS_%'"
+            # Note: Removed OWNER = USER to allow seeing shared tables
+            where_clause = "WHERE TABLE_NAME NOT LIKE 'BIN$%' AND TABLE_NAME NOT LIKE 'SYS_%'"
             
             if table_names:
                 # Sanitize and format table names for IN clause
@@ -615,6 +806,244 @@ ORDER BY TABLE_NAME, COLUMN_ID
         logger.info(f"Schema cache refreshed")
         return {
             "status": "success",
-            "message": "Schema cache refreshed",
-            "schema": result.get("schema"),
+            "tables_refreshed": len(result.get("schema", {}).get("tables", {})),
+            "source": result.get("source"),
+        }
+    
+    @staticmethod
+    async def enrich_schema_with_ai(
+        database_type: str = "oracle",
+        table_names: Optional[List[str]] = None,
+        connection_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Enrich schema with AI-generated descriptions and column inferences.
+        
+        Args:
+            database_type: Database type (oracle, doris, postgres)
+            table_names: Optional list of specific tables to enrich
+            connection_name: Database connection name
+            
+        Returns:
+            Enriched schema with AI-generated metadata
+        """
+        logger.info(f"Enriching schema with AI for {database_type}")
+        
+        try:
+            # Get base schema
+            schema_result = await SchemaService.get_database_schema(
+                connection_name=connection_name,
+                use_cache=True,
+                table_names=table_names
+            )
+            
+            if schema_result.get("status") != "success":
+                return schema_result
+            
+            schema_data = schema_result.get("schema", {})
+            tables = schema_data.get("tables", {})
+            
+            if not tables:
+                return {
+                    "status": "error",
+                    "error": "No tables found to enrich"
+                }
+            
+            # Limit enrichment to avoid overwhelming LLM
+            tables_to_enrich = dict(list(tables.items())[:5]) if len(tables) > 5 else tables
+            
+            enriched_tables = {}
+            
+            for table_name, columns in tables_to_enrich.items():
+                logger.info(f"Enriching table: {table_name}")
+                
+                enriched_columns = []
+                
+                for column in columns[:20]:  # Limit columns per table
+                    col_name = column.get("name")
+                    col_type = column.get("type")
+                    
+                    # Infer column meaning
+                    inferred = await SchemaService._infer_column_meaning(
+                        table_name, col_name, col_type, connection_name
+                    )
+                    
+                    enriched_column = {
+                        **column,
+                        "description": inferred.get("description"),
+                        "inferred_name": inferred.get("inferred_name"),
+                        "business_meaning": inferred.get("business_meaning"),
+                        "ai_confidence": inferred.get("confidence")
+                    }
+                    
+                    enriched_columns.append(enriched_column)
+                
+                enriched_tables[table_name] = enriched_columns
+            
+            logger.info(f"Schema enrichment complete: {len(enriched_tables)} tables enriched")
+            
+            return {
+                "status": "success",
+                "enriched_schema": {
+                    "tables": enriched_tables,
+                    "database_type": database_type
+                },
+                "tables_enriched": len(enriched_tables),
+                "source": "ai_enhanced"
+            }
+            
+        except Exception as e:
+            logger.error(f"Schema enrichment failed: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    @staticmethod
+    async def _infer_column_meaning(
+        table_name: str,
+        column_name: str,
+        data_type: str,
+        connection_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Infer the business meaning of a column using LLM.
+        
+        Args:
+            table_name: Table name
+            column_name: Column name
+            data_type: Data type
+            connection_name: Database connection name
+            
+        Returns:
+            Dict with inferred description, name, and confidence
+        """
+        try:
+            # Get sample values for better inference
+            from app.services.introspection_service import IntrospectionService
+            samples = await IntrospectionService.get_sample_values(
+                table_name, column_name, limit=3, connection_name=connection_name
+            )
+            
+            # Check if LLM is available
+            from app.core.client_registry import registry
+            llm = registry.get_llm()
+            
+            if not llm:
+                # Fallback to rule-based inference
+                return SchemaService._rule_based_inference(
+                    table_name, column_name, data_type, samples
+                )
+            
+            # Build prompt for LLM
+            prompt = f"""Analyze this database column and provide its business meaning.
+
+Table: {table_name}
+Column: {column_name}
+Data Type: {data_type}
+Sample Values: {', '.join(str(s) for s in samples[:3]) if samples else 'N/A'}
+
+Provide:
+1. A concise human-readable description (1 sentence)
+2. An inferred business-friendly name (if column name is ambiguous like col01, amt_02, etc.)
+3. The business meaning/purpose of this column
+
+Format your response as:
+DESCRIPTION: [one sentence description]
+INFERRED_NAME: [business-friendly name or original if clear]
+BUSINESS_MEANING: [business purpose]
+"""
+            
+            response = await llm.ainvoke(prompt)
+            content = response.content if hasattr(response, 'content') else str(response)
+            
+            # Parse response
+            description = ""
+            inferred_name = column_name
+            business_meaning = ""
+            
+            for line in content.split('\n'):
+                line = line.strip()
+                if line.startswith("DESCRIPTION:"):
+                    description = line.replace("DESCRIPTION:", "").strip()
+                elif line.startswith("INFERRED_NAME:"):
+                    inferred_name = line.replace("INFERRED_NAME:", "").strip()
+                elif line.startswith("BUSINESS_MEANING:"):
+                    business_meaning = line.replace("BUSINESS_MEANING:", "").strip()
+            
+            return {
+                "description": description or f"{column_name} column in {table_name}",
+                "inferred_name": inferred_name,
+                "business_meaning": business_meaning,
+                "confidence": "high" if description else "low"
+            }
+            
+        except Exception as e:
+            logger.warning(f"LLM inference failed, using rule-based: {e}")
+            return SchemaService._rule_based_inference(
+                table_name, column_name, data_type, samples if 'samples' in locals() else []
+            )
+    
+    @staticmethod
+    def _rule_based_inference(
+        table_name: str,
+        column_name: str,
+        data_type: str,
+        samples: List[Any]
+    ) -> Dict[str, Any]:
+        """
+        Rule-based column inference fallback.
+        
+        Args:
+            table_name: Table name
+            column_name: Column name
+            data_type: Data type
+            samples: Sample values
+            
+        Returns:
+            Dict with inferred metadata
+        """
+        import re
+        
+        # Common patterns
+        patterns = {
+            r".*ID$": ("Identifier", "ID field"),
+            r".*_ID$": ("Identifier", "Foreign key or ID"),
+            r".*AMT.*": ("Amount", "Monetary or numeric amount"),
+            r".*_AMT$": ("Amount", "Monetary value"),
+            r".*DT$": ("Date", "Date or timestamp field"),
+            r".*_DT$": ("Date", "Date field"),
+            r".*CD$": ("Code", "Code or classification"),
+            r".*_CD$": ("Code", "Category code"),
+            r".*NM$": ("Name", "Name or description"),
+            r".*_NM$": ("Name", "Name field"),
+            r".*CNT$": ("Count", "Counter or quantity"),
+            r".*_CNT$": ("Count", "Count field"),
+            r"COL\d+": ("Column", "Generic column - requires manual verification"),
+        }
+        
+        inferred_name = column_name
+        business_meaning = "Data field"
+        
+        for pattern, (meaning, description) in patterns.items():
+            if re.match(pattern, column_name.upper()):
+                inferred_name = f"{table_name.split('_')[0]} {meaning}".title()
+                business_meaning = description
+                break
+        
+        # Enhance with data type info
+        if "NUMBER" in data_type or "DECIMAL" in data_type:
+            business_meaning = f"{business_meaning} (numeric)"
+        elif "DATE" in data_type or "TIMESTAMP" in data_type:
+            business_meaning = f"{business_meaning} (temporal)"
+        elif "VARCHAR" in data_type or "CHAR" in data_type:
+            business_meaning = f"{business_meaning} (text)"
+        
+        description = f"{column_name} is a {business_meaning.lower()} in {table_name}"
+        
+        return {
+            "description": description,
+            "inferred_name": inferred_name,
+            "business_meaning": business_meaning,
+            "confidence": "medium"
         }

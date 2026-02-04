@@ -84,6 +84,29 @@ async def await_approval_node(state: QueryState) -> QueryState:
             if state.get("approved"):
                 logger.info(f"Query {query_id} approved, proceeding to execution")
                 
+                # Record approval for adaptive HITL learning
+                try:
+                    from app.services.adaptive_hitl_service import AdaptiveHITLService
+                    
+                    user_id = state.get("user_id", "anonymous")
+                    sql_query = state.get("sql_query", "")
+                    validation_result = state.get("validation_result", {})
+                    risk_level = validation_result.get("risk_level", "medium")
+                    
+                    await AdaptiveHITLService.record_approval_decision(
+                        user_id=user_id,
+                        sql_query=sql_query,
+                        risk_level=risk_level,
+                        approved=True,
+                        metadata={
+                            "query_id": query_id,
+                            "auto_hitl_applied": state.get("adaptive_hitl_applied", False)
+                        }
+                    )
+                    logger.debug(f"Recorded approval decision for adaptive HITL learning")
+                except Exception as e:
+                    logger.warning(f"Failed to record approval for learning: {e}")
+                
                 # Record approval
                 stage_end = datetime.now(timezone.utc)
                 await record_query_pipeline_stage(
@@ -133,20 +156,83 @@ async def await_approval_node(state: QueryState) -> QueryState:
                         "message": "Query approved, executing...",
                     })
                 
-                await update_node_history(state, "await_approval", "completed", thinking_steps=[
-                    {
-                        "id": "approval-granted",
-                        "content": "User approved the query",
-                        "status": "completed",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                ])
+                # Apply approval constraints (forced LIMIT, etc.)
+                approval_constraints = state.get("approval_constraints") or {}
+                if approval_constraints:
+                    logger.info(f"Applying approval constraints: {approval_constraints}")
+                    
+                    # Implementation of forced LIMIT constraint
+                    max_rows = approval_constraints.get("max_rows")
+                    if max_rows and db_type in ["oracle"]:
+                        from app.services.role_based_limits_service import RoleBasedLimitsService
+                        # Force apply row limit if user requested it during approval
+                        sql_query = RoleBasedLimitsService.apply_row_limit(
+                            sql_query,
+                            max_rows=max_rows,
+                            dialect=db_type
+                        )
+                        state["sql_query"] = sql_query
+                        logger.info(f"Applied forced LIMIT constraint: {max_rows} rows")
                 
+                # Log HITL decision to native audit service
+                try:
+                    from app.services.native_audit_service import audit_to_native_db
+                    from app.core.database import get_db_context
+                    
+                    async with get_db_context() as db_session:
+                        await audit_to_native_db(
+                            action="hitl.approval",
+                            user_id=state.get("user_id", "anonymous"),
+                            db_session=db_session,
+                            success=True,
+                            details={
+                                "query_id": query_id,
+                                "sql_query": sql_query,
+                                "constraints": approval_constraints,
+                                "risk_reasons": state.get("risk_reasons", [])
+                            }
+                        )
+                except Exception as audit_err:
+                    logger.warning(f"Failed to log HITL approval to native audit: {audit_err}")
+                
+                # Mutation Detection: If approved SQL differs significantly from original, flag it
+                original_sql = state.get("original_sql")
+                if original_sql and sql_query != original_sql:
+                    dangerous_keywords = ["DROP", "DELETE", "TRUNCATE", "ALTER"]
+                    found = [w for w in dangerous_keywords if w in sql_upper and w not in original_sql.upper()]
+                    if found:
+                         logger.warning(f"SECURITY ALERT: Mutation detected in query {query_id}. Added dangerous keywords: {found}")
+                         state["risk_reasons"].append(f"Security: Dangerous mutation detected! User added keywords: {', '.join(found)}")
+
                 return state
 
             # Check if explicitly rejected (error field set)
             if state.get("error") and "rejected" in state.get("error", "").lower():
                 logger.info(f"Query {query_id} rejected by user: {state.get('error')}")
+                
+                # Record rejection for adaptive HITL learning
+                try:
+                    from app.services.adaptive_hitl_service import AdaptiveHITLService
+                    
+                    user_id = state.get("user_id", "anonymous")
+                    sql_query = state.get("sql_query", "")
+                    validation_result = state.get("validation_result", {})
+                    risk_level = validation_result.get("risk_level", "medium")
+                    rejection_reason = state.get("error", "")
+                    
+                    await AdaptiveHITLService.record_approval_decision(
+                        user_id=user_id,
+                        sql_query=sql_query,
+                        risk_level=risk_level,
+                        approved=False,
+                        rejection_reason=rejection_reason,
+                        metadata={
+                            "query_id": query_id
+                        }
+                    )
+                    logger.debug(f"Recorded rejection decision for adaptive HITL learning")
+                except Exception as e:
+                    logger.warning(f"Failed to record rejection for learning: {e}")
                 
                 # Record rejection
                 stage_end = datetime.now(timezone.utc)
@@ -176,6 +262,28 @@ async def await_approval_node(state: QueryState) -> QueryState:
                     }
                 ])
                 
+                # Log HITL rejection to native audit service
+                try:
+                    from app.services.native_audit_service import audit_to_native_db
+                    from app.core.database import get_db_context
+                    
+                    async with get_db_context() as db_session:
+                        await audit_to_native_db(
+                            action="hitl.rejection",
+                            user_id=state.get("user_id", "anonymous"),
+                            db_session=db_session,
+                            success=True, # The audit logging succeeded
+                            severity="warning",
+                            details={
+                                "query_id": query_id,
+                                "reason": state.get("error"),
+                                "sql_query": state.get("sql_query"),
+                                "risk_reasons": state.get("risk_reasons", [])
+                            }
+                        )
+                except Exception as audit_err:
+                    logger.warning(f"Failed to log HITL rejection to native audit: {audit_err}")
+
                 return state
 
         except Exception as e:

@@ -32,6 +32,7 @@ class ReportGenerationService:
         "executive_summary",
         "metrics_inference",
         "insights_recommendations",
+        "narrative_summary",
     ]
     
     @classmethod
@@ -169,6 +170,7 @@ class ReportGenerationService:
             "total_rows": total_rows,
             "metrics": metrics[:10],  # Top 10 metrics
             "insights": insights,
+            "narrative": "",
             "query_results": query_results,
             "user_queries": user_queries or [],
         }
@@ -210,6 +212,19 @@ class ReportGenerationService:
             # Replace rule-based insights with LLM insights
             report_data["insights"] = llm_insights
             report_data["insights_source"] = "llm_enhanced"
+
+            # Narrative storytelling
+            try:
+                from app.services.narrative_service import NarrativeService
+                report_data["narrative"] = await NarrativeService.generate_narrative(
+                    query_results=query_results,
+                    metrics=metrics,
+                    trends=[],
+                    anomalies=[],
+                    user_queries=user_queries
+                )
+            except Exception:
+                report_data["narrative"] = ""
             
             # Generate in requested format
             if format.lower() == "html":
@@ -447,6 +462,18 @@ Your insights:"""
         html += """        </ul>
     </div>
 """
+
+        # Narrative section
+        narrative = report_data.get("narrative")
+        if narrative:
+            html += f"""
+    <div class="section">
+        <h2>Narrative Summary</h2>
+        <div class="insights-list">
+            <li>{narrative}</li>
+        </div>
+    </div>
+"""
         
         # Add data tables
         for i, result in enumerate(report_data.get("query_results", [])[:3]):
@@ -492,17 +519,393 @@ Your insights:"""
     
     @classmethod
     async def _generate_pdf(cls, report_data: Dict[str, Any]) -> bytes:
-        """Generate PDF report using weasyprint or reportlab"""
+        """
+        Generate PDF report using weasyprint with chart embedding.
+        
+        Features:
+        - Professional HTML-to-PDF rendering
+        - Embedded charts (if chart_data provided)
+        - Customizable branding via report_data['branding']
+        - Table pagination for large result sets
+        """
         try:
-            # Try weasyprint first (better HTML rendering)
-            from weasyprint import HTML
-            html_content = cls._generate_html(report_data)
-            pdf_bytes = HTML(string=html_content).write_pdf()
+            from weasyprint import HTML, CSS
+            from weasyprint.text.fonts import FontConfiguration
+            
+            # Generate enhanced HTML with PDF-optimized styles
+            html_content = cls._generate_pdf_html(report_data)
+            
+            # Configure fonts
+            font_config = FontConfiguration()
+            
+            # Convert to PDF with custom CSS for print optimization
+            css = CSS(string=cls._get_pdf_styles(), font_config=font_config)
+            pdf_bytes = HTML(string=html_content).write_pdf(stylesheets=[css])
+            
+            logger.info(f"Generated PDF report: {len(pdf_bytes)} bytes")
             return pdf_bytes
-        except ImportError:
-            logger.warning("weasyprint not available, falling back to HTML")
-            # Return HTML as fallback
-            return cls._generate_html(report_data).encode('utf-8')
+            
+        except ImportError as e:
+            logger.error(f"weasyprint not available: {e}")
+            # Fallback: return HTML as bytes with proper headers
+            html_content = cls._generate_html(report_data)
+            return html_content.encode('utf-8')
+        except Exception as e:
+            logger.error(f"PDF generation failed: {e}", exc_info=True)
+            raise ValueError(f"Failed to generate PDF: {e}")
+    
+    @classmethod
+    def _generate_pdf_html(cls, report_data: Dict[str, Any]) -> str:
+        """Generate HTML optimized for PDF rendering with embedded charts"""
+        
+        branding = report_data.get('branding', {})
+        logo_url = branding.get('logo_url', '')
+        primary_color = branding.get('primary_color', '#10b981')
+        company_name = branding.get('company_name', 'AMILA Business Intelligence')
+        
+        # Generate chart sections if chart data provided
+        chart_sections = ''
+        charts = report_data.get('charts', [])
+        for i, chart in enumerate(charts[:3]):  # Max 3 charts
+            chart_html = cls._generate_chart_embed(chart, i)
+            chart_sections += chart_html
+        
+        # Build data tables with pagination hints
+        tables_html = ''
+        for i, result in enumerate(report_data.get('query_results', [])[:3]):
+            tables_html += cls._generate_pdf_table(result, i, report_data.get('user_queries', []))
+        
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{report_data['title']}</title>
+    <style>
+        @page {{
+            size: A4;
+            margin: 2cm;
+            @bottom-center {{
+                content: "Page " counter(page) " of " counter(pages);
+                font-size: 9pt;
+                color: #6b7280;
+            }}
+            @bottom-right {{
+                content: "Generated by {company_name}";
+                font-size: 8pt;
+                color: #9ca3af;
+            }}
+        }}
+        body {{
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            color: #1f2937;
+            font-size: 10pt;
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid {primary_color};
+        }}
+        .logo {{
+            max-height: 60px;
+            margin-bottom: 15px;
+        }}
+        .header h1 {{
+            color: #111827;
+            font-size: 22pt;
+            margin: 0 0 10px 0;
+            font-weight: 600;
+        }}
+        .header .date {{
+            color: #6b7280;
+            font-size: 10pt;
+        }}
+        .section {{
+            margin-bottom: 25px;
+            page-break-inside: avoid;
+        }}
+        .section h2 {{
+            color: {primary_color};
+            font-size: 14pt;
+            margin: 0 0 12px 0;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 600;
+        }}
+        .summary-list {{
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }}
+        .summary-list li {{
+            padding: 8px 0;
+            padding-left: 20px;
+            position: relative;
+        }}
+        .summary-list li::before {{
+            content: "•";
+            color: {primary_color};
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+            font-size: 14pt;
+            line-height: 1.2;
+        }}
+        .metrics-grid {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }}
+        .metric-card {{
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 15px;
+            min-width: 150px;
+            flex: 1;
+        }}
+        .metric-card .name {{
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 8px;
+            font-size: 9pt;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .metric-card .value {{
+            font-size: 18pt;
+            color: {primary_color};
+            font-weight: bold;
+        }}
+        .metric-card .details {{
+            font-size: 8pt;
+            color: #6b7280;
+            margin-top: 5px;
+        }}
+        .insights-list {{
+            background: #f0fdf4;
+            border-left: 4px solid {primary_color};
+            padding: 15px 20px;
+            margin: 0;
+        }}
+        .insights-list li {{
+            margin-bottom: 8px;
+            font-size: 10pt;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            font-size: 9pt;
+            page-break-inside: auto;
+        }}
+        thead {{
+            display: table-header-group;
+        }}
+        tr {{
+            page-break-inside: avoid;
+        }}
+        th, td {{
+            padding: 8px 10px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }}
+        th {{
+            background: #f9fafb;
+            font-weight: 600;
+            color: #374151;
+            font-size: 8pt;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        td {{
+            font-size: 9pt;
+        }}
+        .chart-container {{
+            margin: 20px 0;
+            text-align: center;
+            page-break-inside: avoid;
+        }}
+        .chart-image {{
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+        }}
+        .chart-caption {{
+            font-size: 9pt;
+            color: #6b7280;
+            margin-top: 8px;
+            font-style: italic;
+        }}
+        .query-header {{
+            background: #f3f4f6;
+            padding: 10px 15px;
+            margin: 15px 0 10px 0;
+            border-radius: 6px;
+            font-weight: 600;
+            color: #374151;
+            font-size: 10pt;
+        }}
+        .footer {{
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e5e7eb;
+            text-align: center;
+            color: #9ca3af;
+            font-size: 8pt;
+        }}
+        .page-break {{
+            page-break-before: always;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        {f'<img src="{logo_url}" class="logo" alt="Company Logo" />' if logo_url else ''}
+        <h1>{report_data['title']}</h1>
+        <div class="date">Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}</div>
+    </div>
+    
+    <div class="section">
+        <h2>Executive Summary</h2>
+        <ul class="summary-list">
+            {''.join(f'<li>{point}</li>' for point in report_data.get('executive_summary', []))}
+        </ul>
+    </div>
+    
+    <div class="section">
+        <h2>Key Metrics</h2>
+        <div class="metrics-grid">
+            {''.join(f'''
+            <div class="metric-card">
+                <div class="name">{metric['name']}</div>
+                <div class="value">{metric['sum']:,.2f}</div>
+                <div class="details">Avg: {metric['avg']:,.2f} | Min: {metric['min']:,.2f} | Max: {metric['max']:,.2f}</div>
+            </div>
+            ''' for metric in report_data.get('metrics', [])[:6])}
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Insights & Recommendations</h2>
+        <ul class="insights-list">
+            {''.join(f'<li>{insight}</li>' for insight in report_data.get('insights', []))}
+        </ul>
+    </div>
+
+    {f'''
+    <div class="section">
+        <h2>Narrative Summary</h2>
+        <ul class="insights-list">
+            <li>{report_data.get('narrative')}</li>
+        </ul>
+    </div>
+    ''' if report_data.get('narrative') else ''}
+    
+    {chart_sections}
+    
+    <div class="page-break"></div>
+    
+    <div class="section">
+        <h2>Detailed Data</h2>
+        {tables_html}
+    </div>
+    
+    <div class="footer">
+        <p>Report generated by {company_name}</p>
+        <p>Total queries analyzed: {report_data['query_count']} | Total records: {report_data['total_rows']:,}</p>
+        <p>Query ID: {report_data.get('query_id', 'N/A')}</p>
+    </div>
+</body>
+</html>"""
+    
+    @classmethod
+    def _generate_chart_embed(cls, chart: Dict[str, Any], index: int) -> str:
+        """Generate HTML for an embedded chart"""
+        chart_type = chart.get('type', 'bar')
+        chart_title = chart.get('title', f'Chart {index + 1}')
+        
+        # If chart image data provided (base64), embed directly
+        if 'image_data' in chart:
+            mime_type = chart.get('mime_type', 'image/png')
+            return f'''
+            <div class="section chart-container">
+                <h2>{chart_title}</h2>
+                <img src="data:{mime_type};base64,{chart['image_data']}" class="chart-image" alt="{chart_title}" />
+                <div class="chart-caption">{chart.get('caption', '')}</div>
+            </div>
+            '''
+        
+        # Otherwise, generate a simple SVG placeholder
+        return f'''
+        <div class="section chart-container">
+            <h2>{chart_title}</h2>
+            <div class="chart-caption">Chart data available in interactive version</div>
+        </div>
+        '''
+    
+    @classmethod
+    def _generate_pdf_table(cls, result: Dict[str, Any], index: int, user_queries: List[str]) -> str:
+        """Generate HTML table for PDF with proper pagination"""
+        columns = result.get('columns', [])
+        rows = result.get('rows', [])[:50]  # Limit to 50 rows for PDF
+        row_count = result.get('row_count', len(result.get('rows', [])))
+        
+        if not columns or not rows:
+            return ''
+        
+        query_text = user_queries[index] if index < len(user_queries) else f'Query {index + 1}'
+        
+        html = f'''
+        <div class="query-header">{query_text[:80]}{'...' if len(query_text) > 80 else ''}</div>
+        <table>
+            <thead>
+                <tr>
+                    {''.join(f'<th>{col}</th>' for col in columns[:8])}
+                </tr>
+            </thead>
+            <tbody>
+        '''
+        
+        for row in rows:
+            html += '<tr>' + ''.join(f'<td>{cls._format_cell(cell)}</td>' for cell in row[:8]) + '</tr>'
+        
+        html += f'''
+            </tbody>
+        </table>
+        <div style="font-size: 8pt; color: #6b7280; margin-top: 5px;">
+            Showing {len(rows)} of {row_count:,} rows
+        </div>
+        '''
+        
+        return html
+    
+    @classmethod
+    def _format_cell(cls, cell: Any) -> str:
+        """Format a cell value for PDF display"""
+        if cell is None:
+            return '<span style="color: #9ca3af; font-style: italic;">NULL</span>'
+        if isinstance(cell, (int, float)):
+            return f"{cell:,.2f}" if isinstance(cell, float) else f"{cell:,}"
+        cell_str = str(cell)
+        if len(cell_str) > 50:
+            return cell_str[:47] + '...'
+        return cell_str
+    
+    @classmethod
+    def _get_pdf_styles(cls) -> str:
+        """Get additional CSS styles for PDF optimization"""
+        return """
+        @media print {
+            body {
+                print-color-adjust: exact;
+                -webkit-print-color-adjust: exact;
+            }
+        }
+        """
     
     @classmethod
     async def _generate_docx(cls, report_data: Dict[str, Any]) -> bytes:
@@ -537,6 +940,11 @@ Your insights:"""
             doc.add_heading('Insights & Recommendations', level=1)
             for insight in report_data.get("insights", []):
                 doc.add_paragraph(insight, style='List Bullet')
+
+            # Narrative Summary
+            if report_data.get("narrative"):
+                doc.add_heading('Narrative Summary', level=1)
+                doc.add_paragraph(report_data["narrative"])
             
             # Save to bytes
             buffer = BytesIO()

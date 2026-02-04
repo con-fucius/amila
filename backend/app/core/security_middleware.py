@@ -173,7 +173,7 @@ class CSPMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         
         # Skip CSP for Swagger UI docs endpoints
-        if request.url.path in ("/docs", "/redoc", "/openapi.json"):
+        if request.url.path in ("/docs", "/redoc", "/openapi.json") or request.url.path.startswith("/api/v1/graphql"):
             return response
         
         # Content Security Policy
@@ -227,6 +227,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/login", 
         "/api/v1/auth/register",
         "/api/v1/auth/refresh",
+        "/api/v1/graphql",
         "/health",
         "/metrics",
         "/docs",
@@ -464,7 +465,6 @@ class HMACMiddleware(BaseHTTPMiddleware):
 
         # 2. Reconstruct payload for signature verification
         # Method + Path + Timestamp + Body
-        # WARNING: Reading body consumes usage. modifying Starlette request to keep body for downstream
         body_bytes = await request.body()
         
         # Re-inject body support for downstream handlers

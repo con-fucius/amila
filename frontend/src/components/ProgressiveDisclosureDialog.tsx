@@ -36,7 +36,7 @@ interface ProgressiveDisclosureDialogProps {
   estimatedSize?: string
   previewData?: {
     columns: string[]
-    rows: any[][]
+    rows: (any[] | Record<string, any>)[]
   }
   onClose: () => void
   onChoiceSelected: (choice: 'preview' | 'download' | 'aggregate' | 'cancel') => void
@@ -292,10 +292,10 @@ const ProgressiveDisclosureDialog: React.FC<ProgressiveDisclosureDialogProps> = 
           {loading
             ? 'Loading...'
             : selectedChoice === 'preview'
-            ? 'Show Preview'
-            : selectedChoice === 'download'
-            ? 'Download'
-            : 'Generate Summary'}
+              ? 'Show Preview'
+              : selectedChoice === 'download'
+                ? 'Download'
+                : 'Generate Summary'}
         </Button>
       </DialogActions>
     </Dialog>

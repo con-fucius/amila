@@ -46,12 +46,15 @@ state["messages"].append(SystemMessage(content="System instruction"))
 Never add raw dicts or strings directly to the messages array.
 """
 
-from typing import TypedDict, Annotated, Sequence, Optional, Literal
+from typing import TypedDict, Annotated, Sequence, Optional, Literal, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 # Valid database types
 DatabaseTypeEnum = Literal["oracle", "doris", "postgres", "postgresql"]
+
+# Import structured intent model for type hints
+from app.models.intent_models import StructuredIntent
 
 # Maximum history sizes to prevent unbounded memory growth
 MAX_CLARIFICATION_HISTORY = 10
@@ -60,9 +63,9 @@ MAX_NODE_HISTORY = 50
 
 class QueryState(TypedDict, total=False):
     """Agent state tracking query processing workflow.
-    
+
     Uses total=False to make all fields optional with sensible defaults.
-    
+
     Note on message validation:
     ---------------------------
     The `messages` field is NOT validated at runtime because:
@@ -70,25 +73,33 @@ class QueryState(TypedDict, total=False):
     - Type hints provide static type checking
     - All code paths use proper LangChain message types
     - Runtime validation would duplicate LangChain's functionality
-    
+
     See module docstring for detailed explanation.
     """
-    
+
     # Message history for conversation context
     # Uses LangChain's add_messages reducer for automatic message handling
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    
+
     # Query processing pipeline
     user_query: str  # Original natural language query
-    intent: str  # Classified intent (read-only, aggregation, etc.)
+    intent: str  # Classified intent (read-only, aggregation, etc.) - JSON string for legacy compatibility
+    intent_structured: dict  # Structured intent taxonomy (validated dict)
+    structured_intent: Dict[
+        str, Any
+    ]  # Pydantic StructuredIntent as dict (canonical representation)
+    intent_source: str  # "llm" or "fallback"
+    intent_confidence: float  # Confidence score 0.0-1.0
     hypothesis: str  # Query execution plan
+    hypothesis_structured: dict  # Structured hypothesis for constraints
+    hypothesis_raw: str  # Raw hypothesis response
     context: dict  # Knowledge graph context from Graphiti + enriched schema
     sql_query: str  # Generated SQL
     validation_result: dict  # Validation status and feedback
     execution_result: dict  # Query execution result
     result_analysis: dict  # Post-execution result validation
     visualization_hints: dict  # Recommended visualization type
-    
+
     # Metadata
     user_id: str
     user_role: str  # User role for RBAC (admin, analyst, viewer)
@@ -97,18 +108,20 @@ class QueryState(TypedDict, total=False):
     timestamp: str
     trace_id: str  # For comprehensive logging & correlation
     database_type: str  # Should be "oracle" or "doris"
-    
+
     # LLM tracking
     llm_metadata: dict  # LLM provider, model, and generation status
-    
+
     # SQL generation enhancements
     sql_confidence: int  # Confidence score 0-100
     optimization_suggestions: list  # Query optimization suggestions
-    
+
     # Query cost estimation and execution plan visibility
-    cost_estimate: dict  # {total_cost, cardinality, cost_level, warnings, recommendations}
+    cost_estimate: (
+        dict  # {total_cost, cardinality, cost_level, warnings, recommendations}
+    )
     execution_plan: str  # Formatted EXPLAIN PLAN output for observability
-    
+
     # Control flow
     needs_approval: bool
     approved: bool
@@ -124,11 +137,27 @@ class QueryState(TypedDict, total=False):
     clarification_message: str
     clarification_details: dict
     # Clarification history for multi-turn context preservation (bounded)
-    clarification_history: list  # [{clarification, timestamp}] - max MAX_CLARIFICATION_HISTORY
+    clarification_history: (
+        list  # [{clarification, timestamp}] - max MAX_CLARIFICATION_HISTORY
+    )
 
     # Execution visibility (bounded)
     node_history: list  # [{name, status, start_time, end_time, thinking_steps, error}] - max MAX_NODE_HISTORY
     current_node: str
+    
+    # Enhanced HITL & Governance
+    original_sql: str  # First generated SQL (for diffing)
+    risk_reasons: list  # Why approval is required (cost, PII, joins, etc.)
+    approval_constraints: dict  # Dynamic constraints (e.g., forced LIMIT)
+    
+    # Enhanced Error Handling & Repair
+    error_taxonomy: dict  # Structured error classification
+    repair_trace: list  # History of repair attempts and logic
+    
+    # Advanced UI/UX & Governance
+    query_plan: dict  # Structured execution plan (nodes, tool calls, estimates)
+    sql_explanation: str  # Natural language explanation of the SQL
+    rls_explanation: str  # Detailed reason for RLS enforcement
 
 
 def get_default_state() -> dict:
@@ -137,7 +166,13 @@ def get_default_state() -> dict:
         "messages": [],
         "user_query": "",
         "intent": "",
+        "intent_structured": {},
+        "structured_intent": {},
+        "intent_source": "fallback",
+        "intent_confidence": 0.5,
         "hypothesis": "",
+        "hypothesis_structured": {},
+        "hypothesis_raw": "",
         "context": {},
         "sql_query": "",
         "validation_result": {},
@@ -170,6 +205,14 @@ def get_default_state() -> dict:
         "clarification_history": [],
         "node_history": [],
         "current_node": "",
+        "original_sql": "",
+        "risk_reasons": [],
+        "approval_constraints": {},
+        "error_taxonomy": {},
+        "repair_trace": [],
+        "query_plan": {},
+        "sql_explanation": "",
+        "rls_explanation": "",
     }
 
 
@@ -186,12 +229,16 @@ def validate_database_type(db_type: str) -> str:
 
 def trim_history_lists(state: dict) -> dict:
     """Trim unbounded history lists to prevent memory growth."""
-    if "clarification_history" in state and isinstance(state["clarification_history"], list):
+    if "clarification_history" in state and isinstance(
+        state["clarification_history"], list
+    ):
         if len(state["clarification_history"]) > MAX_CLARIFICATION_HISTORY:
-            state["clarification_history"] = state["clarification_history"][-MAX_CLARIFICATION_HISTORY:]
-    
+            state["clarification_history"] = state["clarification_history"][
+                -MAX_CLARIFICATION_HISTORY:
+            ]
+
     if "node_history" in state and isinstance(state["node_history"], list):
         if len(state["node_history"]) > MAX_NODE_HISTORY:
             state["node_history"] = state["node_history"][-MAX_NODE_HISTORY:]
-    
+
     return state

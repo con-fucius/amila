@@ -179,18 +179,35 @@ def setup_logging() -> None:
             },
             # Reduce aiosqlite verbosity to avoid checkpoint duplication
             "aiosqlite": {
-                "level": "INFO",  # Changed from DEBUG to INFO
+                "level": "WARNING",  # Changed from INFO to WARNING to reduce noise
                 "handlers": ["console", "file"],
                 "propagate": False
             },
             # Route Graphiti core logs (especially embedder details) to file-only
             "graphiti_core.embedder.gemini": {
-                "level": "DEBUG",
+                "level": "WARNING",  # Reduced from DEBUG to WARNING
                 "handlers": ["file"],
                 "propagate": False
             },
             "graphiti_core.driver.falkordb_driver": {
-                "level": "INFO",
+                "level": "WARNING",  # Reduced from INFO to WARNING
+                "handlers": ["file"],
+                "propagate": False
+            },
+            # Reduce httpx/httpcore verbosity (used by MCP clients)
+            "httpx": {
+                "level": "WARNING",
+                "handlers": ["file"],
+                "propagate": False
+            },
+            "httpcore": {
+                "level": "WARNING",
+                "handlers": ["file"],
+                "propagate": False
+            },
+            # Reduce asyncio verbosity
+            "asyncio": {
+                "level": "WARNING",
                 "handlers": ["file"],
                 "propagate": False
             }

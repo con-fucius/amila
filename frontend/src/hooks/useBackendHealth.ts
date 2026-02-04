@@ -5,6 +5,7 @@ export interface BackendHealth {
   isConnected: boolean
   status: string | null
   components: any
+  diagnostics: any | null
   lastCheck: Date | null
   latencyMs?: number
 }
@@ -14,18 +15,27 @@ export function useBackendHealth(checkIntervalMs: number = 5000) {
     isConnected: false,
     status: null,
     components: null,
+    diagnostics: null,
     lastCheck: null,
   })
 
   const checkHealth = useCallback(async () => {
     try {
-      const healthData = await apiService.checkHealth()
+      const [healthData, diagnosticsData] = await Promise.allSettled([
+        apiService.checkHealth(),
+        apiService.getSystemDiagnostics()
+      ]);
+
+      const health = healthData.status === 'fulfilled' ? healthData.value : { status: 'error', components: null };
+      const diagnostics = diagnosticsData.status === 'fulfilled' ? diagnosticsData.value : null;
+
       setHealth({
-        isConnected: true,
-        status: healthData.status,
-        components: healthData.components,
+        isConnected: healthData.status === 'fulfilled',
+        status: health.status,
+        components: health.components,
+        diagnostics: diagnostics,
         lastCheck: new Date(),
-        latencyMs: (healthData as any).latency_ms,
+        latencyMs: (health as any).latency_ms,
       })
     } catch (err) {
       console.error('Health check failed:', err)
@@ -33,6 +43,7 @@ export function useBackendHealth(checkIntervalMs: number = 5000) {
         isConnected: false,
         status: 'error',
         components: null,
+        diagnostics: null,
         lastCheck: new Date(),
         latencyMs: undefined,
       })

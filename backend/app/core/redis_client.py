@@ -135,14 +135,14 @@ class RedisClient:
                     socket_connect_timeout=5.0,
                 )
 
-                # Vector client (binary) for RediSearch HNSW index - use cache DB by default
+                # Vector client (binary) for RediSearch HNSW index - MUST use DB 0 for RediSearch
                 # decode_responses=False is REQUIRED for VECTOR fields (binary blobs)
                 self._vector_client = redis.from_url(
-                    f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_CACHE_DB}",
+                    f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/0",
                     decode_responses=False,
                     max_connections=10,
-                    socket_timeout=5.0,
-                    socket_connect_timeout=5.0,
+                    socket_timeout=10.0,
+                    socket_connect_timeout=10.0,
                 )
 
                 # Test connection
@@ -613,6 +613,62 @@ class RedisClient:
         except RedisError as e:
             logger.error(f"Failed to invalidate query cache: {e}")
             return 0
+
+    async def set_query_result_ref(self, query_id: str, query_hash: str, ttl: int = 3600) -> bool:
+        """Store query_id -> query_hash mapping for result retrieval."""
+        try:
+            key = f"query_ref:{query_id}"
+            payload = {
+                "query_hash": query_hash,
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await self._cache_client.setex(key, ttl, json.dumps(payload, cls=CustomJSONEncoder))
+            return True
+        except RedisError as e:
+            logger.error(f"Failed to set query result ref for {query_id}: {e}")
+            return False
+
+    async def get_query_result_ref(self, query_id: str) -> Optional[dict]:
+        """Retrieve query_id -> query_hash mapping."""
+        try:
+            key = f"query_ref:{query_id}"
+            data = await self._cache_client.get(key)
+            if data:
+                return safe_parse_json_dict(data, default=None, log_errors=False)
+            return None
+        except RedisError as e:
+            logger.error(f"Failed to get query result ref for {query_id}: {e}")
+            return None
+
+    async def cache_query_result_by_id(self, query_id: str, result: dict, ttl: int = 3600) -> bool:
+        """Cache query result by query_id for paging retrieval."""
+        try:
+            key = f"query_result:{query_id}"
+            payload = {
+                "result": result,
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "ttl": ttl,
+            }
+            await self._cache_client.setex(key, ttl, json.dumps(payload, cls=CustomJSONEncoder))
+            return True
+        except RedisError as e:
+            logger.error(f"Failed to cache query result by id {query_id}: {e}")
+            return False
+
+    async def get_query_result_by_id(self, query_id: str) -> Optional[dict]:
+        """Retrieve cached query result by query_id."""
+        try:
+            key = f"query_result:{query_id}"
+            data = await self._cache_client.get(key)
+            if data:
+                payload = safe_parse_json_dict(data, default=None, log_errors=False)
+                if isinstance(payload, dict) and "result" in payload:
+                    return payload.get("result")
+                return payload
+            return None
+        except RedisError as e:
+            logger.error(f"Failed to get query result by id {query_id}: {e}")
+            return None
     
     async def warm_query_cache(
         self, common_queries: list[tuple[str, str]], connection_name: str
@@ -902,7 +958,7 @@ class RedisClient:
 
     async def keys(self, pattern: str) -> list[str]:
         """Find keys matching a given pattern with error handling.
-        WARNING: Uses KEYS command which is O(n) - use scan_iter for large datasets."""
+        Uses KEYS command which is O(n) - use scan_iter for large datasets."""
         try:
             return await self._require_client().keys(pattern)
         except (RedisError, ExternalServiceException) as e:
@@ -947,11 +1003,11 @@ class RedisClient:
                 "table", "TEXT",
                 "column", "TEXT",
                 "text", "TEXT",
-                vector_field, "VECTOR", "HNSW", "6",
+                vector_field, "VECTOR", "HNSW", "12",
                 "TYPE", "FLOAT32",
                 "DIM", str(dims),
                 "DISTANCE_METRIC", "COSINE",
-                "INITIAL_CAP", "1000",
+                "M", "16", "EF_CONSTRUCTION", "200", "INITIAL_CAP", "1000"
             ]
             await self._vector_client.execute_command(*cmd)
             return True

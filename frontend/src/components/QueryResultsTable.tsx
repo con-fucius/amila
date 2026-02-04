@@ -2,11 +2,12 @@ import { useState, useMemo, useEffect } from 'react'
 import { cn } from '@/utils/cn'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Filter, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, MoreHorizontal, Check, Clock } from 'lucide-react'
-import { ExportButtonsEnhanced } from './ExportButtonsEnhanced'
+
 import { Card, CardContent, CardHeader } from './ui/card'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Input } from './ui/input'
+import { Textarea } from './ui/textarea'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table'
 import {
   DropdownMenu,
@@ -14,6 +15,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import {
   Tooltip,
   TooltipContent,
@@ -25,6 +27,7 @@ import { findCitedCells, type CellCitation } from '@/utils/citationMatcher'
 import { isCellChanged, type CellDiff } from '@/utils/resultDiff'
 import { QueryActionsDropdown } from './QueryActionsDropdown'
 import { apiService } from '@/services/apiService'
+import type { ResultReference } from '@/types/domain'
 
 interface QueryResultsTableProps {
   columns: string[]
@@ -35,6 +38,8 @@ interface QueryResultsTableProps {
   timestamp?: string | Date
   assistantText?: string
   diffData?: CellDiff[]
+  resultRef?: ResultReference
+  resultsTruncated?: boolean
   onRowAction?: (action: 'filter' | 'drilldown', context: { row: any; rowIndex: number; columns: string[] }) => void
   isPinned?: boolean
   onPin?: () => void
@@ -50,9 +55,12 @@ export function QueryResultsTable({
   rows,
   executionTime,
   rowCount,
+  sql,
   timestamp,
   assistantText,
   diffData,
+  resultRef,
+  resultsTruncated,
   onRowAction,
   isPinned = false,
   onPin,
@@ -71,6 +79,18 @@ export function QueryResultsTable({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({})
   const [resizing, setResizing] = useState<{ column: string; startX: number; startWidth: number } | null>(null)
   const [density, setDensity] = useState<'compact' | 'standard' | 'comfortable'>('standard')
+  const [saveDashboardOpen, setSaveDashboardOpen] = useState(false)
+  const [dashboardTitle, setDashboardTitle] = useState('')
+  const [dashboardDescription, setDashboardDescription] = useState('')
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [dashboardSaving, setDashboardSaving] = useState(false)
+  const [dashboardSuccess, setDashboardSuccess] = useState(false)
+  const [pageRows, setPageRows] = useState<any[] | null>(null)
+  const [pageLoading, setPageLoading] = useState(false)
+  const [pageError, setPageError] = useState<string | null>(null)
+
+  const effectiveRowCount = rowCount ?? resultRef?.rowCount ?? rows.length
+  const isPaged = !!resultRef && effectiveRowCount > rows.length
 
   // Data freshness calculation
   const freshnessInfo = useMemo(() => {
@@ -134,27 +154,42 @@ export function QueryResultsTable({
   }
 
   const rowValues = (row: any) => (Array.isArray(row) ? row : Object.values(row ?? {}))
+  const rowToArray = (row: any) => {
+    if (Array.isArray(row)) return row
+    if (row && typeof row === 'object') {
+      return normalizedColumns.map((col, idx) => getCellValue(row, col, idx))
+    }
+    return normalizedColumns.map(() => undefined)
+  }
+
+  // Resolve active rows (paged or full)
+  const activeRows = useMemo(() => {
+    if (isPaged) {
+      return pageRows ?? rows
+    }
+    return rows
+  }, [isPaged, pageRows, rows])
 
   // Find cited cells based on assistant's text
   const citedCells = useMemo<CellCitation[]>(() => {
-    if (!assistantText || !rows || rows.length === 0) return []
+    if (!assistantText || !activeRows || activeRows.length === 0) return []
 
     // Convert rows to array format for citation matcher
-    const arrayRows = rows.map(row => {
+    const arrayRows = activeRows.map(row => {
       if (Array.isArray(row)) return row
       return normalizedColumns.map((col, idx) => getCellValue(row, col, idx))
     })
 
     return findCitedCells(assistantText, normalizedColumns, arrayRows)
-  }, [assistantText, rows, normalizedColumns])
+  }, [assistantText, activeRows, normalizedColumns])
 
   const numericColumnSet = useMemo(() => {
     const set = new Set<string>()
-    if (!Array.isArray(normalizedColumns) || !rows || rows.length === 0) return set
+    if (!Array.isArray(normalizedColumns) || !activeRows || activeRows.length === 0) return set
 
     const numericIndexes = detectNumericColumnIndexes(
       normalizedColumns,
-      rows,
+      activeRows,
       getCellValue,
       50,
     )
@@ -164,7 +199,7 @@ export function QueryResultsTable({
     })
 
     return set
-  }, [normalizedColumns, rows])
+  }, [normalizedColumns, activeRows])
 
   const formatValue = (val: any) => {
     if (val === null || val === undefined) return <span className="text-gray-400 dark:text-gray-500">NULL</span>
@@ -188,13 +223,13 @@ export function QueryResultsTable({
 
   // Filtered rows
   const filteredRows = useMemo(() => {
-    if (!filterText) return rows
-    return rows.filter((row) =>
+    if (!filterText) return activeRows
+    return activeRows.filter((row) =>
       rowValues(row).some((val) =>
         String(val).toLowerCase().includes(filterText.toLowerCase())
       )
     )
-  }, [rows, filterText])
+  }, [activeRows, filterText])
 
   // Sorted rows
   const sortedRows = useMemo(() => {
@@ -228,11 +263,13 @@ export function QueryResultsTable({
   }, [filteredRows, sortColumn, sortDirection, normalizedColumns])
 
   // Pagination calculations (1-based currentPage)
-  const totalPages = Math.max(1, Math.ceil(sortedRows.length / rowsPerPage))
-  const { slice: paginatedRows, start: startIndex } = useMemo(
-    () => paginateRows(sortedRows, currentPage - 1, rowsPerPage),
-    [sortedRows, currentPage, rowsPerPage],
-  )
+  const totalPages = Math.max(1, Math.ceil(effectiveRowCount / rowsPerPage))
+  const { slice: paginatedRows, start: startIndex } = useMemo(() => {
+    if (isPaged) {
+      return { slice: sortedRows, start: (currentPage - 1) * rowsPerPage, end: currentPage * rowsPerPage }
+    }
+    return paginateRows(sortedRows, currentPage - 1, rowsPerPage)
+  }, [sortedRows, currentPage, rowsPerPage, isPaged])
 
   // Reset to page 1 when filter or sort changes
   useMemo(() => {
@@ -244,6 +281,31 @@ export function QueryResultsTable({
       setCurrentPage(newPage)
     }
   }
+
+  // Server-side paging for large results
+  useEffect(() => {
+    let active = true
+    if (!isPaged || !resultRef?.queryId) {
+      setPageRows(null)
+      setPageError(null)
+      return
+    }
+    setPageLoading(true)
+    setPageError(null)
+    apiService.getQueryResultsPage(resultRef.queryId, currentPage, rowsPerPage)
+      .then((resp) => {
+        if (!active) return
+        setPageRows(resp.results?.rows || [])
+      })
+      .catch((err: any) => {
+        if (!active) return
+        setPageError(err?.message || 'Failed to load paged results')
+      })
+      .finally(() => {
+        if (active) setPageLoading(false)
+      })
+    return () => { active = false }
+  }, [isPaged, resultRef?.queryId, currentPage, rowsPerPage])
 
   const handleResizeMouseDown = (event: ReactMouseEvent<HTMLDivElement>, column: string) => {
     event.preventDefault()
@@ -298,7 +360,7 @@ export function QueryResultsTable({
     try {
       const timestamp_str = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
       const fullFilename = `query_results_${timestamp_str}`
-      const exportData = { columns: normalizedColumns, rows: sortedRows }
+
 
       if (format === 'csv') {
         const csvContent = [normalizedColumns.join(','), ...sortedRows.map(row => rowValues(row).join(','))].join('\n')
@@ -344,6 +406,47 @@ export function QueryResultsTable({
     navigator.clipboard.writeText(csvContent).catch(err => console.error('Copy failed', err))
   }
 
+  const handleSaveDashboard = async () => {
+    setDashboardError(null)
+    if (!sql || !sql.trim()) {
+      setDashboardError('SQL is required to save a dashboard.')
+      return
+    }
+    if (!dashboardTitle.trim()) {
+      setDashboardError('Dashboard title is required.')
+      return
+    }
+    setDashboardSaving(true)
+    try {
+      const normalizedRows = rows.map(rowToArray)
+      const response = await apiService.createDashboardFromQuery({
+        sql_query: sql,
+        query_results: {
+          columns: normalizedColumns,
+          rows: normalizedRows,
+          row_count: rowCount || rows.length,
+        },
+        title: dashboardTitle.trim(),
+        description: dashboardDescription.trim() || undefined,
+      })
+      if (response.status === 'success') {
+        setDashboardSuccess(true)
+        setTimeout(() => {
+          setSaveDashboardOpen(false)
+          setDashboardSuccess(false)
+          setDashboardTitle('')
+          setDashboardDescription('')
+        }, 1200)
+      } else {
+        setDashboardError(response.message || 'Failed to save dashboard.')
+      }
+    } catch (err: any) {
+      setDashboardError(err?.message || 'Failed to save dashboard.')
+    } finally {
+      setDashboardSaving(false)
+    }
+  }
+
 
 
   return (
@@ -353,8 +456,18 @@ export function QueryResultsTable({
           <div className="flex items-center gap-3">
             <div className="text-base font-semibold">Query Results</div>
             <Badge variant="secondary" className="bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
-              {rowCount || rows.length} rows
+              {effectiveRowCount} rows
             </Badge>
+            {resultsTruncated && (
+              <Badge variant="outline" className="text-[11px] text-amber-600 border-amber-200 bg-amber-50 dark:text-amber-300 dark:border-amber-700 dark:bg-amber-950/30">
+                Preview
+              </Badge>
+            )}
+            {isPaged && (
+              <Badge variant="outline" className="text-[11px]">
+                Paged
+              </Badge>
+            )}
             {executionTime !== undefined && (
               <Badge variant="outline" className="text-[11px]">
                 {executionTime.toFixed(2)}s
@@ -484,6 +597,7 @@ export function QueryResultsTable({
               onExport={handleExport}
               onGenerateReport={handleGenerateReport}
               onCopyCSV={handleCopyCSV}
+              onSaveDashboard={sql ? () => setSaveDashboardOpen(true) : undefined}
               disabled={isLoading || reportLoading}
             />
           </div>
@@ -498,9 +612,19 @@ export function QueryResultsTable({
             />
             {filterText && (
               <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">
-                Showing {sortedRows.length} of {rows.length} rows
+                Showing {sortedRows.length} of {activeRows.length} rows
               </div>
             )}
+            {isPaged && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-300 mt-1">
+                Filtering applies to the current page only.
+              </div>
+            )}
+          </div>
+        )}
+        {pageError && (
+          <div className="mt-2 text-xs text-red-600">
+            {pageError}
           </div>
         )}
       </CardHeader>
@@ -548,7 +672,7 @@ export function QueryResultsTable({
                     colSpan={normalizedColumns.length}
                     className="h-24 text-center text-gray-500 dark:text-gray-400"
                   >
-                    {filterText ? 'No results match your filter' : 'No results found'}
+                    {pageLoading ? 'Loading page...' : (filterText ? 'No results match your filter' : 'No results found')}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -669,6 +793,54 @@ export function QueryResultsTable({
         </div>
 
       </CardContent>
+      <Dialog open={saveDashboardOpen} onOpenChange={setSaveDashboardOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle>Save as Dashboard</DialogTitle>
+            <DialogDescription>
+              Persist this query result as a dashboard for reuse and sharing.
+            </DialogDescription>
+          </DialogHeader>
+          {dashboardSuccess ? (
+            <div className="py-6 text-center text-emerald-600 text-sm font-medium">
+              Dashboard saved successfully.
+            </div>
+          ) : (
+            <div className="grid gap-4 py-2">
+              <div className="grid gap-2">
+                <label className="text-xs font-semibold text-gray-600">Title</label>
+                <Input
+                  value={dashboardTitle}
+                  onChange={(e) => setDashboardTitle(e.target.value)}
+                  placeholder="Executive Revenue Overview"
+                />
+              </div>
+              <div className="grid gap-2">
+                <label className="text-xs font-semibold text-gray-600">Description</label>
+                <Textarea
+                  value={dashboardDescription}
+                  onChange={(e) => setDashboardDescription(e.target.value)}
+                  placeholder="Optional notes about this dashboard..."
+                  rows={3}
+                />
+              </div>
+              {dashboardError && (
+                <div className="text-xs text-red-600">{dashboardError}</div>
+              )}
+            </div>
+          )}
+          {!dashboardSuccess && (
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setSaveDashboardOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleSaveDashboard} disabled={dashboardSaving}>
+                {dashboardSaving ? 'Saving...' : 'Save Dashboard'}
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

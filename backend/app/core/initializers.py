@@ -352,8 +352,16 @@ async def init_orchestrator(app_state=None) -> Tuple[bool, Optional[str], Any]:
                 raise ValueError("LANGGRAPH_CHECKPOINT_DB not configured")
                 
             logger.info(f"Initializing LangGraph SQLite checkpointer at {settings.LANGGRAPH_CHECKPOINT_DB}")
-            checkpointer_context = AsyncSqliteSaver.from_conn_string(settings.LANGGRAPH_CHECKPOINT_DB)
-            sqlite_checkpointer = await checkpointer_context.__aenter__()
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(settings.LANGGRAPH_CHECKPOINT_DB), exist_ok=True)
+            
+            # AsyncSqliteSaver.from_conn_string returns an async context manager
+            checkpointer_cm = AsyncSqliteSaver.from_conn_string(settings.LANGGRAPH_CHECKPOINT_DB)
+            
+            # Manually enter the context manager to leak the saver
+            # We must be careful to close it on shutdown
+            sqlite_checkpointer = await checkpointer_cm.__aenter__()
+            checkpointer_context = checkpointer_cm
             
             # Verify connection immediately
             try:

@@ -107,46 +107,34 @@ class SQLclProcessPool:
         logger.info(f"SQLcl process pool configured with {self.pool_size} processes")
     
     async def initialize(self) -> bool:
-        """
-        Initialize the process pool
-        
-        Returns:
-            bool: True if initialization successful
-        """
+        """Initialize the process pool"""
         if self.initialized:
-            logger.warning("Pool already initialized")
             return True
         
-        logger.info(f"Initializing SQLcl process pool with {self.pool_size} processes...")
+        logger.info(f"Init SQLcl pool: {self.pool_size} processes")
         
         async with self.pool_lock:
-            # Initialize all processes
             for process_id in range(self.pool_size):
                 try:
-                    logger.info(f"Initializing process {process_id + 1}/{self.pool_size}...")
-                    
-                    # Create SQLcl MCP client
                     client = SQLclMCPClient(
                         sqlcl_path=settings.sqlcl_path,
                         sqlcl_args=settings.sqlcl_args,
                         timeout=self.process_timeout,
                     )
                     
-                    # Initialize client
-                    success = await client.initialize()
-                    
-                    if not success:
-                        logger.error(f"Failed to initialize process {process_id}")
+                    if not await client.initialize():
+                        logger.error(f"Process {process_id} init failed")
                         continue
                     
                     # Auto-connect to default database
                     connect_result = await client.connect_database(settings.oracle_default_connection)
                     if connect_result.get("status") != "connected":
-                        logger.error(f"Failed to connect process {process_id} to database: {connect_result.get('message')} (conn={settings.oracle_default_connection})")
+                        logger.error(f"Process {process_id} connect failed: {connect_result.get('message')} (conn={settings.oracle_default_connection})")
                         await client.close()
                         continue
                     
-                    # Create pooled process
+                    logger.info(f"Process {process_id} connected to Oracle: {settings.oracle_default_connection}")
+                    
                     pooled_process = PooledProcess(
                         process_id=process_id,
                         client=client,
@@ -157,22 +145,18 @@ class SQLclProcessPool:
                     self.processes.append(pooled_process)
                     await self.available_queue.put(pooled_process)
                     
-                    logger.info(f"Process {process_id} initialized and ready")
-                    
                 except Exception as e:
-                    logger.error(f"Failed to initialize process {process_id}: {e}")
+                    logger.error(f"Process {process_id} error: {e}")
                     continue
             
             if len(self.processes) == 0:
-                logger.error(f"Failed to initialize any processes")
+                logger.error("No processes initialized")
                 return False
             
             self.initialized = True
-            
-            # Start health monitoring
             self.health_check_task = asyncio.create_task(self._health_monitor())
             
-            logger.info(f"SQLcl process pool initialized with {len(self.processes)}/{self.pool_size} processes")
+            logger.info(f"SQLcl pool ready: {len(self.processes)}/{self.pool_size} processes")
             await self.circuit_breaker.record_success()
             return True
     
@@ -423,3 +407,7 @@ class SQLclProcessPool:
                 for p in self.processes
             ]
         }
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Alias for get_status() for backward compatibility"""
+        return self.get_status()

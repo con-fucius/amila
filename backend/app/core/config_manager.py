@@ -39,6 +39,10 @@ class AppSettings(BaseSettings):
         description="Encryption key for sensitive data (min 16 characters, 32+ recommended)"
     )
 
+    # Audit & Governance Settings
+    NATIVE_AUDIT_ENABLED: bool = Field(default=True, description="Enable audit logging to native database")
+    AUDIT_DATABASE_TYPE: str = Field(default="postgres", description="Database type for audit storage (postgres/doris)")
+
     # Request Signing
     hmac_secret_key: str = Field(default="dev_hmac_secret_change_in_prod_backend_123", min_length=32, description="HMAC secret key for request signing")
 
@@ -78,6 +82,13 @@ class AppSettings(BaseSettings):
     DORIS_DB_USER: str = Field(default="root", description="Doris Database User")
     DORIS_DB_PASSWORD: str = Field(default="", description="Doris Database Password")
     DORIS_DB_DATABASE: str = Field(default="demo", description="Doris Database Name")
+    
+    # Apache Superset Integration (disabled by default for production safety)
+    SUPERSET_ENABLED: bool = Field(default=False, description="Enable Apache Superset integration (optional)")
+    SUPERSET_BASE_URL: Optional[str] = Field(default=None, description="Superset API base URL")
+    SUPERSET_USERNAME: Optional[str] = Field(default=None, description="Superset admin username")
+    SUPERSET_PASSWORD: Optional[str] = Field(default=None, description="Superset admin password")
+    SUPERSET_DATABASE_ID: Optional[int] = Field(default=None, description="Default database ID in Superset")
     
     # PostgreSQL Configuration
     POSTGRES_ENABLED: bool = Field(default=False, description="Enable PostgreSQL integration")
@@ -214,6 +225,86 @@ class AppSettings(BaseSettings):
     SUPERSET_BASE_URL: Optional[str] = Field(default=None, description="Apache Superset server base URL (e.g., http://superset:8088)")
     SUPERSET_USERNAME: Optional[str] = Field(default=None, description="Superset username")
     SUPERSET_PASSWORD: Optional[str] = Field(default=None, description="Superset password")
+
+    # LDAP/Active Directory Configuration
+    LDAP_ENABLED: bool = Field(default=False, description="Enable LDAP/Active Directory integration")
+    LDAP_SERVER_URL: str = Field(default="ldap://localhost:389", description="LDAP server URL (ldap:// or ldaps://)")
+    LDAP_BIND_DN: str = Field(default="", description="LDAP bind distinguished name (service account)")
+    LDAP_BIND_PASSWORD: str = Field(default="", description="LDAP bind password")
+    LDAP_BASE_DN: str = Field(default="DC=company,DC=com", description="LDAP base DN for user searches")
+    LDAP_USER_SEARCH_FILTER: str = Field(default="(sAMAccountName={username})", description="LDAP user search filter pattern")
+    LDAP_GROUP_SEARCH_FILTER: str = Field(default="(member={user_dn})", description="LDAP group search filter pattern")
+    LDAP_USE_SSL: bool = Field(default=True, description="Use SSL/TLS for LDAP connections")
+    LDAP_USE_STARTTLS: bool = Field(default=False, description="Use StartTLS for LDAP connections")
+    LDAP_TIMEOUT_SECONDS: int = Field(default=10, ge=1, le=60, description="LDAP connection timeout in seconds")
+    LDAP_CACHE_TTL_SECONDS: int = Field(default=3600, ge=300, le=86400, description="LDAP query cache TTL in seconds")
+    LDAP_GROUP_MAPPINGS: dict = Field(default_factory=dict, description="Static LDAP group to role mappings")
+
+    # Role-Based Quota Configuration
+    ROLE_BASED_QUOTAS: dict = Field(
+        default_factory=lambda: {
+            "admin": float("inf"),
+            "manager": 25.0,
+            "viewer": 10.0,
+            "default": 5.0
+        },
+        description="Monthly query cost quotas by role (USD)"
+    )
+
+    # Role-Based Approval Configuration
+    ROLE_BASED_APPROVAL_BYPASS: dict = Field(
+        default_factory=lambda: {
+            "admin": ["critical", "high", "medium", "low", "safe"],
+            "manager": ["medium", "low", "safe"],
+            "finance": ["low", "safe"],
+        },
+        description="List of risk levels that a role can bypass approval for"
+    )
+
+    # Proactive Insights Configuration
+    PROACTIVE_INSIGHTS_ENABLED: bool = Field(default=True, description="Enable proactive insight generation")
+    PROACTIVE_INSIGHTS_SCHEDULE: str = Field(default="0 8 * * *", description="Cron schedule for proactive insights (8 AM daily)")
+    PROACTIVE_INSIGHTS_QUERIES: list = Field(
+        default_factory=list,
+        description="Pre-configured analytical queries for proactive insights"
+    )
+
+    # Scheduled Reports Configuration
+    REPORTS_SCHEDULER_ENABLED: bool = Field(default=True, description="Enable scheduled report execution")
+    REPORTS_SCHEDULER_POLL_SECONDS: int = Field(default=60, ge=10, le=3600, description="Scheduler poll interval in seconds")
+
+    # SMTP Email Configuration
+    SMTP_HOST: str = Field(default="", description="SMTP server host")
+    SMTP_PORT: int = Field(default=587, ge=1, le=65535, description="SMTP server port")
+    SMTP_USERNAME: Optional[str] = Field(default=None, description="SMTP username")
+    SMTP_PASSWORD: Optional[str] = Field(default=None, description="SMTP password")
+    SMTP_USE_TLS: bool = Field(default=True, description="Use STARTTLS for SMTP")
+    SMTP_FROM_ADDRESS: str = Field(default="noreply@amila.local", description="Default from address for emails")
+
+    # Semantic Layer Configuration
+    SEMANTIC_MAPPINGS: dict = Field(
+        default_factory=lambda: {
+            "customers": {
+                "oracle": "CUSTOMER_DIM",
+                "doris": "dim_customer",
+                "postgres": "customers"
+            },
+            "orders": {
+                "oracle": "ORDER_FACT",
+                "doris": "fact_orders",
+                "postgres": "orders"
+            },
+            "revenue": {
+                "oracle": "REVENUE_MV",
+                "doris": "revenue",
+                "postgres": "revenue_summary"
+            }
+        },
+        description="Semantic concept-to-table mappings for cross-DB querying"
+    )
+
+    # Organization Settings
+    ORGANIZATION_ID: Optional[str] = Field(default="default", description="Organization identifier for multi-tenant setups")
 
     model_config = SettingsConfigDict(
         env_file=".env",

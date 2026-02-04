@@ -291,6 +291,8 @@ class VisualizationService:
         categorical_cols = []
         date_cols = []
         percentage_cols = []
+        lat_cols = []
+        lon_cols = []
         
         for i, col in enumerate(columns):
             col_lower = col.lower()
@@ -299,8 +301,15 @@ class VisualizationService:
             if not sample_values:
                 continue
             
+            # Check for latitude/longitude
+            if any(kw in col_lower for kw in ['lat', 'latitude']):
+                lat_cols.append(i)
+                numeric_cols.append(i)
+            elif any(kw in col_lower for kw in ['lon', 'lng', 'longitude']):
+                lon_cols.append(i)
+                numeric_cols.append(i)
             # Check for percentage columns
-            if any(kw in col_lower for kw in ['percent', 'rate', 'ratio', '%']):
+            elif any(kw in col_lower for kw in ['percent', 'rate', 'ratio', '%']):
                 percentage_cols.append(i)
                 numeric_cols.append(i)
             # Check for date columns
@@ -314,6 +323,10 @@ class VisualizationService:
         
         # Enhanced decision logic
         
+        # Geospatial detection (lat + lon)
+        if lat_cols and lon_cols:
+            return "map"
+
         # Time series detection (date + numeric)
         if date_cols and numeric_cols:
             # Multiple metrics over time -> multi-line chart
@@ -407,6 +420,8 @@ class VisualizationService:
             # Identify dimension and metric columns
             numeric_cols = []
             categorical_cols = []
+            lat_col = None
+            lon_col = None
             
             for i, col in enumerate(columns):
                 sample = [row[i] for row in rows[:50] if row[i] is not None]
@@ -414,6 +429,11 @@ class VisualizationService:
                     numeric_cols.append(col)
                 else:
                     categorical_cols.append(col)
+                col_lower = col.lower()
+                if lat_col is None and any(kw in col_lower for kw in ['lat', 'latitude']):
+                    lat_col = col
+                if lon_col is None and any(kw in col_lower for kw in ['lon', 'lng', 'longitude']):
+                    lon_col = col
             
             # Default selections
             x_col = categorical_cols[0] if categorical_cols else columns[0]
@@ -426,7 +446,31 @@ class VisualizationService:
             # Generate chart based on type
             fig = None
             
-            if chart_type == "bar":
+            if chart_type == "map":
+                if not (lat_col and lon_col):
+                    return {
+                        "status": "error",
+                        "message": "Latitude/longitude columns not detected"
+                    }
+                fig = go.Figure()
+                fig.add_trace(go.Scattergeo(
+                    lat=data_dict[lat_col],
+                    lon=data_dict[lon_col],
+                    mode="markers",
+                    marker=dict(
+                        size=8,
+                        color=colors[0],
+                        line=dict(color='white', width=1)
+                    ),
+                    text=[str(v) for v in data_dict.get(x_col, data_dict[lat_col])],
+                    hovertemplate="<b>%{text}</b><br>Lat: %{lat}<br>Lon: %{lon}<br><extra></extra>"
+                ))
+                fig.update_layout(
+                    title=title or "Geospatial Distribution",
+                    geo=dict(showland=True, landcolor="#f3f4f6"),
+                    margin=dict(l=0, r=0, t=50, b=0),
+                )
+            elif chart_type == "bar":
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
                     x=data_dict[x_col],
@@ -798,96 +842,90 @@ class VisualizationService:
                     palette=palette_name
                 )
             
-            if fig:
-                # Add statistical overlays if applicable
-                stats_info = {}
-                if chart_type in ["bar", "line", "scatter"] and y_col in data_dict:
-                    y_values = [v for v in data_dict[y_col] if v is not None]
-                    try:
-                        numeric_y = [float(v) for v in y_values if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace('.', '').replace('-', '').isdigit())]
-                        if numeric_y:
-                            mean_val = sum(numeric_y) / len(numeric_y)
-                            median_val = sorted(numeric_y)[len(numeric_y) // 2]
-                            std_dev = (sum((x - mean_val) ** 2 for x in numeric_y) / len(numeric_y)) ** 0.5
-                            
-                            stats_info = {
-                                "mean": mean_val,
-                                "median": median_val,
-                                "std_dev": std_dev,
-                                "min": min(numeric_y),
-                                "max": max(numeric_y),
-                                "count": len(numeric_y),
-                                "range": max(numeric_y) - min(numeric_y)
-                            }
-                            
-                            # Add mean line for bar and line charts (if enabled)
-                            if chart_type in ["bar", "line"] and hints and hints.get("show_mean", False):
-                                fig.add_hline(
-                                    y=mean_val,
-                                    line_dash="dash",
-                                    line_color="#10B981",
-                                    line_width=2,
-                                    annotation_text=f"Mean: {VisualizationService.format_number(mean_val)}",
-                                    annotation_position="top right",
-                                    annotation=dict(
-                                        font=dict(size=11, color="#10B981"),
-                                        bgcolor="rgba(255, 255, 255, 0.9)",
-                                        bordercolor="#10B981",
-                                        borderwidth=1,
-                                        borderpad=4
-                                    )
+            # Add statistical overlays if applicable
+            stats_info = {}
+            if fig is not None and chart_type in ["bar", "line", "scatter"] and y_col in data_dict:
+                y_values = [v for v in data_dict[y_col] if v is not None]
+                try:
+                    numeric_y = [float(v) for v in y_values if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace('.', '').replace('-', '').isdigit())]
+                    if numeric_y:
+                        mean_val = sum(numeric_y) / len(numeric_y)
+                        median_val = sorted(numeric_y)[len(numeric_y) // 2]
+                        std_dev = (sum((x - mean_val) ** 2 for x in numeric_y) / len(numeric_y)) ** 0.5
+                        
+                        stats_info = {
+                            "mean": mean_val,
+                            "median": median_val,
+                            "std_dev": std_dev,
+                            "min": min(numeric_y),
+                            "max": max(numeric_y),
+                            "count": len(numeric_y),
+                            "range": max(numeric_y) - min(numeric_y)
+                        }
+                        
+                        # Add mean line for bar and line charts (if enabled)
+                        if chart_type in ["bar", "line"] and hints and hints.get("show_mean", False):
+                            fig.add_hline(
+                                y=mean_val,
+                                line_dash="dash",
+                                line_color="#10B981",
+                                line_width=2,
+                                annotation_text=f"Mean: {VisualizationService.format_number(mean_val)}",
+                                annotation_position="top right"
+                            )
+                        
+                        # Add peak annotation (if enabled)
+                        if hints and hints.get("show_peaks", False) and chart_type in ["bar", "line"]:
+                            max_idx = numeric_y.index(max(numeric_y))
+                            if max_idx < len(data_dict[x_col]):
+                                fig.add_annotation(
+                                    x=data_dict[x_col][max_idx],
+                                    y=max(numeric_y),
+                                    text=f"Peak: {VisualizationService.format_number(max(numeric_y))}",
+                                    showarrow=True,
+                                    arrowhead=2,
+                                    arrowcolor="#EF4444"
                                 )
-                            
-                            # Add peak annotation (if enabled)
-                            if hints and hints.get("show_peaks", False) and chart_type in ["bar", "line"]:
-                                max_idx = numeric_y.index(max(numeric_y))
-                                if max_idx < len(data_dict[x_col]):
-                                    fig.add_annotation(
-                                        x=data_dict[x_col][max_idx],
-                                        y=max(numeric_y),
-                                        text=f"Peak: {VisualizationService.format_number(max(numeric_y))}",
-                                        showarrow=True,
-                                        arrowhead=2,
-                                        arrowcolor="#EF4444",
-                                        arrowwidth=2,
-                                        ax=0,
-                                        ay=-40,
-                                        font=dict(size=11, color="#EF4444"),
-                                        bgcolor="rgba(255, 255, 255, 0.9)",
-                                        bordercolor="#EF4444",
-                                        borderwidth=1,
-                                        borderpad=4
-                                    )
-                    except (ValueError, TypeError) as e:
-                        logger.debug(f"Could not calculate statistics: {e}")
-                
-                # Convert to JSON for frontend
-                plotly_json = json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder))
-                
-                return {
-                    "status": "success",
-                    "chart_type": chart_type,
-                    "plotly_json": plotly_json,
-                    "columns_used": {
-                        "x": x_col,
-                        "y": y_col
-                    },
-                    "statistics": stats_info,
-                    "palette": palette_name
-                }
+                except Exception as e:
+                    logger.debug(f"Could not calculate statistics: {e}")
+
+            # Add visualization explanation (Why this chart)
+            explanation = VisualizationService.get_viz_explanation(chart_type, columns, rows)
             
             return {
-                "status": "error",
-                "message": "Could not generate chart"
+                "status": "success",
+                "plotly_json": json.loads(fig.to_json()),
+                "chart_type": chart_type,
+                "explanation": explanation,
+                "statistics": stats_info
             }
             
         except Exception as e:
-            logger.error(f"Visualization generation failed: {e}", exc_info=True)
+            logger.error(f"Chart generation failed: {e}")
             return {
                 "status": "error",
-                "message": str(e),
-                "fallback": "recharts"
+                "message": str(e)
             }
+
+    @staticmethod
+    def get_viz_explanation(chart_type: str, columns: List[str], rows: List[List[Any]]) -> str:
+        """
+        Generate a human-readable explanation for why a specific chart type was chosen.
+        """
+        explanations = {
+            "bar": "A bar chart was chosen to clearly compare individual values across different categories.",
+            "grouped_bar": "Grouped bars allow for a side-by-side comparison of multiple metrics or segments.",
+            "line": "A line chart is best for showing trends and changes in data over a continuous period.",
+            "multi_line": "Multiple lines provide an easy way to compare several trends simultaneously over time.",
+            "pie": "A pie chart highlights the proportional composition and parts-of-a-whole relationship.",
+            "scatter": "Scatter plots are ideal for identifying correlations and distributions between two numeric variables.",
+            "heatmap": "A heatmap visualizes complex relationships or correlations across a large matrix of data.",
+            "area": "Area charts emphasize the magnitude of change over time while maintaining trend visibility.",
+            "box": "Box plots provide a detailed statistical breakdown of data distribution, including medians and outliers.",
+            "map": "A map view highlights geographic patterns and spatial clustering using latitude and longitude."
+        }
+        return explanations.get(chart_type, "This visualization was chosen as the most effective way to represent the underlying data structure.")
+
     
     @staticmethod
     def generate_multi_chart(
@@ -940,6 +978,8 @@ class VisualizationService:
         numeric_cols = []
         categorical_cols = []
         date_cols = []
+        lat_cols = []
+        lon_cols = []
         
         for i, col in enumerate(columns):
             col_lower = col.lower()
@@ -948,7 +988,13 @@ class VisualizationService:
             if not sample_values:
                 continue
             
-            if any(kw in col_lower for kw in ['date', 'time', 'month', 'year', 'quarter', 'week', 'day']):
+            if any(kw in col_lower for kw in ['lat', 'latitude']):
+                lat_cols.append(col)
+                numeric_cols.append(col)
+            elif any(kw in col_lower for kw in ['lon', 'lng', 'longitude']):
+                lon_cols.append(col)
+                numeric_cols.append(col)
+            elif any(kw in col_lower for kw in ['date', 'time', 'month', 'year', 'quarter', 'week', 'day']):
                 date_cols.append(col)
             elif all(isinstance(v, (int, float)) or (isinstance(v, str) and v.replace('.', '').replace('-', '').isdigit()) for v in sample_values):
                 numeric_cols.append(col)
@@ -956,6 +1002,19 @@ class VisualizationService:
                 categorical_cols.append(col)
         
         recommendations = []
+
+        # Geospatial analysis
+        if lat_cols and lon_cols:
+            recommendations.append({
+                "chart_type": "map",
+                "confidence": 0.96,
+                "reasoning": "Latitude and longitude columns detected for spatial visualization",
+                "best_for": "Mapping geographic distribution and spatial clustering",
+                "columns": {
+                    "lat": lat_cols[0],
+                    "lon": lon_cols[0]
+                }
+            })
         
         # Time series analysis
         if date_cols and numeric_cols:

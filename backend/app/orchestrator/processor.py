@@ -163,6 +163,7 @@ async def process_query(
     thread_id_override: str | None = None,
     database_type: str = "oracle",
     conversation_history: list | None = None,
+    auto_approve: bool = False,
 ) -> dict:
     """
     Process a user query through the orchestrator
@@ -183,6 +184,7 @@ async def process_query(
     
     # Validate conversation_history at API boundary (defensive check)
     conversation_history = validate_conversation_history(conversation_history)
+    sentiment_query_id = f"s_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     
     # CRITICAL: Wrap routing in try-catch to prevent crashes on greetings/simple inputs
     routing_result = None
@@ -213,7 +215,9 @@ async def process_query(
                 user_query, 
                 formatted_history, 
                 schema_context,
-                use_llm=False  # Disable LLM for reliability - pattern matching is sufficient for greetings
+                use_llm=False,  # Disable LLM for reliability - pattern matching is sufficient for greetings
+                user_id=user_id,
+                query_id=sentiment_query_id
             )
         except Exception as route_err:
             logger.warning(f"Context routing failed: {route_err}, falling back to basic routing")
@@ -243,6 +247,16 @@ async def process_query(
     # Handle conversational intents directly without SQL generation
     if routing_result and not routing_result.get("requires_sql") and routing_result.get("response"):
         query_id = f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            await SentimentTracker.finalize_interaction(
+                user_id=user_id,
+                query_id=sentiment_query_id,
+                success=True,
+                response_time_ms=0
+            )
+        except Exception:
+            pass
         return {
             "status": "success",
             "query_id": query_id,
@@ -273,6 +287,16 @@ async def process_query(
             qa_result = await MetadataQAService.answer_metadata_question(user_query, schema_context)
             
             query_id = f"meta_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            try:
+                from app.services.sentiment_tracker import SentimentTracker
+                await SentimentTracker.finalize_interaction(
+                    user_id=user_id,
+                    query_id=sentiment_query_id,
+                    success=True,
+                    response_time_ms=0
+                )
+            except Exception:
+                pass
             return {
                 "status": "success",
                 "query_id": query_id,
@@ -296,6 +320,16 @@ async def process_query(
     # Handle AMBIGUOUS intent (Clarification needed)
     if routing_result and routing_result.get("intent") == "ambiguous":
         query_id = f"clarify_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            await SentimentTracker.finalize_interaction(
+                user_id=user_id,
+                query_id=sentiment_query_id,
+                success=True,
+                response_time_ms=0
+            )
+        except Exception:
+            pass
         return {
             "status": "clarification_needed",
             "query_id": query_id,
@@ -347,6 +381,38 @@ async def process_query(
     trace_identifier = langfuse_trace_id or query_id
     set_trace_id(trace_identifier)
     set_user_context(user_id=user_id, session_id=session_id)
+    
+    # Enrichment: Calculate estimated risk and SQL metrics
+    sql_length = len(user_query)
+    # Simple risk estimation based on keywords
+    risk_level = "low"
+    risk_score = 0
+    if any(k in user_query.upper() for k in ["DELETE", "DROP", "TRUNCATE", "UPDATE", "INSERT"]):
+        risk_level = "high"
+        risk_score = 80
+        # Trigger alert for high-risk operation
+        from app.services.alert_service import alert_service
+        import asyncio
+        asyncio.create_task(alert_service.trigger_alert(
+            title="High Risk Operation Detected",
+            message=f"User {user_id} requested a potentially destructive operation: {user_query[:100]}...",
+            level="CRITICAL",
+            component="QueryProcessor",
+            metadata={"query_id": query_id, "user_id": user_id, "risk_score": risk_score}
+        ))
+    elif any(k in user_query.upper() for k in ["JOIN", "GROUP BY", "SUM", "COUNT"]):
+        risk_level = "medium"
+        risk_score = 30
+
+    update_trace(
+        trace_id=trace_identifier,
+        metadata={
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "sql_length": sql_length,
+            "session_id": session_id
+        }
+    )
     
     # Record pipeline stage: User Input
     now = datetime.now(timezone.utc)
@@ -446,6 +512,7 @@ async def process_query(
         "trace_id": trace_identifier,
         "database_type": database_type,
         "needs_approval": False,
+        "auto_approve": auto_approve,
         "approved": False,
         "error": "",
         "next_action": "",
@@ -524,10 +591,21 @@ async def process_query(
                     logger.error(f"Orchestrator returned non-dict result: {type(result)}, value: {result}")
                     raise AttributeError(f"Orchestrator returned {type(result).__name__} instead of dict")
                 
+                # DEBUG: Log key state fields to understand interrupt behavior
+                logger.info(
+                    f"Orchestrator result: "
+                    f"needs_approval={result.get('needs_approval')}, "
+                    f"approved={result.get('approved')}, "
+                    f"next_action={result.get('next_action')}, "
+                    f"current_stage={result.get('current_stage')}, "
+                    f"error={bool(result.get('error'))}"
+                )
+                
                 orchestrator_span["output"] = {
                     "status": "completed",
                     "query_id": query_id,
                     "needs_approval": result.get("needs_approval"),
+                    "next_action": result.get("next_action"),
                 }
             except Exception as invoke_err:
                 logger.error(f"Orchestrator invocation failed: {invoke_err}", exc_info=True)
@@ -543,6 +621,11 @@ async def process_query(
             raise AttributeError(f"Expected dict from orchestrator, got {type(result).__name__}")
             
         final_state = validate_and_fix_state(result)
+        try:
+            from app.orchestrator.state import trim_history_lists
+            final_state = trim_history_lists(final_state)
+        except Exception as trim_err:
+            logger.debug(f"History trimming skipped: {trim_err}")
         
         # Deep copy execution_result to prevent cleanup code from nullifying rows
         import copy
@@ -588,6 +671,13 @@ async def process_query(
                 "failed_at": final_state.get("current_stage", "unknown"),
                 "sql_attempted": final_state.get("sql_query"),
             }
+            try:
+                error_payload = final_state.get("error_payload", {}) or {}
+                details = error_payload.get("details", {}) if isinstance(error_payload, dict) else {}
+                if isinstance(details, dict) and details.get("error_taxonomy"):
+                    raw_llm_metadata["error_details"]["error_taxonomy"] = details.get("error_taxonomy")
+            except Exception:
+                pass
             # Also add to top-level for easier frontend access
             raw_llm_metadata["failed_stage"] = final_state.get("current_stage", "unknown")
         
@@ -602,7 +692,8 @@ async def process_query(
         # So needs_approval=True indicates we're waiting for user approval
         is_pending_approval = (
             final_state.get("next_action") in ["request_approval", "await_approval"] or
-            (final_state.get("needs_approval", False) and not final_state.get("approved", False))
+            (final_state.get("needs_approval", False) and not final_state.get("approved", False)) or
+            final_state.get("current_stage") == "await_approval"
         )
         
         # Format status based on state
@@ -669,9 +760,26 @@ async def process_query(
                 "execution_time_ms": execution_result_copy.get("execution_time_ms", 0),
                 "timestamp": execution_result_copy.get("timestamp", ""),
                 "status": execution_result_copy.get("status", "success"),
+                "data_quality": execution_result_copy.get("data_quality"),
             }
             
             logger.info(f"Normalized result: {len(normalized_result['columns'])} columns, {len(normalized_result['rows'])} rows")
+        
+        # Trim large results and include result reference
+        result_ref = None
+        results_truncated = None
+        if normalized_result:
+            try:
+                from app.services.query_results_store import build_transport_payload
+                cache_status = execution_result_copy.get("cache_status") if execution_result_copy else None
+                trimmed_result, result_ref, results_truncated = build_transport_payload(
+                    query_id=query_id,
+                    result=normalized_result,
+                    cache_status=cache_status,
+                )
+                normalized_result = trimmed_result
+            except Exception:
+                pass
         
         response_payload = {
             "status": status,
@@ -682,6 +790,8 @@ async def process_query(
             "sql_confidence": final_state.get("sql_confidence", 100),
             "optimization_suggestions": final_state.get("optimization_suggestions", []),
             "results": normalized_result,  # Standard field name used across the codebase
+            "result_ref": result_ref,
+            "results_truncated": results_truncated,
             "row_count": row_count,
             "rows_requested": rows_requested,
             "visualization_hints": final_state.get("visualization_hints", {}),
@@ -690,6 +800,9 @@ async def process_query(
             "approval_context": final_state.get("approval_context"),
             "insights": final_state.get("insights"),
             "suggested_queries": final_state.get("suggested_queries"),
+            "narrative": final_state.get("narrative"),
+            "forecast": final_state.get("forecast"),
+            "root_cause_analysis": final_state.get("root_cause_analysis"),
             "validation": final_state.get("validation_result"),
             "needs_approval": needs_approval,
             "llm_metadata": raw_llm_metadata,
@@ -703,6 +816,57 @@ async def process_query(
             "clarification_message": final_state.get("clarification_message") if is_clarification else None,
             "clarification_details": final_state.get("clarification_details") if is_clarification else None,
         }
+        
+        # Track query cost for budget enforcement
+        try:
+            from app.services.query_cost_tracker import QueryCostTracker
+            
+            llm_metadata = final_state.get("llm_metadata", {})
+            execution_result = final_state.get("execution_result", {})
+            
+            # Calculate LLM tokens if available
+            llm_input_tokens = llm_metadata.get("input_tokens", 0)
+            llm_output_tokens = llm_metadata.get("output_tokens", 0)
+            db_execution_ms = execution_result.get("execution_time_ms", 0)
+            
+            # Estimate rows scanned from result
+            rows_scanned = execution_result.get("row_count", 0)
+            
+            cost = await QueryCostTracker.record_query_cost(
+                user_id=user_id,
+                query_id=query_id,
+                llm_input_tokens=llm_input_tokens,
+                llm_output_tokens=llm_output_tokens,
+                db_execution_ms=db_execution_ms,
+                rows_scanned=rows_scanned
+            )
+            
+            # Add cost info to response
+            response_payload["cost_info"] = {
+                "total_cost_usd": cost.total_cost_usd,
+                "cost_tier": cost.cost_tier,
+                "llm_cost": cost.llm_cost_usd,
+                "db_cost": cost.db_cost_estimate
+            }
+            
+            logger.debug(f"Recorded query cost for {user_id}: ${cost.total_cost_usd:.6f}")
+            
+        except Exception as cost_err:
+            logger.warning(f"Failed to record query cost: {cost_err}")
+
+        # Record SLI event for SLO tracking
+        try:
+            from app.services.slo_service import SLOService
+            total_ms = raw_llm_metadata.get("total_execution_ms")
+            if not isinstance(total_ms, int):
+                total_ms = int((time.time() - start_time) * 1000)
+            await SLOService.record_event(
+                success=(status == "success"),
+                latency_ms=total_ms,
+                metadata={"query_id": query_id, "user_id": user_id}
+            )
+        except Exception as slo_err:
+            logger.debug(f"Failed to record SLI event: {slo_err}")
         
         # Push to query history for undo/redo functionality
         if status == "success" and normalized_result:
@@ -756,7 +920,9 @@ async def process_query(
                         ExecState.FINISHED,
                         {
                             "sql": final_state.get("sql_query", ""),
-                            "result": execution_result_copy,
+                            "result": normalized_result,
+                            "result_ref": result_ref,
+                            "results_truncated": results_truncated,
                             "insights": final_state.get("insights"),
                             "suggested_queries": final_state.get("suggested_queries"),
                             "thinking_steps": raw_llm_metadata.get("thinking_steps"),
@@ -780,6 +946,22 @@ async def process_query(
         except Exception:
             # Do not fail the request if SSE emission has issues
             pass
+
+        # Finalize sentiment tracking with real outcome and response time
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            total_ms = raw_llm_metadata.get("total_execution_ms")
+            if not isinstance(total_ms, int):
+                total_ms = int((time.time() - start_time) * 1000)
+            await SentimentTracker.finalize_interaction(
+                user_id=user_id,
+                query_id=sentiment_query_id,
+                success=(status == "success"),
+                response_time_ms=total_ms,
+                error_message=message if status == "error" else None
+            )
+        except Exception as sentiment_err:
+            logger.debug(f"Sentiment finalize failed (non-fatal): {sentiment_err}")
 
         # Langfuse trace completion (disabled - requires decorator context)
         # Flush any pending events
@@ -812,6 +994,17 @@ async def process_query(
         
     except AttributeError as attr_err:
         logger.error(f"AttributeError during query processing: {attr_err}", exc_info=True)
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            await SentimentTracker.finalize_interaction(
+                user_id=user_id,
+                query_id=sentiment_query_id,
+                success=False,
+                response_time_ms=int((time.time() - start_time) * 1000),
+                error_message=str(attr_err)
+            )
+        except Exception:
+            pass
         if langfuse_client:
             try:
                 update_trace(
@@ -831,6 +1024,17 @@ async def process_query(
         }
     except Exception as e:
         logger.error(f"Query processing failed: {e}", exc_info=True)
+        try:
+            from app.services.sentiment_tracker import SentimentTracker
+            await SentimentTracker.finalize_interaction(
+                user_id=user_id,
+                query_id=sentiment_query_id,
+                success=False,
+                response_time_ms=int((time.time() - start_time) * 1000),
+                error_message=str(e)
+            )
+        except Exception:
+            pass
         if langfuse_client:
             try:
                 update_trace(

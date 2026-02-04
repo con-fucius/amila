@@ -1,5 +1,5 @@
 import { Button } from './ui/button'
-import { cn } from '@/utils/cn'
+
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,9 +49,9 @@ export function ChatTopBar({
     })
 
   return (
-    <header className="h-14 bg-white/80 dark:bg-slate-950/70 backdrop-blur-xl shadow-md flex items-center justify-between px-6 border-b border-emerald-100/60 dark:border-emerald-500/30 flex-shrink-0">
-      <div className="flex items-center gap-4">
-        <h1 className="chat-header-subtitle font-semibold text-gray-700 dark:text-gray-200">Chat Interface</h1>
+    <header className="h-14 bg-white/80 dark:bg-slate-950/70 backdrop-blur-xl shadow-md flex items-center justify-between px-4 sm:px-6 border-b border-emerald-100/60 dark:border-emerald-500/30 flex-shrink-0">
+      <div className="flex items-center gap-3 sm:gap-4">
+        <h1 className="chat-header-subtitle font-semibold text-gray-700 dark:text-gray-200 text-sm sm:text-base">Chat Interface</h1>
         {(isLoading || storeLoading) && (
           <div className="flex items-center gap-2 text-[10px] text-emerald-600">
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -59,17 +59,18 @@ export function ChatTopBar({
           </div>
         )}
       </div>
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 sm:gap-4">
         {completedQueries.length > 0 && (
           <BriefingExport queries={completedQueries} title="Executive Data Brief" />
         )}
         <Button
           variant="outline"
           onClick={onOpenHistory}
+          className="hidden sm:inline-flex"
         >
           History
         </Button>
-        <Button variant="ghost" size="icon" className="relative">
+        <Button variant="ghost" size="icon" className="relative hidden sm:inline-flex">
           <Bell className="h-5 w-5" />
         </Button>
         <DropdownMenu>

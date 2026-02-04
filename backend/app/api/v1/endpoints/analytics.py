@@ -4,7 +4,7 @@ Provides insights into user query patterns, popular tables, and system usage
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, Counter
@@ -323,6 +323,50 @@ async def get_query_pattern_analytics(
     except Exception as e:
         logger.error(f"Failed to generate query pattern analytics: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate analytics")
+
+
+@router.get("/metrics/glossary")
+async def get_metrics_glossary(
+    user: dict = Depends(rbac_manager.get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get the business metrics glossary
+    """
+    try:
+        from app.services.metrics_layer_service import metrics_layer_service
+        glossary = await metrics_layer_service.get_metrics_glossary()
+        return {
+            "status": "success",
+            "glossary": glossary
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch metrics glossary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/budget/forecast")
+async def get_budget_forecast(
+    user_id: Optional[str] = None,
+    budget_limit: Optional[float] = None,
+    user: dict = Depends(rbac_manager.get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get cost budget forecast for a user
+    """
+    try:
+        from app.services.cost_forecasting_service import cost_forecasting_service
+        target_user = user_id or user.get("user") or "admin"
+        forecast = await cost_forecasting_service.generate_forecast(target_user, budget_limit)
+        anomalies = await cost_forecasting_service.detect_anomalies(target_user)
+        
+        return {
+            "status": "success",
+            "forecast": forecast,
+            "anomalies": anomalies
+        }
+    except Exception as e:
+        logger.error(f"Budget forecast failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _extract_table_names(sql_query: str) -> List[str]:

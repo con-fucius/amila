@@ -47,7 +47,7 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
 
   const cancelQuery = useCallback(async () => {
     const queryId = currentQueryIdRef.current
-    
+
     // Abort SSE stream
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
@@ -58,7 +58,7 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
       retryTimeoutRef.current = null
     }
     retryCountRef.current = 0
-    
+
     // Call backend cancel endpoint if we have a query ID
     if (queryId) {
       try {
@@ -69,7 +69,7 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
         // Don't throw - we still want to clean up local state
       }
     }
-    
+
     currentQueryIdRef.current = null
     setIsLoading(false)
     setError('Query cancelled by user')
@@ -86,16 +86,18 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
     try {
       for await (const data of apiService.streamQueryState(queryId)) {
         if (abortController.signal.aborted) break
-        
+
         retryCountRef.current = 0 // Reset retries on success
         const metadata = data.metadata || {}
-        
+
         // Standardize results extraction
         const extractedResult = data.results || data.result || metadata.results || metadata.result
-        
+        const resultRef = data.result_ref || metadata.result_ref
+        const resultsTruncated = data.results_truncated ?? metadata.results_truncated
+
         // Standardize state extraction
         const rawState = data.state || data.status || metadata.state || metadata.status || 'processing'
-        
+
         setCurrentState({
           state: rawState,
           progress: data.progress ?? metadata.progress,
@@ -117,6 +119,8 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
             completion_state: 'completed',
             needs_approval: false,
             results: finalResult,
+            result_ref: resultRef,
+            results_truncated: resultsTruncated,
             sql_query: data.sql || initialResult.sql_query,
             insights: data.insights || initialResult.insights,
             suggested_queries: data.suggested_queries || initialResult.suggested_queries,
@@ -130,7 +134,7 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
         if (isError) {
           const errorMessage = data.error || data.message || metadata.error || 'Query processing failed'
           const errorDetails = data.errorDetails || data.error_details || metadata.errorDetails || metadata.error_details
-          
+
           setError(errorMessage)
           setResponse({
             ...initialResult,
@@ -144,7 +148,7 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
               error_details: errorDetails,
             },
           } as QueryResponse)
-          
+
           setIsLoading(false)
           currentQueryIdRef.current = null
           break
@@ -153,13 +157,13 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
     } catch (err: any) {
       if (abortController.signal.aborted) return
       console.error('Stream error:', err)
-      
+
       // Enhanced SSE error detection and reporting
-      const isNetworkError = err.message?.includes('network') || 
-                            err.message?.includes('fetch') ||
-                            err.name === 'TypeError'
+      const isNetworkError = err.message?.includes('network') ||
+        err.message?.includes('fetch') ||
+        err.name === 'TypeError'
       const isTimeoutError = err.message?.includes('timeout')
-      
+
       // Report error to backend for monitoring
       try {
         apiService.reportError({
@@ -171,31 +175,31 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
             isNetworkError,
             isTimeoutError,
           },
-        }).catch(() => {})
-      } catch {}
-      
+        }).catch(() => { })
+      } catch { }
+
       // Retry logic with enhanced error handling
       if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
         const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 10000)
-        
+
         setCurrentState(prev => ({
           ...prev,
           state: 'reconnecting',
-          message: `Connection lost, retrying in ${delay/1000}s (attempt ${retryCountRef.current}/${maxRetries})...`,
+          message: `Connection lost, retrying in ${delay / 1000}s (attempt ${retryCountRef.current}/${maxRetries})...`,
         } as QueryState))
-        
+
         retryTimeoutRef.current = setTimeout(() => {
           if (currentQueryIdRef.current) {
             setupSSEStream(currentQueryIdRef.current, initialResult)
           }
         }, delay)
       } else {
-        const errorMsg = isNetworkError 
+        const errorMsg = isNetworkError
           ? 'Connection to server lost. Please check your network and try again.'
           : isTimeoutError
-          ? 'Request timed out. The query may still be processing.'
-          : 'Connection lost after multiple retries'
+            ? 'Request timed out. The query may still be processing.'
+            : 'Connection lost after multiple retries'
         setError(errorMsg)
         setIsLoading(false)
       }
@@ -218,11 +222,14 @@ export function useQuerySubmission(): UseQuerySubmissionReturn {
       setResponse(null)
       retryCountRef.current = 0
 
+      const autoApprove = localStorage.getItem('disableSqlApproval') === 'true'
+
       const initial = await apiService.submitQuery({
         query,
         user_id: 'default_user',
         session_id: sessionId,
         database_type: databaseType,
+        auto_approve: autoApprove,
       })
 
       const outcome = classifyInitialQueryResponse(initial)

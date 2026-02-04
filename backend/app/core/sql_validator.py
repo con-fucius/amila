@@ -126,7 +126,7 @@ class ValidationResult:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
-        return {
+        result = {
             "is_valid": self.is_valid,
             "query_type": self.query_type.value,
             "risk_level": self.risk_level.value,
@@ -136,6 +136,10 @@ class ValidationResult:
             "requires_approval": self.requires_approval,
             "issues": self.issues,  # Structured feedback
         }
+        # Include DLP scan results if available
+        if hasattr(self, '_dlp_result') and self._dlp_result:
+            result["dlp_scan"] = self._dlp_result.to_dict()
+        return result
 
 
 class SQLValidator:
@@ -191,7 +195,55 @@ class SQLValidator:
         """
         errors = []
         warnings = []
+        issues: List[Dict[str, str]] = []
         normalized = sql_query.strip()
+        
+        # Query-level DLP (Data Loss Prevention) check
+        # Scans for PII patterns, credentials, and sensitive data exposure risks
+        try:
+            from app.services.query_dlp_service import QueryDLPService
+            
+            dlp_service = QueryDLPService()
+            dlp_result = dlp_service.scan_query(sql_query)
+            
+            risk_level = getattr(dlp_result, 'risk_level', 'low')
+            if risk_level in ["high", "critical"]:
+                # High/critical risk: block the query
+                error_msg = f"Data Loss Prevention (DLP) violation detected: {dlp_result.summary}"
+                errors.append(error_msg)
+                logger.warning(
+                    f"DLP blocked query: risk={risk_level}, "
+                    f"patterns={len(getattr(dlp_result, 'detected_patterns', []))}, "
+                    f"findings={len(getattr(dlp_result, 'findings', []))}"
+                )
+                
+                # Log detailed findings for audit
+                for finding in dlp_result.findings[:5]:
+                    logger.warning(
+                        f"  DLP Finding [{finding.risk_level.upper()}]: {finding.pattern_type} "
+                        f"- {finding.description}"
+                    )
+                
+                # Add DLP info to result for downstream processing
+                self._dlp_result = dlp_result
+                
+            elif getattr(dlp_result, 'risk_level', 'low') == "medium":
+                # Medium risk: add warning but allow
+                warning_msg = f"Potential data sensitivity detected: {dlp_result.summary}"
+                warnings.append(warning_msg)
+                logger.info(f"DLP warning for query: {dlp_result.summary}")
+                self._dlp_result = dlp_result
+                
+            elif dlp_result.findings:
+                # Low risk findings: log only
+                logger.debug(f"DLP scan found {len(dlp_result.findings)} low-risk patterns")
+                self._dlp_result = dlp_result
+                
+        except ImportError:
+            logger.debug("QueryDLPService not available, skipping DLP check")
+        except Exception as e:
+            # DLP check failure should not block query validation
+            logger.warning(f"DLP check failed (non-fatal): {e}")
         
         # Basic validation
         if not normalized:
@@ -220,11 +272,33 @@ class SQLValidator:
         injection_detected, injection_warnings = self._check_sql_injection(query_without_comments)
         if injection_detected:
             errors.extend(injection_warnings)
+            for warning in injection_warnings:
+                issues.append({
+                    "type": "sql_injection_pattern",
+                    "message": warning,
+                    "severity": "critical"
+                })
         
         # Check for dangerous patterns
         dangerous_detected, dangerous_warnings = self._check_dangerous_patterns(normalized)
         if dangerous_detected:
             warnings.extend(dangerous_warnings)
+            for warning in dangerous_warnings:
+                issues.append({
+                    "type": "dangerous_pattern",
+                    "message": warning,
+                    "severity": "medium"
+                })
+
+        cartesian_findings = self._detect_cartesian_joins(query_without_comments)
+        if cartesian_findings:
+            warnings.extend(cartesian_findings)
+            for warning in cartesian_findings:
+                issues.append({
+                    "type": "cartesian_join_risk",
+                    "message": warning,
+                    "severity": "high"
+                })
         
         # JOIN/CROSS join approval heuristic
         join_count = len(re.findall(r"\bJOIN\b", normalized, flags=re.IGNORECASE))
@@ -242,7 +316,7 @@ class SQLValidator:
         requires_approval = (
             risk_level in [QueryRisk.HIGH, QueryRisk.CRITICAL] or
             query_type in [QueryType.DELETE, QueryType.DROP, QueryType.TRUNCATE, QueryType.ALTER] or
-            has_cross_join or join_count >= 6  # Increased threshold
+            has_cross_join or join_count >= 6 or bool(cartesian_findings)
         )
         
         # Additional warnings
@@ -259,7 +333,8 @@ class SQLValidator:
             errors=errors,
             warnings=warnings,
             normalized_query=normalized,
-            requires_approval=requires_approval
+            requires_approval=requires_approval,
+            issues=issues
         )
     
     def _detect_query_type(self, query: str) -> QueryType:
@@ -351,6 +426,29 @@ class SQLValidator:
             warnings.append(f"Query has {join_count} JOINs; may require review")
         
         return len(warnings) > 0, warnings
+
+    def _detect_cartesian_joins(self, query: str) -> List[str]:
+        """Detect likely Cartesian joins or joins without predicates."""
+        warnings = []
+        query_upper = query.upper()
+
+        if "CROSS JOIN" in query_upper:
+            warnings.append("CROSS JOIN detected - potential Cartesian product")
+
+        if re.search(r"FROM\s+[^;]*,\s*[^;\s]+", query_upper) and "JOIN" not in query_upper:
+            warnings.append("Comma join detected - potential Cartesian product")
+
+        # Detect JOIN without ON/USING before next clause
+        join_segments = re.split(r"\bJOIN\b", query_upper)
+        if len(join_segments) > 1:
+            for segment in join_segments[1:]:
+                # Look ahead up to next JOIN/WHERE/GROUP/ORDER/HAVING
+                cutoff = re.split(r"\bJOIN\b|\bWHERE\b|\bGROUP\b|\bORDER\b|\bHAVING\b", segment, maxsplit=1)[0]
+                if " ON " not in cutoff and " USING " not in cutoff:
+                    warnings.append("JOIN without ON/USING detected - potential Cartesian product")
+                    break
+
+        return warnings
     
     def _assess_risk(self, query: str, query_type: QueryType) -> QueryRisk:
         """Assess query risk level"""
@@ -451,7 +549,6 @@ class SQLValidator:
         """
         Sanitize query by removing/escaping dangerous characters
         
-        NOTE: This is NOT a substitute for parameterized queries!
         Always use parameterized queries when possible.
         """
         # Remove SQL comments

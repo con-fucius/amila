@@ -224,9 +224,9 @@ services:
       - "9030:9030"
       - "8040:8040"
       - "9060:9060"
-    tmpfs:
-      - /opt/apache-doris/fe/doris-meta
-      - /opt/apache-doris/be/storage
+    volumes:
+      - doris_meta:/opt/apache-doris/fe/doris-meta
+      - doris_storage:/opt/apache-doris/be/storage
     networks:
       - bi-agent-network
     restart: unless-stopped
@@ -251,11 +251,12 @@ services:
       - bi-agent-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "ls /opt/oracle/oradata/FREEPDB1 || exit 1"]
+      # Use the built-in health check if available, or check the specific 23ai path
+      test: ["CMD-SHELL", "oracle_health_check || ls /opt/oracle/oradata/FREE/FREEPDB1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 20
-      start_period: 60s
+      start_period: 300s # Increased for first-time DB creation
 
   # PostgreSQL
   postgres:
@@ -366,3 +367,7 @@ volumes:
     name: bi-agent-postgres-data
   oracle_data:
     name: bi-agent-oracle-data
+  doris_meta:
+    name: bi-agent-doris-meta
+  doris_storage:
+    name: bi-agent-doris-storage

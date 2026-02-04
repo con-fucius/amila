@@ -46,6 +46,8 @@ import {
   ExpandLess as CollapseIcon,
   Info as InfoIcon,
   ArrowUpward as ArrowUp,
+  Lightbulb as LightbulbIcon,
+  History as HistoryIcon,
 } from '@mui/icons-material'
 import {
   BarChart,
@@ -77,11 +79,13 @@ interface QueryResultsProps {
       row_count?: number
       query_id?: string
       timestamp?: string
+      visualization_explanation?: string
     }
   } | null
   loading?: boolean
   error?: string | null
   viewMode?: 'table' | 'chart' | 'json'
+  resultsTruncated?: boolean
 }
 
 type Order = 'asc' | 'desc'
@@ -107,7 +111,7 @@ function TabPanel(props: TabPanelProps) {
   )
 }
 
-const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, error = null, viewMode }) => {
+const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, error = null, viewMode, resultsTruncated }) => {
   const { success, warning, error: showError } = useSnackbar()
   const [tabValue, setTabValue] = useState(viewMode === 'chart' ? 1 : viewMode === 'json' ? 2 : 0)
   const [collapsed, setCollapsed] = useState(false)
@@ -137,6 +141,32 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
   const [chartType, setChartType] = useState<'bar' | 'line' | 'pie' | 'area'>('bar')
   const [chartDimension, setChartDimension] = useState<string | null>(null)
   const [chartMetric, setChartMetric] = useState<string | null>(null)
+  const [repairTrace, setRepairTrace] = useState<any[]>([])
+  const [loadingTrace, setLoadingTrace] = useState(false)
+
+  // Fetch repair trace when tab is selected
+  useEffect(() => {
+    if (tabValue === 3 && data?.metadata?.query_id && repairTrace.length === 0) {
+      const fetchTrace = async () => {
+        setLoadingTrace(true)
+        try {
+          const { apiService } = await import('@/services/apiService')
+          const trace = await apiService.getRepairTrace(data.metadata!.query_id!)
+          setRepairTrace(trace)
+        } catch (err) {
+          console.error('Failed to fetch repair trace:', err)
+        } finally {
+          setLoadingTrace(false)
+        }
+      }
+      fetchTrace()
+    }
+  }, [tabValue, data?.metadata?.query_id, repairTrace.length])
+
+  // Reset trace when query changes
+  useEffect(() => {
+    setRepairTrace([])
+  }, [data?.metadata?.query_id])
 
   // Preferences persistence (per query id)
   const prefsKey = useMemo(() => `qr_prefs_${data?.metadata?.query_id || 'default'}`, [data?.metadata?.query_id])
@@ -152,14 +182,107 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
       if (prefs.order === 'asc' || prefs.order === 'desc') setOrder(prefs.order)
       if (prefs.columnWidths && typeof prefs.columnWidths === 'object') setColumnWidths(prefs.columnWidths)
       if (typeof prefs.rowsPerPage === 'number') setRowsPerPage(prefs.rowsPerPage)
+      // Restore chart state
+      if (prefs.chartType && ['bar', 'line', 'pie', 'area'].includes(prefs.chartType)) setChartType(prefs.chartType)
+      if (prefs.chartDimension && data.columns.includes(prefs.chartDimension)) setChartDimension(prefs.chartDimension)
+      if (prefs.chartMetric && data.columns.includes(prefs.chartMetric)) setChartMetric(prefs.chartMetric)
+      // Restore tab state if valid
+      if (typeof prefs.tabValue === 'number' && prefs.tabValue >= 0 && prefs.tabValue <= 2) {
+        setTabValue(prefs.tabValue)
+      }
     } catch { }
   }, [prefsKey, data])
 
   useEffect(() => {
     // persist on change
-    const prefs = { selectedColumns, orderBy, order, columnWidths, rowsPerPage }
+    const prefs = {
+      selectedColumns,
+      orderBy,
+      order,
+      columnWidths,
+      rowsPerPage,
+      chartType,
+      chartDimension,
+      chartMetric,
+      tabValue
+    }
     try { localStorage.setItem(prefsKey, JSON.stringify(prefs)) } catch { }
-  }, [prefsKey, selectedColumns, orderBy, order, columnWidths, rowsPerPage])
+  }, [prefsKey, selectedColumns, orderBy, order, columnWidths, rowsPerPage, chartType, chartDimension, chartMetric, tabValue])
+
+  // Sync tab value with viewMode prop when data changes
+  useEffect(() => {
+    if (viewMode) {
+      const newTabValue = viewMode === 'chart' ? 1 : viewMode === 'json' ? 2 : 0
+      setTabValue(newTabValue)
+    }
+  }, [viewMode, data?.metadata?.query_id])
+
+  // Fix 10: Comprehensive state cleanup when query changes
+  // Reset all UI state when a new query is executed (query_id changes)
+  useEffect(() => {
+    if (!data?.metadata?.query_id) return
+
+    // Reset pagination
+    setPage(0)
+
+    // Reset search
+    setSearchTerm('')
+
+    // Reset column selection (will be restored from localStorage if preferences exist)
+    setSelectedColumns([])
+
+    // Reset sorting
+    setOrderBy(null)
+    setOrder('asc')
+
+    // Reset column widths
+    setColumnWidths({})
+
+    // Reset cell selection
+    setSelectedCell({ row: null, col: null })
+
+    // Reset disclosure dialog state
+    setDisclosureDialog(prev => ({ ...prev, open: false }))
+
+    // Reset chart state (type is preserved but selections are reset)
+    setChartDimension(null)
+    setChartMetric(null)
+
+    // Reset collapse state to show results
+    setCollapsed(false)
+
+    // Close any open menus
+    setExportAnchorEl(null)
+    setColumnsAnchorEl(null)
+    setCopyAnchorEl(null)
+
+    // Reset showMetadata
+    setShowMetadata(false)
+
+    // Reset virtualization (RW will be reloaded if needed)
+    setRW(null)
+
+    // Note: tabValue and rowsPerPage are NOT reset as they are user preferences
+    // The new query's preferences (if any) will be loaded from localStorage
+    // in the preferences useEffect above
+
+    // Debug logging for development
+    if (process.env.NODE_ENV === 'development') {
+      console.debug(`[QueryResults] State reset for query: ${data.metadata.query_id}`)
+    }
+  }, [data?.metadata?.query_id])
+
+  // Reset chart selections when data changes significantly
+  useEffect(() => {
+    if (!data) return
+    // Validate current chart selections against new data
+    if (chartDimension && !data.columns.includes(chartDimension)) {
+      setChartDimension(null)
+    }
+    if (chartMetric && !data.columns.includes(chartMetric)) {
+      setChartMetric(null)
+    }
+  }, [data?.columns.join(','), data?.metadata?.query_id])
 
   // Check for large result sets
   useEffect(() => {
@@ -298,11 +421,6 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
     // 2) Any non-numeric column
     if (dimensionIndex === null && dimensionCandidates.length > 0) {
       dimensionIndex = dimensionCandidates[0]
-    }
-
-    // 3) Fallback to first column
-    if (dimensionIndex === null) {
-      dimensionIndex = allIndexes[0] ?? 0
     }
 
     // 3) Fallback to first column
@@ -674,88 +792,97 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
               <Button
                 size="small"
                 variant="outlined"
-                onClick={() => setTabValue(0)}
-                sx={{ textTransform: 'none', borderColor: '#e5e7eb', color: '#6b7280' }}
+                onClick={() => {
+                  setTabValue(0)
+                  // Fix 7: Reset chart state when transitioning back to table
+                  // This prevents stale chart configuration from affecting next chart view
+                  setChartDimension(null)
+                  setChartMetric(null)
+                  setChartType('bar')
+                }}
+                sx={{ textTransform: 'none', borderColor: '#e5e7eb', color: '#6b7280', fontSize: '0.875rem' }}
                 startIcon={<ArrowUp className="h-4 w-4 rotate-[-90deg]" />}
               >
                 Back to Table
               </Button>
             ) : (
-              <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none' }}>
-                {collapsed ? 'Show' : 'Hide'}
-              </Button>
+              <>
+                <Button size="small" variant="outlined" onClick={() => setCollapsed(!collapsed)} sx={{ textTransform: 'none', fontSize: '0.875rem' }}>
+                  {collapsed ? 'Show' : 'Hide'}
+                </Button>
+                <TextField
+                  size="small"
+                  placeholder="Search results..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  InputProps={{
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" />
+                      </InputAdornment>
+                    ),
+                    sx: {
+                      fontFamily: '"Figtree", sans-serif',
+                      fontSize: '0.875rem',
+                    }
+                  }}
+                  sx={{ width: 200 }}
+                />
+                <Button
+                  variant="outlined"
+                  startIcon={<ColumnsIcon />}
+                  onClick={handleColumnsClick}
+                  size="small"
+                  sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500, fontSize: '0.875rem' }}
+                >
+                  Columns
+                </Button>
+                <Menu anchorEl={columnsAnchorEl} open={Boolean(columnsAnchorEl)} onClose={handleColumnsClose}>
+                  {data.columns.map((col) => {
+                    const checked = selectedColumns.length === 0 || selectedColumns.includes(col)
+                    return (
+                      <MenuItem key={col} onClick={() => toggleColumn(col)} dense>
+                        <ListItemIcon>
+                          <Checkbox edge="start" checked={checked} tabIndex={-1} disableRipple />
+                        </ListItemIcon>
+                        <ListItemText primaryTypographyProps={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' }} primary={col} />
+                      </MenuItem>
+                    )
+                  })}
+                </Menu>
+                <Button
+                  variant="outlined"
+                  startIcon={<CopyIcon />}
+                  onClick={handleCopyClick}
+                  size="small"
+                  sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500, fontSize: '0.875rem' }}
+                >
+                  Copy
+                </Button>
+                <Menu anchorEl={copyAnchorEl} open={Boolean(copyAnchorEl)} onClose={handleCopyClose}>
+                  <MenuItem onClick={copyCell} disabled={selectedCell.row === null || selectedCell.col === null}>Copy cell</MenuItem>
+                  <MenuItem onClick={() => copyRow(',')} disabled={selectedCell.row === null}>Copy row (CSV)</MenuItem>
+                  <MenuItem onClick={() => copyRow('\t')} disabled={selectedCell.row === null}>Copy row (TSV)</MenuItem>
+                  <MenuItem onClick={() => copyColumn()} disabled={selectedCell.col === null}>Copy column</MenuItem>
+                  <MenuItem onClick={() => copyPageAs(',')}>Copy page as CSV</MenuItem>
+                  <MenuItem onClick={() => copyPageAs('\t')}>Copy page as TSV</MenuItem>
+                </Menu>
+                <Button
+                  variant="outlined"
+                  startIcon={<ExportIcon />}
+                  onClick={handleExportClick}
+                  size="small"
+                  sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500, fontSize: '0.875rem' }}
+                >
+                  Export
+                </Button>
+                <Menu anchorEl={exportAnchorEl} open={Boolean(exportAnchorEl)} onClose={handleExportClose}>
+                  <MenuItem onClick={exportToCSV} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as CSV</MenuItem>
+                  <MenuItem onClick={exportToJSON} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as JSON</MenuItem>
+                  <MenuItem onClick={exportToXLSX} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as Excel (.xlsx)</MenuItem>
+                </Menu>
+              </>
             )}
-            <TextField
-              size="small"
-              placeholder="Search results..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <SearchIcon fontSize="small" />
-                  </InputAdornment>
-                ),
-                sx: {
-                  fontFamily: '"Figtree", sans-serif',
-                  fontSize: '0.875rem',
-                }
-              }}
-              sx={{ width: 200 }}
-            />
-            <Button
-              variant="outlined"
-              startIcon={<ColumnsIcon />}
-              onClick={handleColumnsClick}
-              size="small"
-              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-            >
-              Columns
-            </Button>
-            <Menu anchorEl={columnsAnchorEl} open={Boolean(columnsAnchorEl)} onClose={handleColumnsClose}>
-              {data.columns.map((col) => {
-                const checked = selectedColumns.length === 0 || selectedColumns.includes(col)
-                return (
-                  <MenuItem key={col} onClick={() => toggleColumn(col)} dense>
-                    <ListItemIcon>
-                      <Checkbox edge="start" checked={checked} tabIndex={-1} disableRipple />
-                    </ListItemIcon>
-                    <ListItemText primaryTypographyProps={{ fontFamily: '"Figtree", sans-serif', fontSize: '0.875rem' }} primary={col} />
-                  </MenuItem>
-                )
-              })}
-            </Menu>
-            <Button
-              variant="outlined"
-              startIcon={<CopyIcon />}
-              onClick={handleCopyClick}
-              size="small"
-              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-            >
-              Copy
-            </Button>
-            <Menu anchorEl={copyAnchorEl} open={Boolean(copyAnchorEl)} onClose={handleCopyClose}>
-              <MenuItem onClick={copyCell} disabled={selectedCell.row === null || selectedCell.col === null}>Copy cell</MenuItem>
-              <MenuItem onClick={() => copyRow(',')} disabled={selectedCell.row === null}>Copy row (CSV)</MenuItem>
-              <MenuItem onClick={() => copyRow('\t')} disabled={selectedCell.row === null}>Copy row (TSV)</MenuItem>
-              <MenuItem onClick={() => copyColumn()} disabled={selectedCell.col === null}>Copy column</MenuItem>
-              <MenuItem onClick={() => copyPageAs(',')}>Copy page as CSV</MenuItem>
-              <MenuItem onClick={() => copyPageAs('\t')}>Copy page as TSV</MenuItem>
-            </Menu>
-            <Button
-              variant="outlined"
-              startIcon={<ExportIcon />}
-              onClick={handleExportClick}
-              size="small"
-              sx={{ fontFamily: '"Figtree", sans-serif', textTransform: 'none', fontWeight: 500 }}
-            >
-              Export
-            </Button>
-            <Menu anchorEl={exportAnchorEl} open={Boolean(exportAnchorEl)} onClose={handleExportClose}>
-              <MenuItem onClick={exportToCSV} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as CSV</MenuItem>
-              <MenuItem onClick={exportToJSON} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as JSON</MenuItem>
-              <MenuItem onClick={exportToXLSX} sx={{ fontFamily: '"Figtree", sans-serif' }}>Export as Excel (.xlsx)</MenuItem>
-            </Menu>
             {shouldVirtualize && (
               <Chip label="Virtualized" size="small" sx={{ height: 22, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#111827', color: 'white' }} />
             )}
@@ -835,10 +962,11 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
             <Tab icon={<TableIcon fontSize="small" />} label="Table" />
             <Tab icon={<ChartIcon fontSize="small" />} label="Chart" disabled={!chartConfig} />
             <Tab icon={<JsonIcon fontSize="small" />} label="JSON" />
+            <Tab icon={<HistoryIcon fontSize="small" />} label="Execution Trace" />
           </Tabs>
         )}
 
-        {!collapsed && (
+        {!collapsed && tabValue === 1 && (
           <TabPanel value={tabValue} index={1}>
             {/* Chart View */}
             {chartConfig ? (
@@ -853,6 +981,15 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
                   }}
                   className="bg-white/50 dark:bg-slate-900/50 border-gray-200 dark:border-slate-800"
                 >
+                  {data?.metadata?.visualization_explanation && (
+                    <Box sx={{ mb: 2, p: 1.5, bgcolor: 'rgba(59, 130, 246, 0.05)', borderRadius: 1.5, border: '1px solid rgba(59, 130, 246, 0.2)', display: 'flex', alignItems: 'flex-start', gap: 1.5 }}>
+                      <LightbulbIcon className="h-4 w-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                      <Typography variant="body2" sx={{ fontFamily: '"Figtree", sans-serif', color: '#1e40af', fontSize: '0.8rem', fontStyle: 'italic' }}>
+                        <span className="font-bold mr-1">Chart Rationale:</span>
+                        {data.metadata.visualization_explanation}
+                      </Typography>
+                    </Box>
+                  )}
                   <Grid container spacing={2} alignItems="center">
                     <Grid item xs={12} md={4}>
                       <FormControl fullWidth size="small">
@@ -1070,8 +1207,15 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
             )}
           </TabPanel>
         )}
-        {!collapsed && (
+        {!collapsed && tabValue === 0 && (
           <TabPanel value={tabValue} index={0}>
+            {resultsTruncated && (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                <Typography variant="body2" sx={{ fontFamily: '"Figtree", sans-serif' }}>
+                  Showing a preview of results. Load full results from the table view to see all rows.
+                </Typography>
+              </Alert>
+            )}
             {/* Table View */}
             <TableContainer sx={{ maxHeight: 500, overflowX: 'auto' }} ref={containerRef}>
               <Table stickyHeader size="small" aria-label="query-results-table" sx={{ minWidth: 600, tableLayout: 'fixed' }}>
@@ -1243,6 +1387,7 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
 
 
 
+        {!collapsed && tabValue === 2 && (
         <TabPanel value={tabValue} index={2}>
           {/* Aggregate Summary + JSON View */}
           <Box sx={{ mb: 2 }}>
@@ -1305,6 +1450,78 @@ const QueryResults: React.FC<QueryResultsProps> = ({ data, loading = false, erro
               }, null, 2)}
             </pre>
           </Paper>
+        </TabPanel>
+
+        <TabPanel value={tabValue} index={3}>
+          <Box sx={{ p: 1 }}>
+            <Typography variant="subtitle2" gutterBottom sx={{ fontFamily: '"Figtree", sans-serif', fontWeight: 600, color: 'text.secondary', display: 'flex', alignItems: 'center', gap: 1 }}>
+              <HistoryIcon fontSize="small" />
+              SQL Repair Trajectory
+            </Typography>
+
+            {loadingTrace ? (
+              <Box display="flex" justifyContent="center" py={4}>
+                <CircularProgress size={24} />
+              </Box>
+            ) : repairTrace.length > 0 ? (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, mt: 2 }}>
+                {repairTrace.map((entry: any, idx: number) => (
+                  <Paper key={idx} variant="outlined" sx={{ p: 2, borderLeft: '4px solid', borderLeftColor: entry.type === 'error' ? 'error.main' : 'primary.main', bgcolor: 'background.paper' }}>
+                    <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
+                      <Typography variant="body2" sx={{ fontWeight: 700, fontFamily: '"Figtree", sans-serif', color: 'primary.dark' }}>
+                        Step {idx + 1}: {entry.action}
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: 'text.disabled' }}>
+                        {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : 'N/A'}
+                      </Typography>
+                    </Box>
+
+                    {entry.error && (
+                      <Alert severity="error" sx={{ mb: 1.5, py: 0 }}>
+                        <Typography variant="caption" sx={{ fontFamily: '"JetBrains Mono", monospace' }}>
+                          {entry.error}
+                        </Typography>
+                      </Alert>
+                    )}
+
+                    {entry.diff ? (
+                      <Box sx={{ mt: 1.5 }}>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5, fontWeight: 600 }}>SQL Evolution</Typography>
+                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: '#f8fafc', overflowX: 'auto' }}>
+                          <pre style={{ margin: 0, fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace' }}>
+                            {entry.diff.split('\n').map((line: string, lidx: number) => (
+                              <div key={lidx} style={{
+                                color: line.startsWith('+') ? '#059669' : line.startsWith('-') ? '#dc2626' : '#475569',
+                                backgroundColor: line.startsWith('+') ? '#ecfdf5' : line.startsWith('-') ? '#fef2f2' : 'transparent',
+                                whiteSpace: 'pre-wrap'
+                              }}>
+                                {line}
+                              </div>
+                            ))}
+                          </pre>
+                        </Paper>
+                      </Box>
+                    ) : entry.after_sql && (
+                      <Box sx={{ mt: 1.5 }}>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5, fontWeight: 600 }}>Applied SQL</Typography>
+                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: '#f8fafc', overflowX: 'auto' }}>
+                          <pre style={{ margin: 0, fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace', color: '#475569' }}>
+                            {entry.after_sql}
+                          </pre>
+                        </Paper>
+                      </Box>
+                    )}
+                  </Paper>
+                ))}
+              </Box>
+            ) : (
+              <Box py={4} textAlign="center">
+                <Typography variant="body2" sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
+                  No repair steps were recorded for this query. It likely executed successfully on the first attempt.
+                </Typography>
+              </Box>
+            )}
+          </Box>
         </TabPanel>
 
       </Paper >

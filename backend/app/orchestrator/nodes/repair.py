@@ -27,7 +27,26 @@ try:
 except Exception:
     ExecState = None
 
+import re
+import difflib
+
 logger = logging.getLogger(__name__)
+
+def calculate_sql_diff(before: str, after: str) -> str:
+    """Calculate a character-level diff between two SQL strings"""
+    if before == after:
+        return ""
+    
+    # Use unified_diff for a clean representation
+    diff_lines = list(difflib.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile="Original",
+        tofile="Repaired",
+        n=0
+    ))
+    
+    return "".join(diff_lines)
 
 
 async def repair_sql_node(state: QueryState) -> QueryState:
@@ -60,6 +79,10 @@ async def _repair_sql_node_inner(state: QueryState, span: dict) -> QueryState:
     - Common Oracle syntax errors - apply auto-fixes
     """
     logger.info(f"Attempting SQL auto-repair with pattern matching...")
+    
+    # Initialize repair trace
+    if "repair_trace" not in state or not isinstance(state["repair_trace"], list):
+        state["repair_trace"] = []
     
     # Track node execution for reasoning visibility
     from datetime import datetime, timezone
@@ -121,13 +144,22 @@ async def _repair_sql_node_inner(state: QueryState, span: dict) -> QueryState:
             except Exception as e:
                 logger.warning(f"Failed to expand schema context: {e}")
                 span["output"]["schema_expand_error"] = str(e)
+        
+        state["repair_trace"].append({
+            "type": "schema_expansion",
+            "error": "ORA-00942",
+            "action": f"Expanded schema context to check for missing tables: {missing_tables}",
+            "before_sql": sql_query,
+            "after_sql": sql_query,
+            "diff": "",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
 
-    elif "ORA-00904" in error_text:
-        logger.info(f"Detected ORA-00904 - applying identifier fixes...")
-
+        # Apply fixes
+        sql_before = sql_query
         reserved_words = ['DATE', 'USER', 'LEVEL', 'SIZE', 'ACCESS', 'FILE', 'SESSION']
         for word in reserved_words:
-            sql_query = re.sub(rf'\b{word}\b(?!")', f'"{word}"', sql_query, flags=re.IGNORECASE)
+            sql_query = re.sub(rf'\b{word}\b(?!\")', f'"{word}"', sql_query, flags=re.IGNORECASE)
 
         user_schema = settings.oracle_username if hasattr(settings, 'oracle_username') else None
         if user_schema:
@@ -145,11 +177,22 @@ async def _repair_sql_node_inner(state: QueryState, span: dict) -> QueryState:
             "repair_type": "identifier_quote",
             "next_action": "validate",
         })
+        
+        state["repair_trace"].append({
+            "type": "identifier_fix",
+            "error": "ORA-00904",
+            "action": "Applied double-quoting to reserved words and identifiers",
+            "before_sql": sql_before,
+            "after_sql": sql_query,
+            "diff": calculate_sql_diff(sql_before, sql_query),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
         logger.info(f"Applied identifier auto-fixes; returning to validation")
         return state
 
     elif "ORA-00933" in error_text:
         logger.info(f"Detected ORA-00933 - fixing command termination...")
+        sql_before = sql_query
         sql_query = sql_query.rstrip(';').strip()
         state["sql_query"] = sql_query
         state["repair_attempts"] = state.get("repair_attempts", 0) + 1
@@ -158,11 +201,38 @@ async def _repair_sql_node_inner(state: QueryState, span: dict) -> QueryState:
             "repair_type": "command_termination",
             "next_action": "validate",
         })
+        state["repair_trace"].append({
+            "type": "command_termination",
+            "error": "ORA-00933",
+            "action": "Removed trailing semicolon for Oracle execution",
+            "before_sql": sql_before,
+            "after_sql": sql_query,
+            "diff": calculate_sql_diff(sql_before, sql_query),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
         return state
 
     logger.info(f"Using LLM for generic SQL repair...")
     llm = get_llm()
+    db_type = (state.get("database_type") or "oracle").lower()
     db_name = "PostgreSQL" if db_type in ["postgres", "postgresql"] else ("Doris" if db_type == "doris" else "Oracle")
+    
+    # Retrieve relevant lessons from ReflectiveMemoryService
+    lessons_section = ""
+    try:
+        from app.services.reflective_memory_service import ReflectiveMemoryService
+        
+        lessons = await ReflectiveMemoryService.get_relevant_lessons(
+            query=state.get("user_query", ""),
+            limit=3
+        )
+        
+        if lessons:
+            lessons_section = ReflectiveMemoryService.format_lessons_for_prompt(lessons)
+            logger.info(f"Injected {len(lessons)} reflective lessons into repair prompt")
+            span["output"]["reflective_lessons_count"] = len(lessons)
+    except Exception as e:
+        logger.warning(f"Failed to retrieve reflective lessons: {e}")
     
     repair_prompt = f"""
 You are an {db_name} SQL specialist. The previous SQL failed with this error:
@@ -174,6 +244,8 @@ Original user request:
 
 Database schema (use only these tables/columns):
 {str(schema_context)[:4000]}
+
+{lessons_section}
 
 Repair the SQL to a valid {db_name} query that fulfills the user request. Rules:
 - Prefer a single WITH (CTE) query as needed; ensure each CTE has a full SELECT body.
@@ -228,7 +300,39 @@ Repair the SQL to a valid {db_name} query that fulfills the user request. Rules:
             "repaired_sql_preview": repaired_sql[:300],
         })
 
+        state["repair_trace"].append({
+            "type": "llm_repair",
+            "error": error_text[:100],
+            "action": "Generated corrected SQL using LLM with reflective lessons",
+            "before_sql": sql_query,
+            "after_sql": repaired_sql,
+            "diff": calculate_sql_diff(sql_query, repaired_sql),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
         logger.info(f"LLM auto-repair produced new SQL; returning to validation")
+        
+        # Record successful repair as a lesson in ReflectiveMemoryService
+        try:
+            from app.services.reflective_memory_service import ReflectiveMemoryService
+            import hashlib
+            
+            # Generate schema fingerprint from context
+            schema_fingerprint = hashlib.sha256(
+                str(schema_context.get("tables", {}).keys()).encode()
+            ).hexdigest()[:16]
+            
+            await ReflectiveMemoryService.record_repair_success(
+                original_query=state.get("user_query", ""),
+                failed_sql=sql_query,
+                repaired_sql=repaired_sql,
+                schema_fingerprint=schema_fingerprint,
+                repair_type="llm_auto_repair",
+                error_message=error_text[:500]
+            )
+            logger.info("Recorded successful repair as reflective lesson")
+            span["output"]["lesson_recorded"] = True
+        except Exception as e:
+            logger.warning(f"Failed to record repair lesson: {e}")
         
         await update_node_history(state, "repair_sql", "completed", thinking_steps=[
             {"id": "step-1", "content": f"SQL repaired using LLM (attempt {state['repair_attempts']})", "status": "completed", "timestamp": datetime.now(timezone.utc).isoformat()}

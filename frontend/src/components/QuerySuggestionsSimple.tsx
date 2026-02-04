@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
-import { cn } from '@/utils/cn'
+
 import { Card, CardContent } from './ui/card'
 import { Badge } from './ui/badge'
 import {
   TrendingUp,
   Users,
   DollarSign,
-  Calendar
+  Calendar,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react'
 
 interface QuerySuggestionsSimpleProps {
@@ -56,6 +58,7 @@ const QUERY_TEMPLATES = [
 
 export function QuerySuggestionsSimple({ show, onSuggestionClick, currentInput }: QuerySuggestionsSimpleProps) {
   const [filteredTemplates, setFilteredTemplates] = useState(QUERY_TEMPLATES)
+  const [isExpanded, setIsExpanded] = useState(false)
 
   useEffect(() => {
     if (!currentInput.trim()) {
@@ -80,40 +83,48 @@ export function QuerySuggestionsSimple({ show, onSuggestionClick, currentInput }
   return (
     <Card className="absolute bottom-full left-0 right-0 mb-2 shadow-md border border-gray-100 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm z-50">
       <CardContent className="p-1.5">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[9px] font-medium text-gray-400 dark:text-gray-500 tracking-wide">
-            {currentInput.trim() ? 'Suggestions' : 'Quickstart'}
-          </span>
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="w-full flex items-center justify-between mb-1.5 hover:bg-gray-50 dark:hover:bg-slate-800 rounded px-1 py-0.5 transition-colors"
+        >
+          <div className="flex items-center gap-1">
+            {isExpanded ? <ChevronUp size={10} className="text-gray-400" /> : <ChevronDown size={10} className="text-gray-400" />}
+            <span className="text-[9px] font-medium text-gray-400 dark:text-gray-500 tracking-wide">
+              {currentInput.trim() ? 'Suggestions' : 'Quickstart'}
+            </span>
+          </div>
           {!currentInput.trim() && (
             <span className="text-[8px] text-gray-400 dark:text-gray-500">Click to use</span>
           )}
-        </div>
+        </button>
 
-        <div className="space-y-1">
-          {filteredTemplates.slice(0, 2).map((category) => (
-            <div key={category.category}>
-              <div className="flex items-center gap-1 mb-0.5">
-                <category.icon size={9} className="text-gray-400" />
-                <span className="text-[9px] font-medium text-gray-500 dark:text-gray-400">
-                  {category.category}
-                </span>
-              </div>
+        {isExpanded && (
+          <div className="space-y-1">
+            {filteredTemplates.slice(0, 2).map((category) => (
+              <div key={category.category}>
+                <div className="flex items-center gap-1 mb-0.5">
+                  <category.icon size={9} className="text-gray-400" />
+                  <span className="text-[9px] font-medium text-gray-500 dark:text-gray-400">
+                    {category.category}
+                  </span>
+                </div>
 
-              <div className="flex flex-wrap gap-0.5">
-                {category.suggestions.slice(0, 2).map((suggestion, idx) => (
-                  <Badge
-                    key={idx}
-                    variant="secondary"
-                    className={`cursor-pointer hover:scale-[1.02] transition-all duration-150 text-[9px] py-0 px-1 ${category.color}`}
-                    onClick={() => onSuggestionClick(suggestion)}
-                  >
-                    {suggestion}
-                  </Badge>
-                ))}
+                <div className="flex flex-wrap gap-0.5">
+                  {category.suggestions.slice(0, 2).map((suggestion, idx) => (
+                    <Badge
+                      key={idx}
+                      variant="secondary"
+                      className={`cursor-pointer hover:scale-[1.02] transition-all duration-150 text-[9px] py-0 px-1 ${category.color}`}
+                      onClick={() => onSuggestionClick(suggestion)}
+                    >
+                      {suggestion}
+                    </Badge>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   )

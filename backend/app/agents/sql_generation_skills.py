@@ -422,13 +422,13 @@ class ColumnMappingSkill:
         if best and best[0] >= threshold:
             _, table, col = best
             note = f"Semantic alias/fuzzy match for '{concept}'"
-            conf = int(72 + (best[0] - threshold) * 30)  # 72..100
+            conf = int(60 + (best[0] - threshold) * 40)  # Lowered starting confidence
             return ColumnMapping(
                 concept=concept,
                 mapping_type=ColumnMappingType.PHYSICAL,
                 expression=format_qualified_identifier(table, col['name']),
                 table=table,
-                confidence=min(conf, 96),
+                confidence=min(conf, 92), # Reduced max confidence for fuzzy matches
                 note=note,
             )
         # 3) Generic numeric metric matching (domain-agnostic)
@@ -674,7 +674,7 @@ class ColumnMappingSkill:
                                 mapping_type=ColumnMappingType.PHYSICAL,
                                 expression=format_qualified_identifier(table, col['name']),
                                 table=table,
-                                confidence=80,
+                                confidence=65, # Lowered from 80 to favor clarification
                                 note=f"Partial column match: {col['name']} in {table}"
                             )
                 
@@ -770,7 +770,8 @@ class ColumnMappingSkill:
             overall_confidence = max(0, base_confidence - penalty)
             
             # Additional validation: If confidence is too low, force clarification
-            if overall_confidence < 50:
+            # Increased threshold from 50 to 65 to be more proactive in seeking clarification
+            if overall_confidence < 65:
                 logger.warning(f"Overall confidence too low: {overall_confidence}% - will request clarification")
         elif mappings:
             # All concepts are unmapped

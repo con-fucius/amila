@@ -48,6 +48,12 @@ export function CommandPalette() {
         return () => document.removeEventListener('keydown', down)
     }, [])
 
+    useEffect(() => {
+        const openPalette = () => setOpen(true)
+        window.addEventListener('command-palette:open', openPalette as EventListener)
+        return () => window.removeEventListener('command-palette:open', openPalette as EventListener)
+    }, [])
+
     const toggleTheme = useCallback(() => {
         const html = document.documentElement
         const isDark = html.classList.contains('dark')

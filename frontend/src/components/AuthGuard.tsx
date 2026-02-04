@@ -10,9 +10,32 @@ export function AuthGuard({ children }: AuthGuardProps) {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token')
-    // Accept any token (including dev-bypass-token) as authenticated
-    setIsAuthenticated(!!token)
+    const checkAuth = () => {
+      const token = localStorage.getItem('access_token')
+      setIsAuthenticated(!!token)
+    }
+
+    checkAuth()
+
+    // Synchronize across tabs
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'access_token' || e.key === 'refresh_token') {
+        checkAuth()
+      }
+    }
+
+    // Handle logout from apiService
+    const handleAuthLogout = () => {
+      setIsAuthenticated(false)
+    }
+
+    window.addEventListener('storage', handleStorageChange)
+    window.addEventListener('auth-logout', handleAuthLogout)
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange)
+      window.removeEventListener('auth-logout', handleAuthLogout)
+    }
   }, [])
 
   // Show nothing while checking auth status

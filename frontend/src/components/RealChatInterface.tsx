@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import { Button } from './ui/button'
-import { Card, CardContent } from './ui/card'
+
 import { QuerySuggestionsSimple } from './QuerySuggestionsSimple'
 import { QueryValidationIndicator } from './QueryValidationIndicator'
 import { HITLApprovalDialog } from './HITLApprovalDialog'
@@ -24,7 +24,8 @@ import { useApprovalFlow } from '@/hooks/useApprovalFlow'
 import { useClarificationFlow } from '@/hooks/useClarificationFlow'
 import { UI_STRINGS } from '@/constants/strings'
 import { Input } from './ui/input'
-import { Send } from 'lucide-react'
+import { Send, Sparkles } from 'lucide-react'
+import { apiService } from '@/services/apiService'
 
 export function RealChatInterface() {
   // Global Store State
@@ -63,6 +64,10 @@ export function RealChatInterface() {
 
   // Cancellation state
   const [cancelling, setCancelling] = useState(false)
+  const [enhancing, setEnhancing] = useState(false)
+  const [enhanceEnabled, setEnhanceEnabled] = useState(
+    localStorage.getItem('enableQueryEnhancement') !== 'false'
+  )
 
   // Handle query cancellation
   const handleCancelQuery = async () => {
@@ -140,7 +145,7 @@ export function RealChatInterface() {
       timestamp: new Date()
     }
     setHistoryItems((prev: NormalizedHistoryItem[]) => [newHistoryItem, ...prev.slice(0, 49)])
-    
+
     if (currentChat && (currentChat.promptCount >= 20 || currentChat.promptCount >= 15)) {
       const newId = createChat('New chat')
       switchChat(newId)
@@ -202,12 +207,34 @@ export function RealChatInterface() {
     await handleSendQuery(query)
   }
 
+  const handleEnhance = async () => {
+    if (!input.trim() || isLoading || enhancing) return
+    setEnhancing(true)
+    try {
+      const history = messages
+        .slice(-6)
+        .map((m) => ({ role: m.type === 'assistant' ? 'assistant' : 'user', content: m.content }))
+      const resp = await apiService.enhanceQuery({
+        query: input.trim(),
+        conversation_history: history,
+        database_type: databaseType as any,
+      })
+      if (resp?.enhanced_query) {
+        setInput(resp.enhanced_query)
+      }
+    } catch (err) {
+      console.error('Enhancement failed:', err)
+    } finally {
+      setEnhancing(false)
+    }
+  }
+
   const handleCopySQL = (sql: string) => {
     navigator.clipboard.writeText(sql)
   }
 
   // Effects
-  
+
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -230,6 +257,11 @@ export function RealChatInterface() {
           query: lastUserQueryRef.current || input,
           sql: resp.sql_query || '',
           riskLevel: (resp as any)?.approval_context?.risk_level || 'MEDIUM',
+          originalSQL: (resp as any)?.original_sql,
+          riskReasons: (resp as any)?.risk_reasons,
+          sqlExplanation: (resp as any)?.sql_explanation,
+          queryPlan: (resp as any)?.query_plan,
+          rlsExplanation: (resp as any)?.rls_explanation,
           approvalContext: (resp as any)?.approval_context,
         })
         mergeMessage(lastMessage.id, (prev) => ({
@@ -252,13 +284,13 @@ export function RealChatInterface() {
         originalQuery: lastUserQueryRef.current || input,
         message: (resp as any).clarification_message || UI_STRINGS.CLARIFICATION_DEFAULT_MSG,
         details: (resp as any).clarification_details,
-        databaseType,
+        databaseType: databaseType as any,
       })
     } else if (outcome.kind === 'conversational') {
       // Handle conversational responses (greetings, help, meta questions)
       const conversationalMessage = outcome.message
       const lastMessage = messages[messages.length - 1]
-      
+
       if (lastMessage && lastMessage.type === 'assistant') {
         mergeMessage(lastMessage.id, (prev) => ({
           ...prev,
@@ -270,6 +302,8 @@ export function RealChatInterface() {
               ...(prev.toolCall?.metadata || {}),
               isConversational: true,
               intent: (response as any)?.intent || (response as any)?.llm_metadata?.intent,
+              structured_intent: (response as any).structured_intent ?? prev.toolCall?.metadata?.structured_intent,
+              originalQuery: lastUserQueryRef.current || prev.toolCall?.metadata?.originalQuery,
             },
           },
         }))
@@ -280,7 +314,7 @@ export function RealChatInterface() {
       const resp = outcome.response
       const normalized = outcome.normalizedResult
       const lastMessage = messages[messages.length - 1]
-      
+
       if (lastMessage && lastMessage.type === 'assistant') {
         mergeMessage(lastMessage.id, (prev) => ({
           ...prev,
@@ -290,12 +324,23 @@ export function RealChatInterface() {
             result: normalized,
             metadata: {
               ...(prev.toolCall?.metadata || {}),
+              resultRef: resp.result_ref ? {
+                queryId: resp.result_ref.query_id,
+                rowCount: resp.result_ref.row_count,
+                columns: resp.result_ref.columns,
+                cacheStatus: resp.result_ref.cache_status,
+              } : prev.toolCall?.metadata?.resultRef,
+              resultsTruncated: resp.results_truncated ?? prev.toolCall?.metadata?.resultsTruncated,
               sql: resp.sql_query || prev.toolCall?.metadata?.sql,
               insights: resp.insights ?? prev.toolCall?.metadata?.insights,
               suggestedQueries: resp.suggested_queries ?? prev.toolCall?.metadata?.suggestedQueries,
               sqlExplanation: resp.sql_explanation ?? prev.toolCall?.metadata?.sqlExplanation,
+              queryPlan: (resp as any).query_plan ?? prev.toolCall?.metadata?.queryPlan,
+              rlsExplanation: (resp as any).rls_explanation ?? prev.toolCall?.metadata?.rlsExplanation,
               resultAnalysis: (resp as any).result_analysis ?? prev.toolCall?.metadata?.resultAnalysis,
               thinkingSteps: (resp as any)?.llm_metadata?.thinking_steps ?? prev.toolCall?.metadata?.thinkingSteps,
+              structured_intent: (resp as any).structured_intent ?? prev.toolCall?.metadata?.structured_intent,
+              originalQuery: lastUserQueryRef.current || prev.toolCall?.metadata?.originalQuery,
             },
           },
         }))
@@ -319,6 +364,7 @@ export function RealChatInterface() {
               currentState: (resp as any)?.llm_metadata?.failed_stage || prev.toolCall?.metadata?.currentState,
               thinkingSteps: (resp as any)?.llm_metadata?.thinking_steps || prev.toolCall?.metadata?.thinkingSteps,
               errorDetails: (resp as any)?.llm_metadata?.error_details,
+              error_taxonomy: (resp as any)?.llm_metadata?.error_details?.error_taxonomy,
             },
           },
         }))
@@ -365,6 +411,13 @@ export function RealChatInterface() {
               schemaData: currentState.schema_data ?? prev.toolCall?.metadata?.schemaData,
               intermediateData: currentState.intermediate_data ?? prev.toolCall?.metadata?.intermediateData,
               queryId: response?.query_id ?? prev.toolCall?.metadata?.queryId,
+              resultRef: (currentState as any).result_ref ?? prev.toolCall?.metadata?.resultRef,
+              resultsTruncated: (currentState as any).results_truncated ?? prev.toolCall?.metadata?.resultsTruncated,
+              sqlExplanation: (currentState as any).sql_explanation ?? prev.toolCall?.metadata?.sqlExplanation,
+              queryPlan: (currentState as any).query_plan ?? prev.toolCall?.metadata?.queryPlan,
+              rlsExplanation: (currentState as any).rls_explanation ?? prev.toolCall?.metadata?.rlsExplanation,
+              structured_intent: (currentState as any).structured_intent ?? prev.toolCall?.metadata?.structured_intent,
+              originalQuery: lastUserQueryRef.current || prev.toolCall?.metadata?.originalQuery,
             },
           },
         }))
@@ -384,12 +437,44 @@ export function RealChatInterface() {
           query: lastUserQueryRef.current || input,
           sql: response?.sql_query || '',
           riskLevel: (response as any)?.approval_context?.risk_level || 'MEDIUM',
+          originalSQL: (response as any)?.original_sql,
+          riskReasons: (response as any)?.risk_reasons,
+          sqlExplanation: (response as any)?.sql_explanation,
+          queryPlan: (response as any)?.query_plan,
+          rlsExplanation: (response as any)?.rls_explanation,
           approvalContext: (response as any)?.approval_context,
         })
       }
     }
   }, [currentState?.state])
 
+  useEffect(() => {
+    const syncEnhanceSetting = () => {
+      setEnhanceEnabled(localStorage.getItem('enableQueryEnhancement') !== 'false')
+    }
+    window.addEventListener('storage', syncEnhanceSetting)
+    window.addEventListener('settings-changed', syncEnhanceSetting)
+    return () => {
+      window.removeEventListener('storage', syncEnhanceSetting)
+      window.removeEventListener('settings-changed', syncEnhanceSetting)
+    }
+  }, [])
+
+  useEffect(() => {
+    const focusInput = () => {
+      const inputElement = document.querySelector('input.chat-input') as HTMLInputElement | null
+      if (inputElement) inputElement.focus()
+    }
+    const cancel = () => {
+      if (isLoading) handleCancelQuery()
+    }
+    window.addEventListener('focus-chat-input', focusInput as EventListener)
+    window.addEventListener('query:cancel', cancel as EventListener)
+    return () => {
+      window.removeEventListener('focus-chat-input', focusInput as EventListener)
+      window.removeEventListener('query:cancel', cancel as EventListener)
+    }
+  }, [isLoading])
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-emerald-50 via-slate-50 to-slate-100 dark:from-slate-950 dark:via-slate-950 dark:to-emerald-950">
       {/* Top Bar */}
@@ -403,36 +488,27 @@ export function RealChatInterface() {
           setShowHistory(true)
         }}
       />
-      
+
       {/* Drill-Down Breadcrumbs */}
       <DrillDownBreadcrumbs />
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4">
-        <div className="space-y-4">
-          {messages.length === 0 && (
-            <Card className="border-emerald-100/70 bg-white/70 dark:border-emerald-500/40 dark:bg-slate-950/70 backdrop-blur-xl shadow-sm">
-              <CardContent className="p-6 text-center">
-                <div className="text-emerald-900 dark:text-emerald-100 font-semibold mb-2">{UI_STRINGS.WELCOME_TITLE}</div>
-                <div className="text-slate-700 dark:text-slate-200 text-sm">
-                  {UI_STRINGS.WELCOME_SUBTITLE}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-6 py-3 sm:py-4 space-y-4">
 
-          {messages.map((message) => {
+          {messages.map((message, index) => {
             const isReasoningOpen = !!reasoningOpen[message.id]
             const isChartOpen = !!chartOpen[message.id]
             const thinkingStepsArray = extractThinkingSteps((message as any).toolCall?.metadata || (message as any).toolCall)
             const hasReasoningInfo = !!(message as any).toolCall?.metadata?.sql || thinkingStepsArray.length > 0
+            
+            const isNewChat = index > 0 && messages[index - 1].type === 'assistant' && message.type === 'user'
 
             return (
               <div
                 key={message.id}
                 className={cn(
-                  'space-y-3',
-                  message.type === 'user' ? 'flex justify-end' : ''
+                  message.type === 'user' ? 'flex justify-end' : '',
+                  isNewChat && 'mt-6'
                 )}
               >
                 {message.type === 'user' ? (
@@ -454,7 +530,6 @@ export function RealChatInterface() {
                     }}
                     isLoading={isLoading}
                     onRetry={() => {
-                      // Retry the original query from this message's context
                       const originalQuery = message.toolCall?.params?.query
                       if (originalQuery && typeof originalQuery === 'string') {
                         handleSendQuery(originalQuery)
@@ -481,10 +556,9 @@ export function RealChatInterface() {
 
           <div ref={messagesEndRef} />
         </div>
-      </div>
 
       {/* Input Area */}
-      <div className="p-4 border-t border-emerald-100/60 dark:border-emerald-500/30 bg-white/80 dark:bg-slate-950/70 backdrop-blur-xl shadow-md flex-shrink-0">
+      <div className="p-3 sm:p-4 border-t border-emerald-100/60 dark:border-emerald-500/30 bg-white/80 dark:bg-slate-950/70 backdrop-blur-xl shadow-md flex-shrink-0">
         <div className="max-w-5xl mx-auto relative">
           <QuerySuggestionsSimple
             show={showSuggestions}
@@ -505,6 +579,18 @@ export function RealChatInterface() {
               className="flex-1 chat-input bg-white/80 dark:bg-slate-900/70 border border-emerald-100/60 dark:border-slate-700/80 backdrop-blur-md"
               disabled={isLoading}
             />
+            {enhanceEnabled && (
+              <Button
+                onClick={handleEnhance}
+                disabled={isLoading || enhancing || !input.trim()}
+                variant="outline"
+                className="border-emerald-200/70 text-emerald-700 hover:text-emerald-800 hover:border-emerald-300 bg-white/80 dark:bg-slate-900/70 dark:text-emerald-200 dark:border-emerald-500/30"
+                title="Enhance query"
+              >
+                <Sparkles className="h-4 w-4 mr-2" />
+                {enhancing ? 'Enhancing' : 'Enhance'}
+              </Button>
+            )}
             <Button
               onClick={handleSend}
               disabled={isLoading || !input.trim()}
@@ -531,8 +617,14 @@ export function RealChatInterface() {
           query={approvalDialog.query}
           sql={approvalDialog.sql}
           riskLevel={approvalDialog.riskLevel}
+          originalSQL={(approvalDialog as any).originalSQL}
+          riskReasons={(approvalDialog as any).riskReasons}
+          sqlExplanation={(approvalDialog as any).sqlExplanation}
+          queryPlan={(approvalDialog as any).queryPlan}
+          rlsExplanation={(approvalDialog as any).rlsExplanation}
           onApprove={handleApproveQuery}
           onReject={handleRejectQuery}
+          approvalContext={approvalDialog.approvalContext}
         />
       )}
 
@@ -556,7 +648,7 @@ export function RealChatInterface() {
         onEditAndRun={handleEditAndRun}
         onClose={() => setShowHistory(false)}
       />
-      
+
       {/* Session Cost Ticker */}
       <SessionCostTicker />
     </div>

@@ -4,6 +4,8 @@ Orchestrator Node: Hypothesis
 
 import logging
 import time
+import json
+import re
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -21,6 +23,92 @@ except Exception:
     ExecState = None
 
 logger = logging.getLogger(__name__)
+
+HYPOTHESIS_CONFIDENCE = {"high", "medium", "low"}
+
+
+def _extract_json_object(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def _validate_hypothesis_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Hypothesis payload is not an object")
+
+    main_table = payload.get("main_table", "")
+    if not isinstance(main_table, str):
+        raise ValueError("main_table must be a string")
+
+    def _list_of_strings(value):
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+    additional_tables = payload.get("additional_tables", [])
+    if not _list_of_strings(additional_tables):
+        raise ValueError("additional_tables must be a list of strings")
+
+    joins = payload.get("joins", [])
+    if not isinstance(joins, list):
+        raise ValueError("joins must be a list")
+
+    filters = payload.get("filters", [])
+    aggregations = payload.get("aggregations", [])
+    group_by = payload.get("group_by", [])
+    order_by = payload.get("order_by", [])
+    for field_name, value in [
+        ("filters", filters),
+        ("aggregations", aggregations),
+        ("group_by", group_by),
+        ("order_by", order_by),
+    ]:
+        if not _list_of_strings(value):
+            raise ValueError(f"{field_name} must be a list of strings")
+
+    limit = payload.get("limit", None)
+    if limit is not None and not isinstance(limit, int):
+        raise ValueError("limit must be an int or null")
+
+    confidence = payload.get("confidence", "low")
+    if not isinstance(confidence, str) or confidence.lower() not in HYPOTHESIS_CONFIDENCE:
+        raise ValueError("confidence must be high/medium/low")
+
+    risks = payload.get("risks", [])
+    if not _list_of_strings(risks):
+        raise ValueError("risks must be a list of strings")
+
+    return {
+        "main_table": main_table,
+        "additional_tables": additional_tables,
+        "joins": joins,
+        "filters": filters,
+        "aggregations": aggregations,
+        "group_by": group_by,
+        "order_by": order_by,
+        "limit": limit,
+        "expected_output": payload.get("expected_output", ""),
+        "grain": payload.get("grain", ""),
+        "confidence": confidence.lower(),
+        "risks": risks,
+        "source": "llm",
+    }
+
+
+def _render_hypothesis_summary(hypothesis: dict) -> str:
+    if not hypothesis:
+        return "Hypothesis unavailable"
+    summary_lines = [
+        f"Main table: {hypothesis.get('main_table') or 'unknown'}",
+        f"Additional tables: {', '.join(hypothesis.get('additional_tables') or []) or 'none'}",
+        f"Filters: {', '.join(hypothesis.get('filters') or []) or 'none'}",
+        f"Aggregations: {', '.join(hypothesis.get('aggregations') or []) or 'none'}",
+        f"Group by: {', '.join(hypothesis.get('group_by') or []) or 'none'}",
+        f"Order by: {', '.join(hypothesis.get('order_by') or []) or 'none'}",
+        f"Limit: {hypothesis.get('limit') if hypothesis.get('limit') is not None else 'none'}",
+        f"Confidence: {hypothesis.get('confidence')}",
+    ]
+    return "\n".join(summary_lines)
 
 
 async def generate_hypothesis_node(state: QueryState) -> QueryState:
@@ -64,7 +152,7 @@ async def generate_hypothesis_node(state: QueryState) -> QueryState:
     
     # Build hypothesis prompt
     hypothesis_prompt = f"""
-You are a SQL query planner. Analyze the user's request and schema, then create a query execution plan.
+You are a SQL query planner. Analyze the user's request and schema, then create a structured query execution plan.
 
 User Query: {state['user_query']}
 Intent: {state.get('intent', '')}
@@ -75,48 +163,69 @@ Available Tables:
 Sample Data (first 2 rows per table):
 {str(sample_data)[:2000]}
 
-Your task: Create a detailed query plan that explains:
-1. Which table(s) to query
-2. What columns/calculations are needed
-3. What filters to apply
-4. What aggregations are needed
-5. What JOINs are required (if any)
-6. Expected result structure
+Your task: Create a detailed plan as STRICT JSON that captures:
+1. Main table
+2. Additional tables
+3. Join conditions
+4. Filters
+5. Aggregations
+6. Group by
+7. Order by
+8. Limit
+9. Expected output
+10. Grain
+11. Confidence and risks
 
-Format your response as:
+Return JSON only, no markdown, no commentary.
 
-**Query Plan:**
-- Main table: <table_name>
-- Additional tables: <table_names if joins needed>
-- Key columns: <list of columns>
-- Filters: <WHERE conditions>
-- Aggregations: <GROUP BY, SUM, AVG, etc>
-- Expected output: <description of result structure>
-
-**Pseudo-SQL:**
-```
-SELECT <columns>
-FROM <table>
-[JOIN conditions]
-WHERE <filters>
-GROUP BY <if needed>
-ORDER BY <if needed>
-```
-
-**Confidence:** <HIGH/MEDIUM/LOW>
-**Risks:** <any potential issues or ambiguities>
+JSON schema:
+{{
+  "main_table": "table_name",
+  "additional_tables": ["table_b"],
+  "joins": [
+    {{"left": "table_a.col", "right": "table_b.col", "type": "inner"}}
+  ],
+  "filters": ["table_a.status = 'ACTIVE'"],
+  "aggregations": ["SUM(table_a.amount) AS total_amount"],
+  "group_by": ["table_a.region"],
+  "order_by": ["total_amount DESC"],
+  "limit": 100,
+  "expected_output": "One row per region with total amount",
+  "grain": "region",
+  "confidence": "high",
+  "risks": []
+}}
 """
     
     try:
-        response = await llm.ainvoke([SystemMessage(content="You are a SQL query planning expert."), HumanMessage(content=hypothesis_prompt)])
-        hypothesis = response.content.strip()
+        response = await llm.ainvoke([
+            SystemMessage(content="You are a SQL query planning expert. Return JSON only."),
+            HumanMessage(content=hypothesis_prompt)
+        ])
+        hypothesis_raw = response.content.strip()
+        hypothesis_structured = None
+        hypothesis_json = _extract_json_object(hypothesis_raw)
+        if hypothesis_json:
+            try:
+                hypothesis_structured = _validate_hypothesis_payload(json.loads(hypothesis_json))
+            except Exception as parse_err:
+                logger.warning(f"Hypothesis JSON validation failed: {parse_err}")
+                hypothesis_structured = None
         
         # Store hypothesis in state
-        state["hypothesis"] = hypothesis
-        state["messages"].append(AIMessage(content=f"Query Plan:\n{hypothesis}"))
+        state["hypothesis_raw"] = hypothesis_raw
+        if hypothesis_structured:
+            state["hypothesis_structured"] = hypothesis_structured
+            state["hypothesis"] = json.dumps(hypothesis_structured, separators=(",", ":"), ensure_ascii=True)
+            summary = _render_hypothesis_summary(hypothesis_structured)
+            state["messages"].append(AIMessage(content=f"Query Plan (structured):\n{summary}"))
+        else:
+            state["hypothesis_structured"] = {}
+            state["hypothesis"] = hypothesis_raw
+            state["messages"].append(AIMessage(content=f"Query Plan:\n{hypothesis_raw}"))
         state["next_action"] = "generate_sql"
         
-        logger.info(f"Query hypothesis generated: {hypothesis[:200]}...")
+        logger.info(f"Query hypothesis generated: {state['hypothesis'][:200]}...")
 
         trace_id = state.get("trace_id")
         if trace_id:
@@ -129,7 +238,7 @@ ORDER BY <if needed>
                         "user_query": state.get("user_query"),
                         "intent": state.get("intent"),
                     },
-                    output_data={"hypothesis": hypothesis},
+                    output_data={"hypothesis": state["hypothesis"]},
                     metadata={"stage": "hypothesis"},
                 )
             except Exception:
@@ -144,7 +253,7 @@ ORDER BY <if needed>
                     {"id": "step-3", "content": "Created query execution plan", "status": "completed", "timestamp": datetime.now(timezone.utc).isoformat()},
                     {"id": "step-4", "content": "Generating SQL from plan...", "status": "pending", "timestamp": datetime.now(timezone.utc).isoformat()}
                 ],
-                "hypothesis": hypothesis[:500]
+                "hypothesis": state["hypothesis"][:500]
             })
         
         # Mark node as completed

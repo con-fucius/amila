@@ -4,7 +4,7 @@ Main router for all v1 API endpoints
 """
 
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, health, schema, analytics, corrections, doris_proxy, errors, governance, diagnostics, qlik, superset
+from app.api.v1.endpoints import auth, health, schema, analytics, corrections, doris_proxy, errors, governance, diagnostics, qlik, superset, cost_tracking, ldap, skills, feedback, dashboards, reports, custom_metrics, slo, webhooks, rate_limits, graphql
 from app.api.v1.endpoints.queries import router as queries_router
 
 # Create main API router
@@ -78,4 +78,66 @@ api_router.include_router(
 api_router.include_router(
     superset.router,
     tags=["superset"]
+)
+
+api_router.include_router(
+    dashboards.router,
+    prefix="/dashboards",
+    tags=["dashboards"]
+)
+
+api_router.include_router(
+    reports.router,
+    prefix="/reports",
+    tags=["reports"]
+)
+
+api_router.include_router(
+    custom_metrics.router,
+    prefix="/metrics",
+    tags=["metrics"]
+)
+
+api_router.include_router(
+    slo.router,
+    prefix="/slo",
+    tags=["slo"]
+)
+
+api_router.include_router(
+    cost_tracking.router,
+    prefix="/cost",
+    tags=["cost-tracking"]
+)
+
+api_router.include_router(
+    ldap.router,
+    prefix="/ldap",
+    tags=["ldap"]
+)
+
+api_router.include_router(
+    skills.router,
+    prefix="/skills",
+    tags=["skills"]
+)
+
+api_router.include_router(
+    feedback.router,
+    prefix="/feedback",
+    tags=["feedback"]
+)
+
+api_router.include_router(
+    webhooks.router,
+    tags=["webhooks"]
+)
+
+api_router.include_router(
+    rate_limits.router,
+)
+
+api_router.include_router(
+    graphql.router,
+    tags=["graphql"],
 )

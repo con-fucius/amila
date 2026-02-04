@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Play, Database } from 'lucide-react'
+import { Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -89,6 +89,18 @@ export function QueryBuilder() {
   }, [])
 
   useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey
+      if (ctrl && e.key === 'Enter') {
+        e.preventDefault()
+        if (!executing) handleExecute()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [executing, sql])
+
+  useEffect(() => {
     if (activeTab === 'history') {
       loadHistory()
     }
@@ -118,11 +130,19 @@ export function QueryBuilder() {
       setExecuting(true)
       setError(null)
       // Use global database type from store
-      const resp = await apiService.submitSQL(sqlText, connection, databaseType)
+      const resp = await apiService.submitSQL(sqlText, connection, databaseType as 'oracle' | 'doris')
       setLastExecutedSql(sqlText)
       setActiveTab('results')
       if (resp.status === 'success') {
-        const normalized = normalizeBackendResult(resp.results as any)
+        const normalized = normalizeBackendResult(resp.results as any, {
+          resultRef: resp.result_ref ? {
+            queryId: resp.result_ref.query_id,
+            rowCount: resp.result_ref.row_count,
+            columns: resp.result_ref.columns,
+            cacheStatus: resp.result_ref.cache_status,
+          } : undefined,
+          resultsTruncated: resp.results_truncated,
+        })
         setResults(normalized)
       } else {
         setResults(null)
@@ -137,19 +157,19 @@ export function QueryBuilder() {
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900">
-      <header className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-gray-200/70 dark:border-slate-800/70 px-6 py-4">
-        <div className="flex items-center justify-between">
+      <header className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-gray-200/70 dark:border-slate-800/70 px-4 sm:px-6 py-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="space-y-1">
             <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-gray-50">Advanced Query Builder</h1>
             <p className="text-sm text-gray-500 dark:text-gray-400">Write and execute custom SQL queries with real-time analysis</p>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
             <div className="flex items-center gap-3">
               <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Database</span>
               <DatabaseSelector variant="header" />
             </div>
 
-            <div className="h-8 w-[1px] bg-gray-200 dark:bg-slate-800" />
+            <div className="hidden sm:block h-8 w-[1px] bg-gray-200 dark:bg-slate-800" />
 
             <div className="flex items-center gap-3">
               <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connection</span>
@@ -174,8 +194,8 @@ export function QueryBuilder() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
-        <aside className="w-64 bg-white/80 dark:bg-slate-900/80 border-r border-gray-200/70 dark:border-slate-800/70 overflow-y-auto backdrop-blur-md">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        <aside className="w-full lg:w-64 bg-white/80 dark:bg-slate-900/80 border-r border-gray-200/70 dark:border-slate-800/70 overflow-y-auto backdrop-blur-md">
           <div className="p-4">
             <h2 className="text-sm font-semibold text-gray-700 mb-3">Saved Queries</h2>
             <div className="text-xs text-gray-500">No saved queries yet.</div>
@@ -292,6 +312,9 @@ export function QueryBuilder() {
                     rows={results.rows}
                     executionTime={results.executionTime}
                     rowCount={results.rowCount}
+                    sql={lastExecutedSql}
+                    resultRef={results.resultRef}
+                    resultsTruncated={results.resultsTruncated}
                   />
                 </div>
               ) : (

@@ -16,8 +16,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Security scheme
-security = HTTPBearer()
+# Security scheme (allow missing auth for optional dependencies)
+security = HTTPBearer(auto_error=False)
 
 
 class Role(str, Enum):

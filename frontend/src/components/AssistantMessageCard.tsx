@@ -1,22 +1,21 @@
 import { Card, CardContent } from './ui/card'
-import { cn } from '@/utils/cn'
-import { Button } from './ui/button'
-import { Loader2 } from 'lucide-react'
+
+
+import { Loader2, Info, ShieldAlert, Database as DatabaseIcon } from 'lucide-react'
 import { ProgressIndicator } from './ProgressIndicator'
 import { SQLPanel } from './SQLPanel'
-import { QueryResultsTable } from './QueryResultsTable'
-import QueryResults from './QueryResults'
 import { SuggestedActions } from './SuggestedActions'
 import { ErrorCard } from './ErrorCard'
+import { QuestionUnderstandingPanel } from './QuestionUnderstandingPanel'
 import type { ChatMessage } from '@/stores/chatStore'
 import type { ThinkingStep } from '@/types/domain'
 import { Badge } from '@/components/ui/badge'
 import { extractLineage } from '@/utils/sqlAnalyzer'
-import { LineageView } from '@/components/LineageView'
-import { ExecutionTimeline } from '@/components/ExecutionTimeline'
+import { LineageView } from './LineageView'
+import { ExecutionTimeline } from './ExecutionTimeline'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePinnedQueriesStore } from '@/stores/pinnedQueriesStore'
-import { useState } from 'react'
+import React, { useState, Suspense } from 'react'
 
 interface AssistantMessageCardProps {
   message: ChatMessage
@@ -35,12 +34,19 @@ interface AssistantMessageCardProps {
   cancelling?: boolean
 }
 
+const QueryResultsTable = React.lazy(() =>
+  import('./QueryResultsTable').then((m) => ({ default: m.QueryResultsTable }))
+)
+const QueryResults = React.lazy(() =>
+  import('./QueryResults').then((m) => ({ default: m.default }))
+)
+
 export function AssistantMessageCard({
   message,
   isReasoningOpen,
   isChartOpen,
   thinkingSteps,
-  hasReasoningInfo,
+
   onToggleReasoning,
   onToggleChart,
   onCopySQL,
@@ -122,6 +128,81 @@ export function AssistantMessageCard({
               )}
 
               <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap break-words">{message.content}</p>
+
+              {/* Question Understanding Panel - shows structured intent interpretation */}
+              {message.toolCall?.metadata?.structured_intent && (
+                <div className="mt-3">
+                  <QuestionUnderstandingPanel
+                    intent={message.toolCall.metadata.structured_intent}
+                    userQuery={message.toolCall.metadata.originalQuery || ''}
+                  />
+                </div>
+              )}
+
+              {/* Advanced Governance Details */}
+              {(message.toolCall?.metadata?.sqlExplanation || message.toolCall?.metadata?.rlsExplanation || message.toolCall?.metadata?.queryPlan) && (
+                <div className="mt-4 space-y-3">
+                  {message.toolCall.metadata.sqlExplanation && (
+                    <div className="p-3 bg-blue-50/50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 rounded-lg">
+                      <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 mb-1">
+                        <Info className="h-3.5 w-3.5" />
+                        Business Context
+                      </div>
+                      <p className="text-xs text-blue-800 dark:text-blue-200 leading-relaxed italic">
+                        "{message.toolCall.metadata.sqlExplanation}"
+                      </p>
+                    </div>
+                  )}
+
+                  {message.toolCall.metadata.rlsExplanation && (
+                    <div className="p-3 bg-indigo-50/50 dark:bg-indigo-900/10 border border-indigo-100 dark:border-indigo-800/30 rounded-lg">
+                      <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1">
+                        <ShieldAlert className="h-3.5 w-3.5" />
+                        Security Filter Applied
+                      </div>
+                      <p className="text-xs text-indigo-800 dark:text-indigo-200 leading-relaxed">
+                        {message.toolCall.metadata.rlsExplanation}
+                      </p>
+                    </div>
+                  )}
+
+                  {message.toolCall.metadata.queryPlan && (
+                    <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden group">
+                      <div className="bg-slate-50 dark:bg-slate-900/50 px-3 py-2 flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                          <DatabaseIcon className="h-3 w-3" />
+                          Execution Plan
+                        </div>
+                        {message.toolCall.metadata.queryPlan.estimated_cost && (
+                          <Badge variant="outline" className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800">
+                            Est. Cost: {message.toolCall.metadata.queryPlan.estimated_cost}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="p-3 space-y-3 bg-white dark:bg-slate-950/50">
+                        {message.toolCall.metadata.queryPlan.steps.map((step: any, idx: number) => (
+                          <div key={step.id || idx} className="flex gap-3">
+                            <div className="flex flex-col items-center">
+                              <div className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold ${step.status === 'active' ? "bg-blue-500 text-white" :
+                                step.status === 'completed' ? "bg-emerald-500 text-white" : "bg-slate-200 dark:bg-slate-800 text-gray-500"
+                                }`}>
+                                {idx + 1}
+                              </div>
+                              {idx < message.toolCall!.metadata!.queryPlan.steps.length - 1 && (
+                                <div className="w-px h-full bg-slate-200 dark:bg-slate-800 my-1" />
+                              )}
+                            </div>
+                            <div className="pb-2">
+                              <div className="text-[11px] font-medium text-slate-800 dark:text-slate-200 capitalize">{step.node.replace(/_/g, ' ')}</div>
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400 leading-tight">{step.description}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </CardContent>
@@ -340,63 +421,73 @@ export function AssistantMessageCard({
       {message.toolCall?.status === 'completed' && message.toolCall.result && (
         <>
           {!isChartOpen && (
-            <QueryResultsTable
-              columns={message.toolCall.result.columns || []}
-              rows={message.toolCall.result.rows || []}
-              executionTime={message.toolCall.result.executionTime}
-              rowCount={message.toolCall.result.rowCount ?? 0}
-              timestamp={message.timestamp}
-              assistantText={message.content}
-              isPinned={checkPinned()}
-              onPin={handlePin}
-              isChartOpen={isChartOpen}
-              onToggleChart={onToggleChart}
-              isReasoningOpen={isReasoningOpen}
-              onToggleReasoning={onToggleReasoning}
-              isLoading={isLoading}
-              onRowAction={(action, ctx) => {
-                const cols = ctx.columns || []
-                const row = ctx.row
-                if (!row || cols.length === 0) return
+            <Suspense fallback={<div className="text-xs text-gray-500">Loading results...</div>}>
+              <QueryResultsTable
+                columns={message.toolCall.result.columns || []}
+                rows={message.toolCall.result.rows || []}
+                executionTime={message.toolCall.result.executionTime}
+                rowCount={message.toolCall.result.rowCount ?? 0}
+                sql={message.toolCall.metadata?.sql}
+                timestamp={message.timestamp}
+                assistantText={message.content}
+                resultRef={message.toolCall.metadata?.resultRef}
+                resultsTruncated={message.toolCall.metadata?.resultsTruncated}
+                isPinned={checkPinned()}
+                onPin={handlePin}
+                isChartOpen={isChartOpen}
+                onToggleChart={onToggleChart}
+                isReasoningOpen={isReasoningOpen}
+                onToggleReasoning={onToggleReasoning}
+                isLoading={isLoading}
+                onRowAction={(action, ctx) => {
+                  const cols = ctx.columns || []
+                  const row = ctx.row
+                  if (!row || cols.length === 0) return
 
-                const upper = cols.map((c: string) => c.toUpperCase())
-                const priority = ['CUSTOMER_NAME', 'CUSTOMER', 'ACCOUNT_NAME', 'ACCOUNT', 'CLIENT', 'COMPANY', 'PARTNER', 'ORG_NAME']
-                let colIdx = upper.findIndex((c: string) => priority.includes(c))
-                if (colIdx === -1) colIdx = 0
+                  const upper = cols.map((c: string) => c.toUpperCase())
+                  const priority = ['CUSTOMER_NAME', 'CUSTOMER', 'ACCOUNT_NAME', 'ACCOUNT', 'CLIENT', 'COMPANY', 'PARTNER', 'ORG_NAME']
+                  let colIdx = upper.findIndex((c: string) => priority.includes(c))
+                  if (colIdx === -1) colIdx = 0
 
-                const colName = cols[colIdx] || cols[0]
-                let rawValue: any
-                if (Array.isArray(row)) {
-                  rawValue = row[colIdx]
-                } else if (typeof row === 'object' && row !== null) {
-                  rawValue = (row as any)[colName] ?? (row as any)[colIdx]
-                }
+                  const colName = cols[colIdx] || cols[0]
+                  let rawValue: any
+                  if (Array.isArray(row)) {
+                    rawValue = row[colIdx]
+                  } else if (typeof row === 'object' && row !== null) {
+                    rawValue = (row as any)[colName] ?? (row as any)[colIdx]
+                  }
 
-                if (rawValue === undefined || rawValue === null || rawValue === '') return
-                const value = String(rawValue)
+                  if (rawValue === undefined || rawValue === null || rawValue === '') return
+                  const value = String(rawValue)
 
-                const prompt =
-                  action === 'filter'
-                    ? `Filter the current results to only rows where ${colName} = "${value}".`
-                    : `Drill down on ${colName} = "${value}" to show more detailed metrics and trends.`
+                  const prompt =
+                    action === 'filter'
+                      ? `Filter the current results to only rows where ${colName} = "${value}".`
+                      : `Drill down on ${colName} = "${value}" to show more detailed metrics and trends.`
 
-                if (!prompt.trim() || isLoading) return
-                onRowActionPrompt(prompt)
-              }}
-            />
+                  if (!prompt.trim() || isLoading) return
+                  onRowActionPrompt(prompt)
+                }}
+              />
+            </Suspense>
           )}
           {isChartOpen && (
-            <QueryResults
-              data={{ columns: message.toolCall.result.columns, rows: message.toolCall.result.rows }}
-              loading={false}
-              error={null}
-              viewMode="chart"
-            />
+            <Suspense fallback={<div className="text-xs text-gray-500">Loading chart...</div>}>
+              <QueryResults
+                data={{ columns: message.toolCall.result.columns, rows: message.toolCall.result.rows }}
+                loading={false}
+                error={null}
+                viewMode="chart"
+                resultsTruncated={message.toolCall.metadata?.resultsTruncated}
+              />
+            </Suspense>
           )}
 
-          {(message.toolCall.metadata?.insights || message.toolCall.metadata?.suggestedQueries) && (
+          {(message.toolCall.metadata?.insights || message.toolCall.metadata?.suggestedQueries || message.toolCall.metadata?.anomalies) && (
             <SuggestedActions
               insights={message.toolCall.metadata.insights}
+              anomalies={message.toolCall.metadata.anomalies}
+              metrics={message.toolCall.metadata.metrics}
               suggestedQueries={message.toolCall.metadata.suggestedQueries}
               onQueryClick={onSuggestedQueryClick}
             />

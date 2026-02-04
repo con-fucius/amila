@@ -17,7 +17,14 @@ from app.core.config import settings
 from app.core.exceptions import MCPException
 from app.core.structured_logging import get_iso_timestamp
 from app.core.session_id_generator import session_id_generator
-from .models import OrchestratorQueryRequest, OrchestratorQueryResponse, ClarificationRequest
+from .models import (
+    OrchestratorQueryRequest,
+    OrchestratorQueryResponse,
+    ClarificationRequest,
+    EnhanceQueryRequest,
+    EnhanceQueryResponse,
+)
+from app.services.query_results_store import build_transport_payload
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -142,6 +149,7 @@ async def process_query_with_orchestrator(
             user_role=user["role"].value,
             database_type=request.database_type or "oracle",
             thread_id_override=pre_generated_query_id,
+            auto_approve=request.auto_approve,
         )
         
         # Ensure result is a dictionary
@@ -206,6 +214,21 @@ async def process_query_with_orchestrator(
                 "total_time_ms": execution_time_ms,
             }
         
+        # Trim large results for transport and include result reference
+        transport_result = result.get("results")
+        result_ref = None
+        results_truncated = None
+        if isinstance(transport_result, dict):
+            cache_status = transport_result.get("cache_status") or result.get("cache_status")
+            trimmed_result, result_ref, results_truncated = build_transport_payload(
+                query_id=query_id,
+                result=transport_result,
+                cache_status=cache_status,
+            )
+            result["results"] = trimmed_result
+            result["result_ref"] = result_ref
+            result["results_truncated"] = results_truncated
+
         return OrchestratorQueryResponse(
             query_id=result.get("query_id", f"query_{uuid.uuid4().hex[:8]}"),
             status=result_status,
@@ -234,6 +257,8 @@ async def process_query_with_orchestrator(
             data_source=request.database_type or "oracle",
             data_freshness=data_freshness,
             query_cost=query_cost if query_cost else None,
+            result_ref=result_ref,
+            results_truncated=results_truncated,
         )
     
     except MCPException as e:
@@ -347,3 +372,59 @@ async def reprocess_with_clarification(
     except Exception as e:
         logger.error(f"Clarification processing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/enhance", response_model=EnhanceQueryResponse)
+async def enhance_query(
+    request: EnhanceQueryRequest,
+    user: dict = Depends(_get_user_or_default)
+) -> EnhanceQueryResponse:
+    """
+    Enhance a user's typed query before submission.
+    """
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    if len(request.query.strip()) > 5000:
+        raise HTTPException(status_code=400, detail="Query too long (max 5000 characters)")
+
+    try:
+        from app.services.conversation_router import ConversationRouter
+        from app.services.schema_service import SchemaService
+
+        if request.use_llm is False:
+            return EnhanceQueryResponse(
+                original_query=request.query,
+                enhanced_query=request.query,
+                method="disabled",
+                context_used=False
+            )
+
+        schema_context = None
+        try:
+            schema_result = await SchemaService.get_database_schema(use_cache=True)
+            if schema_result.get("status") == "success":
+                schema_context = schema_result.get("schema", {})
+        except Exception:
+            schema_context = None
+
+        conv_history = request.conversation_history or []
+        enhancement = await ConversationRouter.enhance_query_contextually(
+            request.query,
+            conv_history,
+            schema_context
+        )
+
+        enhanced = enhancement.get("enhanced_intent") or request.query
+        method = enhancement.get("method", "fallback")
+        context_used = bool(enhancement.get("context_used")) if "context_used" in enhancement else None
+
+        return EnhanceQueryResponse(
+            original_query=request.query,
+            enhanced_query=enhanced,
+            method=method,
+            context_used=context_used
+        )
+    except Exception as e:
+        logger.error(f"Query enhancement failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Query enhancement failed")

@@ -17,6 +17,7 @@ from app.core.error_handler import setup_error_handling
 from app.core.security_middleware import CSPMiddleware, CSRFMiddleware, HMACMiddleware
 from app.core.logging_middleware import RequestLoggingMiddleware
 from app.api.v1.router import api_router
+from app.api.docs import router as docs_router
 from app.core.lifespan import lifespan
 from app.core.client_registry import registry
 
@@ -104,6 +105,8 @@ def create_application() -> FastAPI:
 
     # Include API routes
     app.include_router(api_router, prefix="/api/v1")
+
+    app.include_router(docs_router)
     
     # Health check endpoint
     @app.get("/health")
@@ -161,14 +164,21 @@ def create_application() -> FastAPI:
         # Database is available if either specific DB path is working
         db_available = doris_status or sqlcl_ready
 
+        # Integrate with DegradedModeManager
+        from app.core.degraded_mode_manager import degraded_mode_manager
+        system_status = degraded_mode_manager.get_system_status()
+
         health_status["components"] = {
             "doris_mcp": health_results["doris_mcp"].get("status", "unknown"),
             "sqlcl_pool": "active" if sqlcl_ready else "inactive",
             "mcp_client": "connected" if getattr(app.state, "mcp_initialized", False) else "fallback", 
             "database": "available" if db_available else "mock",
             "redis": "connected" if redis_status else "disconnected",
-            "graphiti": health_results["graphiti"].get("status", "unknown")
+            "graphiti": health_results["graphiti"].get("status", "unknown"),
+            "langgraph_checkpointer": degraded_mode_manager.get_component_status("langgraph_checkpointer").status.value if degraded_mode_manager.get_component_status("langgraph_checkpointer") else "unknown"
         }
+        
+        health_status["system_detail"] = system_status
 
         # Add warnings
         if not redis_status:

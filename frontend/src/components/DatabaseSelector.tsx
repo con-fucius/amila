@@ -1,6 +1,7 @@
-import React, { useCallback } from 'react'
+import { useCallback } from 'react'
 import { cn } from '@/utils/cn'
-import { useChatActions, useDatabaseType, type DatabaseType } from '@/stores/chatStore'
+import { useChatActions, useDatabaseType } from '@/stores/chatStore'
+import type { DatabaseType } from '@/types/domain'
 import { useBackendHealth } from '@/hooks/useBackendHealth'
 
 interface DatabaseSelectorProps {
@@ -14,7 +15,6 @@ export function DatabaseSelector({ variant = 'sidebar', disabled = false, classN
     const databaseType = useDatabaseType()
     const { components, recheckHealth } = useBackendHealth(10000)
 
-    // Check if a database component is healthy
     const isHealthy = useCallback((type: DatabaseType): boolean => {
         if (!components) return false
         if (type === 'oracle') {
@@ -22,12 +22,12 @@ export function DatabaseSelector({ variant = 'sidebar', disabled = false, classN
             return ['active', 'connected', 'ready'].includes(status?.toLowerCase())
         }
         if (type === 'doris') {
-            const status = components.doris_mcp
+            const status = components.doris || components.doris_mcp
             return ['active', 'connected', 'ready'].includes(status?.toLowerCase())
         }
         if (type === 'postgres') {
-            // Assuming postgres health is checked too
-            return components.postgres !== 'disconnected' && components.postgres !== 'error'
+            const status = components.postgres
+            return status && !['disconnected', 'error', 'disabled'].includes(status?.toLowerCase())
         }
         return false
     }, [components])

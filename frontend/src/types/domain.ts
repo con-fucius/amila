@@ -25,6 +25,15 @@ export interface QueryResult {
   rows: any[]
   rowCount?: number
   executionTime?: number
+  resultRef?: ResultReference
+  resultsTruncated?: boolean
+}
+
+export interface ResultReference {
+  queryId: string
+  rowCount: number
+  columns: string[]
+  cacheStatus?: string
 }
 
 export type HistoryStatus = 'success' | 'error' | 'pending'

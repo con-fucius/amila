@@ -138,7 +138,15 @@ export function classifyInitialQueryResponse(response: QueryResponse): QueryOutc
   }
 
   if (rawStatus === 'success' && response.results) {
-    const normalizedResult = normalizeBackendResult(response.results as any)
+    const normalizedResult = normalizeBackendResult(response.results as any, {
+      resultRef: response.result_ref ? {
+        queryId: response.result_ref.query_id,
+        rowCount: response.result_ref.row_count,
+        columns: response.result_ref.columns,
+        cacheStatus: response.result_ref.cache_status,
+      } : undefined,
+      resultsTruncated: response.results_truncated,
+    })
     return { kind: 'success', response, normalizedResult }
   }
 

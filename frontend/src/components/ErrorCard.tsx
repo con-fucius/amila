@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { AlertTriangle, RefreshCw, ChevronDown, ChevronUp, Copy, Check, XCircle, Lightbulb } from 'lucide-react'
@@ -8,6 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu'
+import { Badge } from './ui/badge'
 import { cn } from '@/utils/cn'
 
 export type ErrorSeverity = 'error' | 'warning' | 'info'
@@ -29,6 +31,12 @@ export interface ErrorCardProps {
   isRetrying?: boolean
   className?: string
   schemaColumns?: string[] // Available columns for fuzzy matching
+  errorTaxonomy?: {
+    category: string
+    title: string
+    hint: string
+    steps: string[]
+  }
 }
 
 interface SelfHealSuggestion {
@@ -161,11 +169,13 @@ export function ErrorCard({
   isRetrying = false,
   className,
   schemaColumns = [],
+  errorTaxonomy,
 }: ErrorCardProps) {
   const [showDetails, setShowDetails] = useState(false)
   const [copied, setCopied] = useState(false)
   const [suggestion, setSuggestion] = useState<SelfHealSuggestion | null>(null)
   const styles = severityStyles[severity]
+  const navigate = useNavigate()
 
   // Analyze error for self-heal suggestions
   useEffect(() => {
@@ -198,6 +208,37 @@ export function ErrorCard({
 
   const hasDetails = details && (details.code || details.stage || details.sql || details.correlationId)
 
+  const recoveryActions = useMemo(() => {
+    const actions: Array<{ label: string; onClick: () => void }> = []
+    const category = errorTaxonomy?.category
+
+    if (category === 'invalid_identifier') {
+      actions.push({
+        label: 'Open Schema Browser',
+        onClick: () => navigate('/schema-browser'),
+      })
+    }
+    if (category === 'syntax_error') {
+      const sql = details?.sql
+      actions.push({
+        label: 'Open Query Builder',
+        onClick: () => navigate(sql ? `/query-builder?sql=${encodeURIComponent(sql)}` : '/query-builder'),
+      })
+    }
+    if (category === 'connection_error' || category === 'network_error') {
+      if (onRetry) {
+        actions.push({ label: 'Retry', onClick: onRetry })
+      }
+    }
+    if (category === 'permission_denied') {
+      actions.push({
+        label: 'Open Settings',
+        onClick: () => navigate('/settings'),
+      })
+    }
+    return actions
+  }, [errorTaxonomy?.category, details?.sql, onRetry, navigate])
+
   return (
     <Card className={cn(styles.border, styles.bg, className)}>
       <CardContent className="p-3">
@@ -224,6 +265,46 @@ export function ErrorCard({
             <div className="text-[13px] text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words leading-tight">
               {message}
             </div>
+
+            {/* Error Taxonomy & Troubleshooting */}
+            {errorTaxonomy && (
+              <div className="mt-3 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-[10px] uppercase tracking-wider bg-slate-100 dark:bg-slate-800 text-slate-500">
+                    {errorTaxonomy.category}
+                  </Badge>
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    {errorTaxonomy.title}
+                  </span>
+                </div>
+
+                <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-md">
+                  <div className="flex items-start gap-2">
+                    <Lightbulb className="h-4 w-4 text-blue-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1">Actionable Hint</div>
+                      <div className="text-xs text-slate-600 dark:text-slate-400">{errorTaxonomy.hint}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {errorTaxonomy.steps && errorTaxonomy.steps.length > 0 && (
+                  <div className="space-y-1.5 px-1">
+                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-tight">Troubleshooting Steps</div>
+                    <ul className="space-y-1">
+                      {errorTaxonomy.steps.map((step, idx) => (
+                        <li key={idx} className="text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2">
+                          <span className="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-800 flex items-center justify-center text-[10px] flex-shrink-0 mt-0.5">
+                            {idx + 1}
+                          </span>
+                          {step}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Self-Heal Suggestion */}
             {suggestion && (
@@ -268,6 +349,17 @@ export function ErrorCard({
                   {isRetrying ? 'Retrying...' : retryLabel}
                 </Button>
               )}
+              {recoveryActions.map((action) => (
+                <Button
+                  key={action.label}
+                  onClick={action.onClick}
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 text-[11px] px-2.5"
+                >
+                  {action.label}
+                </Button>
+              ))}
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -277,6 +369,12 @@ export function ErrorCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-40 border-gray-200 dark:border-slate-800">
+                  {onRetry && (
+                    <DropdownMenuItem onClick={onRetry} disabled={isRetrying} className="text-xs gap-2 py-2 cursor-pointer">
+                      <RefreshCw className={cn('h-3.5 w-3.5 text-gray-500', isRetrying && 'animate-spin')} />
+                      <span>{isRetrying ? 'Retrying...' : 'Retry query'}</span>
+                    </DropdownMenuItem>
+                  )}
                   {hasDetails && (
                     <DropdownMenuItem onClick={() => setShowDetails(!showDetails)} className="text-xs gap-2 py-2 cursor-pointer">
                       {showDetails ? <ChevronUp className="h-3.5 w-3.5 text-gray-500" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-500" />}

@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Optional
 
 import sqlparse
 from sqlparse.sql import Identifier, IdentifierList, Function
-from sqlparse.tokens import Name
+from sqlparse.tokens import Keyword, Name
 
 # Minimal reserved word list covering identifiers we frequently encounter.
 # Source: Oracle Database SQL Language Reference (checked Oct 2025).
@@ -181,6 +181,8 @@ def _collect_table_aliases(tokens, table_lookup: Dict[str, str], alias_map: Dict
 
 
 def _register_alias(identifier: Identifier, table_lookup: Dict[str, str], alias_map: Dict[str, str]) -> None:
+    if not hasattr(identifier, "get_real_name"):
+        return
     real = identifier.get_real_name()
     alias = identifier.get_alias()
 
@@ -199,14 +201,20 @@ def _normalize_token_list(tokens, table_lookup: Dict[str, str], alias_map: Dict[
     for token in tokens:
         if isinstance(token, IdentifierList):
             for identifier in token.get_identifiers():
-                _normalize_identifier(identifier, table_lookup, alias_map, columns_by_table)
-        elif isinstance(token, Identifier):
+                if isinstance(identifier, (Identifier, Function)):
+                    _normalize_identifier(identifier, table_lookup, alias_map, columns_by_table)
+                elif getattr(identifier, "ttype", None) in {Name, Keyword}:
+                    _normalize_standalone_name(identifier, columns_by_table)
+        elif isinstance(token, (Identifier, Function)):
             _normalize_identifier(token, table_lookup, alias_map, columns_by_table)
         elif getattr(token, "is_group", False):
             _normalize_token_list(token.tokens, table_lookup, alias_map, columns_by_table)
 
 
 def _normalize_identifier(identifier: Identifier, table_lookup: Dict[str, str], alias_map: Dict[str, str], columns_by_table: Dict[str, Dict[str, str]]) -> None:
+    if not isinstance(identifier, (Identifier, Function)):
+        return
+
     # Check if this is a Function (not just an Identifier)
     if isinstance(identifier, Function):
         # Dive into function arguments
@@ -220,8 +228,10 @@ def _normalize_identifier(identifier: Identifier, table_lookup: Dict[str, str], 
     parent_upper = parent.strip('"').upper() if parent else None
     parent_actual = None
 
+    parent_is_alias = False
     if parent_upper and parent_upper in alias_map:
         parent_actual = alias_map[parent_upper]
+        parent_is_alias = parent_upper not in table_lookup
     elif parent_upper and parent_upper in table_lookup:
         parent_actual = table_lookup[parent_upper]
 
@@ -260,6 +270,8 @@ def _normalize_identifier(identifier: Identifier, table_lookup: Dict[str, str], 
                 continue
 
             if parent_upper and token_upper == parent_upper:
+                if parent_is_alias:
+                    continue
                 if parent_actual and parent_actual != token_clean:
                     tok.value = quote_identifier(parent_actual)
                 else:
@@ -270,3 +282,15 @@ def _normalize_identifier(identifier: Identifier, table_lookup: Dict[str, str], 
                 tok.value = normalized_real
                 continue
 
+
+def _normalize_standalone_name(token, columns_by_table: Dict[str, Dict[str, str]]) -> None:
+    token_clean = token.value.strip('"')
+    token_upper = token_clean.upper()
+
+    occurrences = set()
+    for col_map in columns_by_table.values():
+        if token_upper in col_map:
+            occurrences.add(col_map[token_upper])
+
+    if len(occurrences) == 1:
+        token.value = quote_identifier(occurrences.pop())

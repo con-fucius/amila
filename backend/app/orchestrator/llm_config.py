@@ -6,7 +6,7 @@ import logging
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from typing import TYPE_CHECKING, Any, Callable, Awaitable, Optional
 
 from app.core.config import settings
 from app.core.llm_error_handler import (

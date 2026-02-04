@@ -8,6 +8,10 @@ Security considerations:
 - All queries require HITL approval before execution
 - Error states are always routed to error handler
 - Repair/fallback paths are enabled for resilience
+
+Taxonomy-based routing:
+- Uses query_taxonomy from understand node to optimize routing
+- Different query types may skip or emphasize certain nodes
 """
 
 import logging
@@ -17,29 +21,88 @@ from app.orchestrator.state import QueryState
 logger = logging.getLogger(__name__)
 
 
-def route_after_understanding(state: QueryState) -> Literal["retrieve_context", "error"]:
-    """Route based on intent understanding result."""
+def route_after_understanding(state: QueryState) -> Literal["retrieve_context", "decompose", "error"]:
+    """
+    Route based on intent understanding result with taxonomy-aware optimization.
+    
+    Taxonomy-based routing rules:
+    - Meta/Schema queries: Fast-track to SQL generation (skip context)
+    - Complex multi-table queries: Route through decomposition
+    - Standard queries: Normal context retrieval
+    """
     nxt = state.get("next_action", "retrieve_context")
     if nxt == "error" or state.get("error"):
         return "error"
+    
+    # Taxonomy-based routing optimization
+    taxonomy = state.get("query_taxonomy", {})
+    query_type = taxonomy.get("query_type", "unknown")
+    complexity = taxonomy.get("complexity", "simple")
+    joins_count = taxonomy.get("joins_count", 0)
+    
+    # Route complex queries through decomposition
+    if complexity == "complex" or joins_count >= 3:
+        logger.info(f"Taxonomy routing: Complex query detected ({complexity}, {joins_count} joins) -> decompose")
+        return "decompose"
+    
+    # Meta/Schema queries can skip context and go straight to SQL generation
+    # These don't need table discovery as they're asking about schema itself
+    if query_type == "meta_schema":
+        logger.info("Taxonomy routing: Meta/Schema query -> fast-track to SQL generation")
+        # Skip retrieve_context, but we need to set up minimal context
+        state["skip_context_retrieval"] = True
+        return "retrieve_context"  # Still go through context but will be minimal
+    
     return "retrieve_context"
 
 
-def route_after_validation_with_probe(state: QueryState) -> Literal["await_approval", "error"]:
+def route_after_validation_with_probe(state: QueryState) -> Literal["await_approval", "execute", "probe_sql", "error"]:
     """
-    Route after SQL validation to approval gate.
+    Route after SQL validation to approval gate or direct execution.
     
-    All queries MUST go through HITL approval before execution.
-    This is a security requirement - no automatic execution.
+    CRITICAL: Queries go through HITL approval UNLESS:
+    1. User has auto_approve=True AND
+    2. Query is low risk (no force_approval flag)
+    
+    This is a security requirement.
     """
     nxt = state.get("next_action")
     
     # Error takes precedence
     if nxt == "error" or state.get("error"):
+        logger.info("Routing to error (error detected)")
         return "error"
     
-    # All queries require approval - route to approval gate
-    # The graph will interrupt before await_approval node
+    # Check if approval is required
+    needs_approval = state.get("needs_approval", False)
+    force_approval = state.get("force_approval", False)
+    auto_approve = state.get("auto_approve", False)
+    is_admin = state.get("user_role", "").lower() == "admin"
+    
+    logger.info(
+        f"Routing decision: needs_approval={needs_approval}, "
+        f"force_approval={force_approval}, auto_approve={auto_approve}, "
+        f"is_admin={is_admin}, next_action={nxt}"
+    )
+    
+    # CRITICAL: force_approval overrides everything
+    if force_approval:
+        logger.info("Force approval required - routing to await_approval")
+        return "await_approval"
+    
+    # If needs_approval is set and auto_approve is not enabled, require approval
+    if needs_approval and not auto_approve:
+        logger.info(f"Approval required (needs_approval={needs_approval}, auto_approve={auto_approve}) - routing to await_approval")
+        return "await_approval"
+    
+    # If auto_approve is enabled OR admin with low risk, skip approval gate
+    if (auto_approve or is_admin) and not needs_approval:
+        logger.info(f"Auto-approve enabled (auto_approve={auto_approve}, is_admin={is_admin}) - routing to probe_sql")
+        # Route to probe_sql for structural validation before execution
+        return "probe_sql"
+    
+    # Default: require approval for safety
+    logger.info("Default routing - requiring approval for safety")
     return "await_approval"
 
 

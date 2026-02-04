@@ -39,6 +39,7 @@ class QueryService:
         timeout: float = 600.0,
         thread_id_override: Optional[str] = None,
         database_type: str = "oracle",
+        auto_approve: bool = False,
     ) -> Dict[str, Any]:
         """
         Process a natural language query through the orchestrator
@@ -69,6 +70,7 @@ class QueryService:
                     user_role=user_role,
                     thread_id_override=thread_id_override,
                     database_type=database_type,
+                    auto_approve=auto_approve,
                 ),
                 timeout=timeout
             )

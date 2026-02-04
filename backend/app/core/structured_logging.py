@@ -238,6 +238,36 @@ def categorize_error(logger: Any, method_name: str, event_dict: EventDict) -> Ev
     return event_dict
 
 
+def mask_sensitive_data(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
+    """Mask sensitive information in logs (PII, credentials, etc.)"""
+    sensitive_keys = {
+        "password", "secret", "token", "key", "authorization",
+        "ssn", "credit_card", "email", "user_email", "phone"
+    }
+    
+    # Generic PII patterns
+    email_pattern = re.compile(r'[\w\.-]+@[\w\.-]+\.\w+')
+    # Simplified SSN-like or CC-like number patterns (4+ digits)
+    number_mask_pattern = re.compile(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b')
+    
+    for key, value in event_dict.items():
+        if not isinstance(value, str):
+            continue
+            
+        # Mask by key name
+        if any(sk in key.lower() for sk in sensitive_keys):
+            event_dict[key] = "[MASKED]"
+            continue
+            
+        # Mask by content pattern
+        if email_pattern.search(value):
+            event_dict[key] = email_pattern.sub("[EMAIL_MASKED]", value)
+        
+        if number_mask_pattern.search(value):
+            event_dict[key] = number_mask_pattern.sub("[SENSITIVE_NUMBER_MASKED]", value)
+            
+    return event_dict
+
 def configure_structured_logging(
     log_level: str = "INFO",
     json_format: bool = True,
@@ -274,6 +304,7 @@ def configure_structured_logging(
         add_timestamp,
         add_level,
         categorize_error,
+        mask_sensitive_data,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),

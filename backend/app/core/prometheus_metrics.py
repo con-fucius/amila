@@ -15,6 +15,53 @@ logger = logging.getLogger(__name__)
 # Create custom registry to avoid conflicts
 registry = CollectorRegistry()
 
+
+class CustomMetricsRegistry:
+    """Dynamic custom metrics registry"""
+
+    def __init__(self, registry: CollectorRegistry):
+        self._registry = registry
+        self._metrics: dict[str, Any] = {}
+
+    def ensure_metric(self, definition: dict) -> None:
+        metric_id = definition.get("metric_id")
+        if metric_id in self._metrics:
+            return
+        metric_type = definition.get("type")
+        name = definition.get("name")
+        description = definition.get("description") or "Custom metric"
+        labels = definition.get("labels") or []
+        if metric_type == "gauge":
+            self._metrics[metric_id] = Gauge(name, description, labels, registry=self._registry)
+        elif metric_type == "counter":
+            self._metrics[metric_id] = Counter(name, description, labels, registry=self._registry)
+        elif metric_type == "histogram":
+            self._metrics[metric_id] = Histogram(name, description, labels, registry=self._registry)
+
+    def remove_metric(self, metric_id: str) -> None:
+        if metric_id in self._metrics:
+            # Prometheus client does not support removal; keep for process lifetime
+            self._metrics.pop(metric_id, None)
+
+    def record(self, definition: dict, value: float, labels: dict[str, str]) -> None:
+        self.ensure_metric(definition)
+        metric_id = definition.get("metric_id")
+        metric = self._metrics.get(metric_id)
+        if not metric:
+            return
+        metric_type = definition.get("type")
+        if labels:
+            metric = metric.labels(**labels)
+        if metric_type == "gauge":
+            metric.set(value)
+        elif metric_type == "counter":
+            metric.inc(value)
+        elif metric_type == "histogram":
+            metric.observe(value)
+
+
+custom_metrics_registry = CustomMetricsRegistry(registry)
+
 # ====================  QUERY METRICS ====================
 
 # Query execution counters

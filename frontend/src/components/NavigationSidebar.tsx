@@ -1,9 +1,10 @@
-import { MessageSquare, Database, Code2, Menu, Plus, User, Settings, AlertTriangle, MoreHorizontal } from 'lucide-react'
-import { useState, useEffect, useCallback } from 'react'
+import { MessageSquare, Database, Code2, Menu, Plus, Settings, AlertTriangle, MoreHorizontal, Shield } from 'lucide-react'
+import { useState, useCallback } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { cn } from '@/utils/cn'
-import { useChatActions, useChats, useCurrentChatId, useDatabaseType, useMessages, type DatabaseType } from '@/stores/chatStore'
+import { useChatActions, useChats, useCurrentChatId, useDatabaseType } from '@/stores/chatStore'
+import type { DatabaseType } from '@/types/domain'
 import { useBackendHealth } from '@/hooks/useBackendHealth'
 import {
   DropdownMenu,
@@ -30,22 +31,34 @@ interface NavigationSidebarProps {
   width?: number
   onResizeMouseDown?: (event: ReactMouseEvent<HTMLDivElement>) => void
   isProcessing?: boolean
+  isMobile?: boolean
+  isMobileOpen?: boolean
+  onCloseMobile?: () => void
 }
 
-export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseDown, isProcessing = false }: NavigationSidebarProps) {
+export function NavigationSidebar({
+  isCollapsed,
+  onToggle,
+  width,
+  onResizeMouseDown,
+  isProcessing = false,
+  isMobile = false,
+  isMobileOpen = false,
+  onCloseMobile,
+}: NavigationSidebarProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const { createChat, switchChat, renameChat, deleteChat, setDatabaseType } = useChatActions()
   const chats = useChats()
   const currentChatId = useCurrentChatId()
   const databaseType = useDatabaseType()
-  const messages = useMessages()
-  const { components, recheckHealth } = useBackendHealth(5000)
-  const [userProfile, setUserProfile] = useState<{ username: string; role: string } | null>(null)
+  const health = useBackendHealth(5000)
+  const { components } = health
+
   const [showSwitchWarning, setShowSwitchWarning] = useState(false)
   const [pendingDbSwitch, setPendingDbSwitch] = useState<DatabaseType | null>(null)
 
-  // Check if the target database is healthy before allowing switch
+  // define isDatabaseHealthy locally to fix build error
   const isDatabaseHealthy = useCallback((targetDb: DatabaseType): boolean => {
     if (!components) return false
     if (targetDb === 'oracle') {
@@ -59,28 +72,6 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
     return false
   }, [components])
 
-  // Check if current conversation has messages (to warn about context loss)
-  const hasConversationHistory = messages.length > 0
-
-  const handleDatabaseChange = useCallback((type: DatabaseType) => {
-    if (type === databaseType) return
-
-    // Check health first
-    if (!isDatabaseHealthy(type)) {
-      recheckHealth()
-      console.warn(`[NavigationSidebar] ${type} database not healthy, switch blocked`)
-      return
-    }
-
-    // Warn if there's conversation history
-    if (hasConversationHistory) {
-      setPendingDbSwitch(type)
-      setShowSwitchWarning(true)
-      return
-    }
-
-    setDatabaseType(type)
-  }, [databaseType, isDatabaseHealthy, hasConversationHistory, setDatabaseType, recheckHealth])
 
   const confirmDatabaseSwitch = useCallback(() => {
     if (pendingDbSwitch) {
@@ -99,48 +90,29 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
     { name: 'Chat', href: '/', icon: MessageSquare },
     { name: 'Query Builder', href: '/query-builder', icon: Code2 },
     { name: 'Schema Browser', href: '/schema-browser', icon: Database },
+    {
+      name: 'Governance',
+      href: '/governance',
+      icon: Shield,
+      submenu: [
+        { name: 'Overview', href: '/governance' },
+        { name: 'Skills Admin', href: '/governance/skills' }
+      ]
+    },
   ]
-
-  useEffect(() => {
-    try {
-      const token = localStorage.getItem('access_token')
-      if (!token || token === 'temp-dev-token') {
-        setUserProfile(null)
-        return
-      }
-      const parts = token.split('.')
-      if (parts.length < 2) {
-        setUserProfile(null)
-        return
-      }
-      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
-      const username = payload.sub || payload.username || 'user'
-      const rawRole = payload.role || payload.roles?.[0] || 'analyst'
-      const role = typeof rawRole === 'string' ? rawRole.charAt(0).toUpperCase() + rawRole.slice(1) : 'Analyst'
-      setUserProfile({ username, role })
-    } catch {
-      setUserProfile(null)
-    }
-  }, [])
-
-
 
   // Derive status for the four main system health pills
   // Database: check doris_mcp first (for Doris), then sqlcl_pool (for Oracle), then generic database field
-
-
-
-
-
-
-
 
   return (
     <aside
       style={{ width: isCollapsed ? 64 : width ?? 256 }}
       className={cn(
         'h-screen bg-black border-r border-gray-800/50 text-white transition-all duration-300 z-40 flex-shrink-0 relative',
-        isCollapsed && 'w-16'
+        isCollapsed && 'w-16',
+        isMobile && 'fixed top-0 left-0 z-40',
+        isMobile && (isMobileOpen ? 'translate-x-0' : '-translate-x-full'),
+        isMobile && 'transition-transform'
       )}
     >
       {/* Header */}
@@ -169,6 +141,9 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
             <Link
               key={item.name}
               to={item.href}
+              onClick={() => {
+                if (isMobile && onCloseMobile) onCloseMobile()
+              }}
               className={cn(
                 'flex items-center transition-all relative group overflow-hidden',
                 isCollapsed ? 'justify-center w-10 h-10 mx-auto rounded-lg' : 'gap-3 px-3 py-2 rounded-lg w-full',
@@ -185,7 +160,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
                   {item.name === 'Chat' && (
                     <button
                       type="button"
-                      onClick={(e) => { e.preventDefault(); const id = createChat('New chat'); switchChat(id); navigate('/') }}
+                      onClick={(e) => { e.preventDefault(); const id = createChat('New chat'); switchChat(id); navigate('/'); if (isMobile && onCloseMobile) onCloseMobile() }}
                       className="ml-2 p-1 rounded hover:bg-gray-600 flex-shrink-0"
                       title="New Chat"
                     >
@@ -222,7 +197,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
               >
                 <button
                   className="truncate text-xs text-left flex-1"
-                  onClick={() => switchChat(c.id)}
+                  onClick={() => { switchChat(c.id); if (isMobile && onCloseMobile) onCloseMobile() }}
                 >
                   {c.name}
                 </button>
@@ -267,7 +242,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
       {!isCollapsed && (
         <div className="absolute bottom-0 left-0 right-0 border-t border-gray-800/50 pt-5 pb-6 px-4 space-y-5 bg-black">
           <div className="mt-4">
-            <SystemHealthMonitor components={components} />
+            <SystemHealthMonitor components={components} diagnostics={health.diagnostics} />
           </div>
 
           {/* Database Selector (at bottom) */}
@@ -285,7 +260,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
           {/* Settings link (at very bottom) */}
           <div className="mt-2 pt-2 border-t border-gray-800/30">
             <button
-              onClick={() => navigate('/settings')}
+              onClick={() => { navigate('/settings'); if (isMobile && onCloseMobile) onCloseMobile() }}
               className={cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-lg w-full transition-all group",
                 location.pathname === '/settings'
@@ -293,9 +268,11 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
                   : 'hover:bg-gray-800/60 text-gray-400 hover:text-gray-200'
               )}
             >
-              <Settings className="h-4 w-4 group-hover:text-emerald-400 transition-colors" />
-              <span className="text-xs font-medium">Settings</span>
+              <Settings className="h-5 w-5 group-hover:text-emerald-400 transition-colors" />
+              <span className="text-sm font-medium">Settings</span>
             </button>
+            <div className="h-1" />
+
           </div>
         </div>
       )}
@@ -305,7 +282,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
         <div className="absolute bottom-0 left-0 right-0 border-t border-gray-700 py-3 px-2 space-y-2 bg-gradient-to-b from-gray-900/95 to-gray-950">
           {/* System health indicator */}
           <div className="flex justify-center flex-col items-center gap-2">
-            <SystemHealthMonitor components={components} collapsed={true} />
+            <SystemHealthMonitor components={components} diagnostics={health.diagnostics} collapsed={true} />
           </div>
 
           {/* Database indicator */}
@@ -330,7 +307,7 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
           {/* Settings link */}
           <div className="flex justify-center">
             <button
-              onClick={() => navigate('/settings')}
+              onClick={() => { navigate('/settings'); if (isMobile && onCloseMobile) onCloseMobile() }}
               className="p-2 rounded-lg bg-gray-800/70 text-gray-400 hover:bg-gray-700 hover:text-white transition-all"
               title="Settings"
             >
@@ -380,3 +357,4 @@ export function NavigationSidebar({ isCollapsed, onToggle, width, onResizeMouseD
     </aside>
   )
 }
+

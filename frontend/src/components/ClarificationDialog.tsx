@@ -6,20 +6,22 @@ import { Badge } from './ui/badge'
 import { Textarea } from './ui/textarea'
 import { Info, Plus } from 'lucide-react'
 
+import type { DatabaseType } from '@/types/domain'
+
 interface ClarificationDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   originalQuery: string
   message: string
   details?: {
-    unmapped_concepts?: Array<{concept: string, note?: string}>
-    referenced_tables?: Array<{name: string, columns: string[]}>
+    unmapped_concepts?: Array<{ concept: string, note?: string }>
+    referenced_tables?: Array<{ name: string, columns: string[] }>
     reason?: string
     previous_clarifications?: string[]
     attempt_number?: number
     [key: string]: any
   }
-  databaseType?: 'oracle' | 'doris'
+  databaseType?: DatabaseType
   onSubmit: (clarification: string) => Promise<void> | void
 }
 
@@ -42,7 +44,7 @@ export function ClarificationDialog({ open, onOpenChange, originalQuery, message
   const handleColumnClick = (columnName: string, concept?: string) => {
     const currentText = clarification
     let newText = currentText
-    
+
     if (concept) {
       // Smart insertion: "Use COLUMN_NAME for concept"
       const insertion = `Use ${columnName} for ${concept}`
@@ -51,20 +53,20 @@ export function ClarificationDialog({ open, onOpenChange, originalQuery, message
       // Simple column name insertion
       newText = currentText ? `${currentText} ${columnName}` : columnName
     }
-    
+
     setClarification(newText)
   }
 
   const getAvailableColumns = () => {
     if (!details?.referenced_tables) return []
-    return details.referenced_tables.flatMap(table => 
+    return details.referenced_tables.flatMap(table =>
       table.columns.map(col => ({ name: col, table: table.name }))
     )
   }
 
   const getUnmappedConcepts = () => {
     if (!details?.unmapped_concepts) return []
-    return Array.isArray(details.unmapped_concepts) 
+    return Array.isArray(details.unmapped_concepts)
       ? details.unmapped_concepts.map(c => typeof c === 'string' ? { concept: c } : c)
       : []
   }
@@ -90,7 +92,7 @@ export function ClarificationDialog({ open, onOpenChange, originalQuery, message
           <Alert className="bg-blue-50 border-blue-200 dark:bg-slate-900/80 dark:border-slate-700">
             <Info className="h-4 w-4 text-blue-700 dark:text-blue-300" />
             <AlertTitle className="text-blue-900 dark:text-blue-100">
-              {details?.attempt_number && details.attempt_number > 1 
+              {details?.attempt_number && details.attempt_number > 1
                 ? `Additional clarification needed (attempt ${details.attempt_number})`
                 : 'What we need from you'}
             </AlertTitle>
@@ -182,9 +184,9 @@ export function ClarificationDialog({ open, onOpenChange, originalQuery, message
                     <span className="text-gray-600 dark:text-gray-300">Map "{concept.concept}" to:</span>
                     <div className="flex gap-1">
                       {getAvailableColumns().slice(0, 4).map((col, j) => (
-                        <Badge 
+                        <Badge
                           key={j}
-                          variant="outline" 
+                          variant="outline"
                           className="cursor-pointer hover:bg-green-50 text-xs"
                           onClick={() => handleColumnClick(col.name, concept.concept)}
                         >

@@ -17,6 +17,7 @@ async def process_query(
     user_role: str = "analyst",
     thread_id_override: str | None = None,
     database_type: str = "oracle",
+    auto_approve: bool = False,
 ):
     from app.orchestrator.processor import process_query as _process
     return await _process(
@@ -26,6 +27,7 @@ async def process_query(
         user_role,
         thread_id_override,
         database_type=database_type,
+        auto_approve=auto_approve,
     )
 
 def validate_and_fix_state(state: dict):

@@ -14,12 +14,20 @@ export function useApprovalFlow() {
     query: string
     sql: string
     riskLevel: 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+    originalSQL?: string
+    riskReasons?: string[]
+    sqlExplanation?: string
+    queryPlan?: {
+      steps: Array<{ id: string; node: string; status: string; description: string }>
+      estimated_cost?: number
+    }
+    rlsExplanation?: string
     approvalContext?: any
   } | null>(null);
 
   const approvingRef = useRef(false);
 
-  const handleApproveQuery = async (modifiedSQL?: string) => {
+  const handleApproveQuery = async (modifiedSQL?: string, constraints?: { max_rows?: number }) => {
     if (import.meta.env.DEV) {
       console.log('handleApproveQuery called, queryId:', approvalDialog?.queryId, 'modifiedSQL:', !!modifiedSQL)
     }
@@ -56,6 +64,7 @@ export function useApprovalFlow() {
         query_id: queryId,
         approved: true,
         modified_sql: modifiedSQL,
+        constraints: constraints,
       })
 
       const canonical = coerceToCanonicalQueryResponse(approvalResponse)

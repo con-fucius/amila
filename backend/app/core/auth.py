@@ -5,7 +5,7 @@ Uses Redis for distributed state (rate limiting, sessions, tokens).
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from jose import jwt, JWTError
 import bcrypt
 from fastapi import Depends, HTTPException, status
@@ -492,9 +492,7 @@ class AuthenticationManager:
         """
         # Check rate limiting first
         await self.check_rate_limit(username)
-
-        # NOTE: In production, replace this with proper database user lookup
-        # This demo user store should be removed before production deployment
+        
         users_db = getattr(settings, 'users_db', None)
         if users_db is None:
             logger.warning("No users_db configured - authentication will fail for all users")
@@ -614,6 +612,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise credentials_exception
             
         username: str = payload.get("sub")
+        role = payload.get("role", "viewer")
         if username is None:
             raise credentials_exception
             
@@ -622,8 +621,48 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         return {
             "user_id": username,
             "username": username,
-            "session_id": payload.get("session_id", "default_session")
+            "session_id": payload.get("session_id", "default_session"),
+            "role": role,
+            "permissions": payload.get("permissions", []),
         }
         
     except JWTError:
         raise credentials_exception
+
+
+def require_permissions(required: List[str]) -> Callable:
+    """
+    FastAPI dependency factory that enforces role or permission membership.
+
+    Accepts either roles (e.g., "admin") or permission names (e.g., "view_cost_dashboard").
+    """
+    async def _dependency(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+        role_value = user.get("role", "viewer")
+        role_str = role_value.value if hasattr(role_value, "value") else str(role_value).lower()
+        user_permissions = set(p.lower() for p in (user.get("permissions") or []))
+        required_set = set(r.lower() for r in required)
+
+        # Direct role match grants access
+        if role_str in required_set:
+            return user
+
+        # Check RBAC permissions mapping if available
+        try:
+            from app.core.rbac import rbac_manager, Permission, Role
+            role_enum = Role(role_str)
+            mapped_perms = {p.value for p in rbac_manager.get_role_permissions(role_enum)}
+            if any(req in mapped_perms for req in required_set):
+                return user
+        except Exception:
+            pass
+
+        # Fall back to user-permission list
+        if any(req in user_permissions for req in required_set):
+            return user
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+    return _dependency

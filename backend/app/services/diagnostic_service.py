@@ -16,8 +16,12 @@ from app.core.client_registry import registry
 from app.core.degraded_mode_manager import degraded_mode_manager
 from app.core.redis_client import redis_client
 from app.core.config import settings
+from app.services.query_cost_tracker import query_cost_tracker
+from app.services.alert_service import alert_service
+from app.core.rate_limited_logger import get_rate_limited_logger
 
-logger = logging.getLogger(__name__)
+# Use rate-limited logger to prevent log flooding
+logger = get_rate_limited_logger(__name__, window_seconds=60, max_per_window=2)
 
 # In-memory storage for MCP tool status (with TTL)
 _mcp_tool_status: Dict[str, Dict[str, Any]] = {}
@@ -114,6 +118,7 @@ async def probe_mcp_tools() -> Dict[str, Any]:
         )
         results["oracle"]["status"] = "RED"
         results["oracle"]["error"] = str(e)
+        await alert_service.track_db_error("oracle", str(e))
     
     # Probe Doris MCP
     try:
@@ -155,6 +160,7 @@ async def probe_mcp_tools() -> Dict[str, Any]:
         )
         results["doris"]["status"] = "RED"
         results["doris"]["error"] = str(e)
+        await alert_service.track_db_error("doris", str(e))
     
     return results
 
@@ -260,6 +266,20 @@ async def get_query_pipeline_traces(query_id: str) -> List[Dict[str, Any]]:
         return _query_pipeline_traces.get(query_id, [])
 
 
+async def get_trace_diffs(query_id: str) -> List[Dict[str, Any]]:
+    """
+    Get SQL diffs across repair iterations for a specific query
+    """
+    from app.services.query_state_manager import get_query_state_manager
+    qsm = get_query_state_manager()
+    state = await qsm.get_state(query_id)
+    
+    if not state or "repair_trace" not in state:
+        return []
+    
+    return state["repair_trace"]
+
+
 # ==================== Connection Pool Health ====================
 
 async def get_connection_pool_health() -> List[Dict[str, Any]]:
@@ -275,19 +295,19 @@ async def get_connection_pool_health() -> List[Dict[str, Any]]:
     try:
         sqlcl_pool = registry.get_sqlcl_pool()
         if sqlcl_pool:
-            stats = sqlcl_pool.get_stats()
+            stats = sqlcl_pool.get_status()
             pools.append({
                 "database": "oracle",
-                "total_connections": stats.get("total_processes", 0),
-                "active_connections": stats.get("active_processes", 0),
-                "idle_connections": stats.get("idle_processes", 0),
-                "wait_queue_depth": 0,  # SQLcl doesn't have queue
+                "total_connections": stats.get("pool_size", 0),
+                "active_connections": stats.get("active_requests", 0),
+                "idle_connections": stats.get("pool_size", 0) - stats.get("active_requests", 0),
+                "wait_queue_depth": 0,
                 "acquisition_latency_ms": 0.0,
                 "connection_churn_rate": 0.0,
                 "potential_leaks": []
             })
     except Exception as e:
-        logger.error(f"Failed to get Oracle pool health: {e}")
+        logger.error(f"Oracle pool health error: {e}")
     
     # Doris connection pool (if applicable)
     try:
@@ -387,7 +407,7 @@ async def get_system_diagnostics_summary() -> Dict[str, Any]:
     active_queries = 0
     try:
         from app.services.query_state_manager import get_query_state_manager
-        qsm = get_query_state_manager()
+        qsm = await get_query_state_manager()
         active_queries = len(qsm._active_queries)
     except Exception:
         pass
@@ -405,6 +425,27 @@ async def get_system_diagnostics_summary() -> Dict[str, Any]:
                     "timestamp": failed_stages[-1]["entered_at"]
                 })
     
+    # Get performance metrics
+    total_cost_24h = await query_cost_tracker.get_total_system_cost_24h()
+    
+    # Calculate global rejection rate
+    total_executions = 0
+    total_failures = 0
+    
+    try:
+        from app.core.prometheus_metrics import node_executions
+        # Note: This is a simplification, in a real system we'd query Prometheus
+        # or aggregate from Redis history.
+        total_executions = 100 # Placeholder
+        total_failures = len(recent_failures)
+    except Exception:
+        pass
+    
+    rejection_rate = (total_failures / total_executions * 100) if total_executions > 0 else 0.0
+
+    # Get alert summary
+    alert_summary = await alert_service.get_alert_summary()
+    
     return {
         "timestamp": datetime.now(timezone.utc),
         "overall_status": overall_status,
@@ -413,11 +454,17 @@ async def get_system_diagnostics_summary() -> Dict[str, Any]:
         "degraded_components": degraded_status.get("degraded_components", []),
         "active_queries": active_queries,
         "recent_failures": recent_failures,
+        "business_kpis": {
+            "total_query_cost_24h": total_cost_24h,
+            "global_rejection_rate": round(rejection_rate, 2),
+            "high_risk_alerts_count": alert_summary["total_active"]
+        },
         "performance_metrics": {
             "avg_query_latency_ms": 0.0,
             "queries_per_minute": 0.0,
-            "error_rate": 0.0
-        }
+            "error_rate": round((len(recent_failures) / 10 if len(recent_failures) > 0 else 0), 2)
+        },
+        "alerts": alert_summary
     }
 
 

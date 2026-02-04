@@ -16,8 +16,10 @@ import {
 } from "@/components/ui/dialog"
 import { apiService } from '@/services/apiService'
 import { useDatabaseType } from '@/stores/chatStore'
-import { useBackendHealth } from '@/hooks/useBackendHealth'
+
 import { DatabaseSelector } from '@/components/DatabaseSelector'
+import { SchemaERDiagram } from '@/components/SchemaERDiagram'
+import { MetricsGlossary } from '@/components/MetricsGlossary'
 
 interface ColumnInfo {
   name: string
@@ -55,15 +57,17 @@ export function SchemaBrowser() {
   const [stats, setStats] = useState<ColumnStat[]>([])
   const [statsLoading, setStatsLoading] = useState(false)
   const [showStatsWarning, setShowStatsWarning] = useState(false)
+  const [relationships, setRelationships] = useState<any[]>([])
+  const [columnComments, setColumnComments] = useState<Record<string, string>>({})
 
   const databaseType = useDatabaseType()
-  const { components } = useBackendHealth(10000)
+  // const { components } = useBackendHealth(10000)
 
   const fetchSchema = async () => {
     try {
       setLoading(true)
       setError(null)
-      const res = await apiService.getSchema({ use_cache: true, database_type: databaseType })
+      const res = await apiService.getSchema({ use_cache: true, database_type: databaseType as 'oracle' | 'doris' })
       if (res.status && res.status !== 'success') {
         setTables([])
         setSelectedTable(null)
@@ -98,9 +102,13 @@ export function SchemaBrowser() {
     try {
       setStatsLoading(true)
       setStats([])
-      const res = await apiService.getTableStats(tableName, databaseType)
+      setRelationships([])
+      setColumnComments({})
+      const res = await apiService.getTableStats(tableName, databaseType as 'oracle' | 'doris')
       if (res.status === 'success') {
-        setStats(res.stats)
+        setStats(res.stats || [])
+        setColumnComments((res as any).comments || {})
+        setRelationships((res as any).relationships || [])
       }
     } catch (e: any) {
       console.error('Failed to fetch stats:', e)
@@ -125,7 +133,7 @@ export function SchemaBrowser() {
   return (
     <div className="h-screen flex flex-col bg-gray-50 dark:bg-slate-950">
       {/* Header */}
-      <header className="bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 px-6 py-6 backdrop-blur-md">
+      <header className="bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 px-4 sm:px-6 py-4 sm:py-6 backdrop-blur-md">
         <div className="flex items-center justify-between">
           <div className="space-y-1">
             <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-gray-50">Schema Browser</h1>
@@ -148,9 +156,9 @@ export function SchemaBrowser() {
       </header>
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Left Panel - Table List */}
-        <aside className="w-80 bg-white dark:bg-slate-900/80 border-r border-gray-200 dark:border-slate-800 overflow-y-auto">
+        <aside className="w-full md:w-80 bg-white dark:bg-slate-900/80 border-r border-gray-200 dark:border-slate-800 overflow-y-auto">
           <div className="p-4">
             <div className="mb-6">
               <div className="relative">
@@ -209,7 +217,7 @@ export function SchemaBrowser() {
         </aside>
 
         {/* Center - Table Details */}
-        <div className="flex-1 overflow-auto p-6 relative">
+        <div className="flex-1 overflow-auto p-4 sm:p-6 relative">
           <div className="absolute top-6 right-6 z-10 hidden sm:flex">
           </div>
           {error && (
@@ -263,7 +271,13 @@ export function SchemaBrowser() {
                     }}
                     className="data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-600 dark:data-[state=active]:text-emerald-400"
                   >
-                    Statistics
+                    Analysis
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="glossary"
+                    className="data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-600 dark:data-[state=active]:text-emerald-400"
+                  >
+                    Business Glossary
                   </TabsTrigger>
                 </TabsList>
 
@@ -275,6 +289,7 @@ export function SchemaBrowser() {
                           <thead className="bg-gray-50/50 dark:bg-slate-900/50 border-b border-gray-200 dark:border-slate-800">
                             <tr>
                               <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Column Name</th>
+                              <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description / Metadata</th>
                               <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Data Type</th>
                               <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nullable</th>
                               <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Keys</th>
@@ -285,6 +300,9 @@ export function SchemaBrowser() {
                               <tr key={idx} className="border-b border-gray-100 dark:border-slate-800/60 hover:bg-gray-50/30 dark:hover:bg-slate-900/40 transition-colors">
                                 <td className="px-5 py-3 text-sm font-mono text-gray-800 dark:text-gray-100 font-medium tracking-tight">
                                   {column.name}
+                                </td>
+                                <td className="px-5 py-3 text-xs text-gray-500 dark:text-gray-400 max-w-[200px]">
+                                  {columnComments[column.name] || <span className="opacity-30 italic">No comment available</span>}
                                 </td>
                                 <td className="px-5 py-3 text-[11px] text-gray-500 dark:text-gray-400 font-mono italic">
                                   {column.dataType}
@@ -320,36 +338,49 @@ export function SchemaBrowser() {
                 </TabsContent>
 
 
-                <TabsContent value="stats" className="mt-4">
+                <TabsContent value="stats" className="mt-4 space-y-4">
+                  {relationships.length > 0 && (
+                    <SchemaERDiagram
+                      baseTable={selectedTable.name}
+                      relationships={relationships}
+                      onSelectTable={(tableName) => {
+                        const match = tables.find(t => t.name.toUpperCase() === tableName.toUpperCase())
+                        if (match) setSelectedTable(match)
+                      }}
+                    />
+                  )}
+
                   <Card>
+                    <CardHeader className="py-4 border-b">
+                      <h4 className="text-sm font-bold flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4 text-emerald-500" />
+                        Column Profiling
+                      </h4>
+                    </CardHeader>
                     <CardContent className="p-4">
                       {statsLoading ? (
                         <div className="flex items-center justify-center py-8">
                           <Loader2 className="h-6 w-6 animate-spin text-emerald-500" />
-                          <span className="ml-2 text-gray-500">Loading statistics...</span>
+                          <span className="ml-2 text-gray-500">Profiling data...</span>
                         </div>
                       ) : stats.length > 0 ? (
                         <div className="overflow-x-auto">
-                          <table className="w-full">
+                          <table className="w-full text-xs">
                             <thead className="bg-gray-50/50 dark:bg-slate-900/50 border-b">
                               <tr>
-                                <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Column</th>
-                                <th className="px-5 py-3 text-left text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
-                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Distinct</th>
-                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nulls</th>
-                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Min</th>
-                                <th className="px-5 py-3 text-right text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Max</th>
+                                <th className="px-4 py-3 text-left font-bold text-gray-500 dark:text-gray-400 uppercase">Column</th>
+                                <th className="px-4 py-3 text-left font-bold text-gray-500 dark:text-gray-400 uppercase">Type</th>
+                                <th className="px-4 py-3 text-right font-bold text-gray-500 dark:text-gray-400 uppercase">Uniq. Vals (Approx)</th>
+                                <th className="px-4 py-3 text-right font-bold text-gray-500 dark:text-gray-400 uppercase">Nulls</th>
                               </tr>
                             </thead>
                             <tbody>
                               {stats.map((stat, idx) => (
-                                <tr key={idx} className="border-b border-gray-100 dark:border-slate-800/60 hover:bg-gray-50/30 dark:hover:bg-slate-900/40 transition-colors">
-                                  <td className="px-5 py-3 text-sm font-mono font-medium text-gray-800 dark:text-gray-100">{stat.column}</td>
-                                  <td className="px-5 py-3 text-sm text-gray-500 dark:text-gray-400 font-mono text-xs">{stat.type}</td>
-                                  <td className="px-5 py-3 text-sm text-right font-mono">{stat.distinct_count?.toLocaleString() ?? '-'}</td>
-                                  <td className="px-5 py-3 text-sm text-right font-mono text-gray-500">{stat.null_count?.toLocaleString() ?? '-'}</td>
-                                  <td className="px-5 py-3 text-sm text-right font-mono text-blue-600 dark:text-blue-400 truncate max-w-[120px]">{stat.min ?? '-'}</td>
-                                  <td className="px-5 py-3 text-sm text-right font-mono text-purple-600 dark:text-purple-400 truncate max-w-[120px]">{stat.max ?? '-'}</td>
+                                <tr key={idx} className="border-b border-gray-100 dark:border-slate-800/60 transition-colors">
+                                  <td className="px-4 py-2 font-mono font-medium text-gray-800 dark:text-gray-100">{stat.column}</td>
+                                  <td className="px-4 py-2 font-mono text-gray-500 dark:text-gray-400">{stat.type}</td>
+                                  <td className="px-4 py-2 text-right font-mono text-blue-500">{stat.distinct_count?.toLocaleString() ?? '-'}</td>
+                                  <td className="px-4 py-2 text-right font-mono text-amber-500">{stat.null_count?.toLocaleString() ?? '-'}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -358,19 +389,23 @@ export function SchemaBrowser() {
                       ) : (
                         <div className="text-center py-8">
                           <BarChart3 className="h-12 w-12 mx-auto text-gray-300 mb-3" />
-                          <p className="text-gray-500">Click to load column statistics</p>
+                          <p className="text-gray-500">Run statistics to see data distribution</p>
                           <Button
                             variant="outline"
                             size="sm"
                             className="mt-3"
                             onClick={() => fetchStats(selectedTable.name)}
                           >
-                            Load Statistics
+                            Analyze Table Data
                           </Button>
                         </div>
                       )}
                     </CardContent>
                   </Card>
+                </TabsContent>
+
+                <TabsContent value="glossary" className="mt-4">
+                  <MetricsGlossary />
                 </TabsContent>
               </Tabs>
             </div>

@@ -108,6 +108,12 @@ async def refresh_schema(
         result = await SchemaService.refresh_schema_cache(
             connection_name=connection_name
         )
+
+        # Invalidate query result cache on schema refresh
+        try:
+            await redis_client.invalidate_query_cache()
+        except Exception:
+            pass
         
         return RefreshResponse(
             status=result.get("status", "error"),
@@ -137,6 +143,12 @@ async def invalidate_cache() -> Dict[str, Any]:
         logger.info("Invalidating schema cache...")
         
         count = await SchemaService.invalidate_schema_cache()
+
+        # Invalidate query result cache on schema changes
+        try:
+            await redis_client.invalidate_query_cache()
+        except Exception:
+            pass
         
         return {
             "status": "success",
@@ -150,6 +162,48 @@ async def invalidate_cache() -> Dict[str, Any]:
             status_code=500,
             detail=f"Cache invalidation failed: {str(e)}"
         )
+
+
+@router.get("/relationships/{table_name}")
+async def get_relationships(
+    table_name: str,
+    connection_name: Optional[str] = None,
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get foreign key relationships for a table
+    """
+    try:
+        relationships = await SchemaService.get_table_relationships(table_name, connection_name)
+        return {
+            "status": "success",
+            "table_name": table_name,
+            "relationships": relationships
+        }
+    except Exception as e:
+        logger.error(f"Relationship retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/comments/{table_name}")
+async def get_comments(
+    table_name: str,
+    connection_name: Optional[str] = None,
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get column comments for a table
+    """
+    try:
+        comments = await SchemaService.get_column_comments(table_name, connection_name)
+        return {
+            "status": "success",
+            "table_name": table_name,
+            "comments": comments
+        }
+    except Exception as e:
+        logger.error(f"Comments retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/table/{table_name}/stats")
@@ -278,14 +332,19 @@ async def get_table_stats(
                     "error": str(col_err)
                 })
         
-        # 4. Cache Results
         if stats:
             await redis_client.setex(cache_key, 86400, stats)
+        
+        # 4. Integrate metadata enhancements (Comments & Relationships)
+        comments = await SchemaService.get_column_comments(table_name)
+        relationships = await SchemaService.get_table_relationships(table_name)
         
         return {
             "status": "success",
             "table_name": table_name,
             "stats": stats,
+            "comments": comments,
+            "relationships": relationships,
             "source": "database"
         }
         
@@ -294,4 +353,195 @@ async def get_table_stats(
         raise HTTPException(
             status_code=500,
             detail=f"Table stats retrieval failed: {str(e)}"
+        )
+
+
+@router.post("/enrich")
+async def enrich_schema(
+    database_type: str = "oracle",
+    tables: Optional[str] = None,
+    connection_name: Optional[str] = None,
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Enrich schema with AI-generated descriptions and column inferences.
+    
+    **RBAC:** Requires authenticated user
+    **AI-Powered:** Uses LLM to infer column meanings and generate descriptions
+    
+    Args:
+        database_type: Database type (oracle, doris, postgres)
+        tables: Optional comma-separated list of tables to enrich
+        connection_name: Database connection name
+        
+    Returns:
+        Enriched schema with AI-generated metadata
+    """
+    try:
+        logger.info(f"Enriching schema with AI for {database_type}")
+        
+        table_list = [t.strip() for t in tables.split(",")] if tables else None
+        
+        result = await SchemaService.enrich_schema_with_ai(
+            database_type=database_type,
+            table_names=table_list,
+            connection_name=connection_name
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Schema enrichment failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Schema enrichment failed: {str(e)}"
+        )
+
+
+@router.post("/columns/{table}/{column}/metadata")
+async def update_column_metadata(
+    table: str,
+    column: str,
+    description: str,
+    alias: Optional[str] = None,
+    database_type: str = "oracle",
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Update column metadata (description, alias).
+    
+    **RBAC:** Requires admin permission
+    **Persistence:** Stores metadata in Redis cache
+    
+    Args:
+        table: Table name
+        column: Column name
+        description: Human-readable description
+        alias: Optional alias for the column
+        database_type: Database type
+        
+    Returns:
+        Updated metadata
+    """
+    try:
+        # Check admin permission
+        if user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin permission required")
+        
+        from app.services.introspection_service import IntrospectionService
+        
+        result = await IntrospectionService.update_column_metadata(
+            table=table,
+            column=column,
+            description=description,
+            alias=alias,
+            database_type=database_type
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Metadata update failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Metadata update failed: {str(e)}"
+        )
+
+
+@router.get("/columns/{table}/{column}/samples")
+async def get_column_samples(
+    table: str,
+    column: str,
+    limit: int = 10,
+    connection_name: Optional[str] = None,
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get sample values for a column.
+    
+    **RBAC:** Requires authenticated user
+    
+    Args:
+        table: Table name
+        column: Column name
+        limit: Maximum number of samples (default: 10, max: 50)
+        connection_name: Database connection name
+        
+    Returns:
+        Sample values
+    """
+    try:
+        from app.services.introspection_service import IntrospectionService
+        
+        # Cap limit to prevent abuse
+        limit = min(limit, 50)
+        
+        samples = await IntrospectionService.get_sample_values(
+            table=table,
+            column=column,
+            limit=limit,
+            connection_name=connection_name
+        )
+        
+        return {
+            "status": "success",
+            "table": table,
+            "column": column,
+            "samples": samples,
+            "count": len(samples)
+        }
+        
+    except Exception as e:
+        logger.error(f"Sample retrieval failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sample retrieval failed: {str(e)}"
+        )
+
+
+@router.get("/columns/{table}/{column}/suggest-alias")
+async def suggest_column_alias(
+    table: str,
+    column: str,
+    database_type: str = "oracle",
+    connection_name: Optional[str] = None,
+    user: dict = Depends(rbac_manager.get_current_user),
+) -> Dict[str, Any]:
+    """
+    Suggest a human-readable alias for a column.
+    
+    **RBAC:** Requires authenticated user
+    **AI-Powered:** Uses heuristics and sample values to suggest aliases
+    
+    Args:
+        table: Table name
+        column: Column name
+        database_type: Database type
+        connection_name: Database connection name
+        
+    Returns:
+        Suggested alias with reasoning
+    """
+    try:
+        from app.services.introspection_service import IntrospectionService
+        
+        result = await IntrospectionService.suggest_column_alias(
+            table=table,
+            column=column,
+            database_type=database_type,
+            connection_name=connection_name
+        )
+        
+        return {
+            "status": "success",
+            **result
+        }
+        
+    except Exception as e:
+        logger.error(f"Alias suggestion failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Alias suggestion failed: {str(e)}"
         )

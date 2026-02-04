@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Info, Edit, Eye, Table as TableIcon, Database as DatabaseIcon } from 'lucide-react'
+import { AlertTriangle, Info, Edit, Eye, Table as TableIcon, Database as DatabaseIcon, ShieldAlert } from 'lucide-react'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { Badge } from './ui/badge'
@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { MonacoSQLEditor } from './MonacoSQLEditor'
 import { cn } from '@/utils/cn'
 import { apiService } from '@/services/apiService'
+import { RiskExplanationPanel } from './RiskExplanationPanel'
 
 interface HITLApprovalDialogProps {
   open: boolean
@@ -15,9 +16,35 @@ interface HITLApprovalDialogProps {
   query: string
   sql: string
   riskLevel: 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
-  onApprove: (modifiedSQL?: string) => void
+  onApprove: (modifiedSQL?: string, constraints?: { max_rows?: number }) => void
   onReject: () => void
   onModify?: () => void
+  originalSQL?: string
+  riskReasons?: string[]
+  approvalContext?: {
+    risk_level?: string
+    warnings?: string[]
+    requires_approval?: boolean
+    query_type?: string
+    estimated_cost?: number
+    estimated_rows?: number
+    has_full_table_scan?: boolean
+    recommendations?: string[]
+    scope?: {
+      table_count?: number
+      join_count?: number
+      max_tables?: number
+      max_joins?: number
+      warnings?: string[]
+    }
+    cartesian_guard?: boolean
+    force_approval?: boolean
+    intent_source?: string
+    skills_used?: boolean
+    skills_fallback?: boolean
+    skills_fallback_reason?: string
+    hypothesis_confidence?: string
+  }
   metadata?: {
     operationType?: string
     tablesAccessed?: string[]
@@ -28,6 +55,12 @@ interface HITLApprovalDialogProps {
     user?: string
     databaseType?: 'oracle' | 'doris'
   }
+  sqlExplanation?: string
+  queryPlan?: {
+    steps: Array<{ id: string; node: string; status: string; description: string }>
+    estimated_cost?: number
+  }
+  rlsExplanation?: string
 }
 
 const riskColors = {
@@ -47,16 +80,26 @@ export function HITLApprovalDialog({
   onApprove,
   onReject,
   onModify,
-  metadata = {}
+
+  riskReasons,
+  approvalContext,
+  metadata,
+  sqlExplanation,
+  queryPlan,
+  rlsExplanation
 }: HITLApprovalDialogProps) {
   const colors = riskColors[riskLevel]
   const [editedSQL, setEditedSQL] = useState(sql)
-  const [sqlTab, setSqlTab] = useState<'preview' | 'edit'>('preview')
+  const [sqlTab, setSqlTab] = useState<'preview' | 'edit' | 'plan'>('preview')
   const [showSchema, setShowSchema] = useState(false)
   const [showExplainPlan, setShowExplainPlan] = useState(false)
   const [schemaLoading, setSchemaLoading] = useState(false)
   const [schemaError, setSchemaError] = useState<string | null>(null)
   const [schemaTables, setSchemaTables] = useState<Record<string, { name: string; type?: string; nullable?: boolean }[]>>({})
+
+  // Constrained approval state
+  const [applyForcedLimit, setApplyForcedLimit] = useState(false)
+  const [maxRowsConstraint, setMaxRowsConstraint] = useState(100)
 
   // Lazy-load schema when dialog first opens
   useEffect(() => {
@@ -172,17 +215,19 @@ export function HITLApprovalDialog({
     if (!syntaxValidation.valid) {
       return
     }
+    const constraints = applyForcedLimit ? { max_rows: maxRowsConstraint } : undefined;
+
     try {
       if (editedSQL !== sql) {
         if (import.meta.env.DEV) {
-          console.log(' Approving with modified SQL')
+          console.log(' Approving with modified SQL and constraints:', constraints)
         }
-        onApprove(editedSQL)
+        onApprove(editedSQL, constraints)
       } else {
         if (import.meta.env.DEV) {
-          console.log(' Approving original SQL')
+          console.log(' Approving original SQL with constraints:', constraints)
         }
-        onApprove()
+        onApprove(undefined, constraints)
       }
     } catch (err) {
       console.error(' Error in handleApprove:', err)
@@ -190,7 +235,10 @@ export function HITLApprovalDialog({
   }
 
   const isValidSQL = editedSQL.trim().length > 0 && syntaxValidation.valid;
-  const looksLikeSQL = /^(SELECT|WITH|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|MERGE|GRANT|REVOKE)/i.test(editedSQL.trim());
+
+  const scopeWarnings = approvalContext?.scope?.warnings || []
+  const approvalWarnings = approvalContext?.warnings || []
+  const recommendations = approvalContext?.recommendations || []
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -233,85 +281,121 @@ export function HITLApprovalDialog({
 
           {/* Generated SQL - Tabbed View/Edit */}
           <div>
-            <Tabs value={sqlTab} onValueChange={(v) => setSqlTab(v as 'preview' | 'edit')}>
+            <Tabs value={sqlTab} onValueChange={(v) => setSqlTab(v as any)}>
               <div className="flex items-center justify-between mb-2">
-                <div className="text-sm font-semibold text-gray-600">Generated SQL:</div>
+                <div className="text-sm font-semibold text-gray-400">Target SQL:</div>
                 <div className="flex items-center gap-2">
-                  <TabsList className="h-8">
-                    <TabsTrigger value="preview" className="text-xs h-7 px-3">
+                  <TabsList className="h-8 bg-slate-800 border-slate-700">
+                    <TabsTrigger value="preview" className="text-xs h-7 px-3 text-gray-300">
                       <Eye className="h-3 w-3 mr-1" />
                       Preview
                     </TabsTrigger>
-                    <TabsTrigger value="edit" className="text-xs h-7 px-3">
+                    {queryPlan && (
+                      <TabsTrigger value="plan" className="text-xs h-7 px-3 text-gray-300">
+                        <DatabaseIcon className="h-3 w-3 mr-1" />
+                        Plan
+                      </TabsTrigger>
+                    )}
+                    <TabsTrigger value="edit" className="text-xs h-7 px-3 text-gray-300">
                       <Edit className="h-3 w-3 mr-1" />
                       Edit
                     </TabsTrigger>
                   </TabsList>
                   <div className="flex gap-2 text-xs">
                     <button
-                      onClick={() => setShowExplainPlan(true)}
-                      className="text-green-600 hover:underline"
-                    >
-                      View EXPLAIN PLAN
-                    </button>
-                    <button
                       onClick={() => setShowSchema(true)}
-                      className="text-green-600 hover:underline"
+                      className="text-blue-400 hover:text-blue-300 transition-colors"
                     >
-                      View Schema
+                      Browse Schema
                     </button>
                   </div>
                 </div>
               </div>
 
-              <TabsContent value="preview" className="mt-0">
-                <MonacoSQLEditor
-                  value={editedSQL}
-                  readOnly={true}
-                  height="200px"
-                />
+              <TabsContent value="preview" className="mt-0 space-y-3">
+                {sqlExplanation && (
+                  <div className="p-3 bg-blue-900/20 border border-blue-500/30 rounded-lg animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-blue-400 mb-1">
+                      <Info className="h-3.5 w-3.5" />
+                      Business Context
+                    </div>
+                    <p className="text-xs text-blue-100/90 leading-relaxed italic">
+                      "{sqlExplanation}"
+                    </p>
+                  </div>
+                )}
+
+                {rlsExplanation && (
+                  <div className="p-3 bg-indigo-900/20 border border-indigo-500/30 rounded-lg animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-indigo-400 mb-1">
+                      <ShieldAlert className="h-3.5 w-3.5" />
+                      Security Filter Applied
+                    </div>
+                    <p className="text-xs text-indigo-100/90 leading-relaxed">
+                      {rlsExplanation}
+                    </p>
+                  </div>
+                )}
+
+                <div className="relative group border border-slate-700/50 rounded-lg overflow-hidden">
+                  <pre className="bg-slate-950/80 p-4 overflow-x-auto text-[13px] font-mono text-blue-100 max-h-[250px] custom-scrollbar">
+                    <code>{editedSQL}</code>
+                  </pre>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800/80 hover:bg-slate-700"
+                    onClick={() => {
+                      navigator.clipboard.writeText(editedSQL)
+                    }}
+                  >
+                    Copy
+                  </Button>
+                </div>
               </TabsContent>
 
+              {queryPlan && (
+                <TabsContent value="plan" className="mt-0">
+                  <div className="bg-slate-900/60 border border-slate-700 rounded-lg p-4 space-y-4 shadow-inner">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-xs font-semibold text-gray-300 uppercase tracking-widest text-[10px]">Thinking Chain & Tool Usage</div>
+                      <Badge variant="outline" className="text-[10px] text-emerald-400 border-emerald-500/30 font-normal">
+                        {queryPlan.estimated_cost ? `Est. Cost: ${queryPlan.estimated_cost} units` : 'Optimized Logic'}
+                      </Badge>
+                    </div>
+                    <div className="space-y-3">
+                      {queryPlan.steps.map((step, idx) => (
+                        <div key={step.id} className="flex gap-3">
+                          <div className="flex flex-col items-center">
+                            <div className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold ${step.status === 'active' ? "bg-blue-500 text-white shadow-[0_0_10px_rgba(59,130,246,0.5)]" :
+                              step.status === 'completed' ? "bg-emerald-500 text-white" : "bg-slate-700 text-gray-400"
+                              }`}>
+                              {idx + 1}
+                            </div>
+                            {idx < queryPlan.steps.length - 1 && (
+                              <div className="w-0.5 h-6 bg-slate-700 my-1" />
+                            )}
+                          </div>
+                          <div className="pt-0.5">
+                            <div className="text-xs font-medium text-gray-200 capitalize">{step.node.replace(/_/g, ' ')}</div>
+                            <div className="text-[10px] text-gray-500 leading-tight">{step.description}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </TabsContent>
+              )}
+
               <TabsContent value="edit" className="mt-0">
-                <MonacoSQLEditor
-                  value={editedSQL}
-                  onChange={(value) => setEditedSQL(value || '')}
-                  readOnly={false}
-                  height="200px"
-                />
-                {editedSQL !== sql && (
-                  <div className="mt-2 flex items-center gap-2 text-xs text-blue-600">
-                    <Info className="h-3 w-3" />
-                    <span>SQL has been modified. Changes will be applied upon approval.</span>
-                  </div>
-                )}
-                {/* Syntax validation feedback */}
-                {syntaxValidation.errors.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {syntaxValidation.errors.map((error, idx) => (
-                      <div key={idx} className="flex items-center gap-2 text-xs text-red-600">
-                        <AlertTriangle className="h-3 w-3" />
-                        <span>{error}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {syntaxValidation.warnings.length > 0 && (
-                  <div className="mt-1 space-y-1">
-                    {syntaxValidation.warnings.map((warning, idx) => (
-                      <div key={idx} className="flex items-center gap-2 text-xs text-amber-600">
-                        <AlertTriangle className="h-3 w-3" />
-                        <span>{warning}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {!looksLikeSQL && editedSQL.trim().length > 0 && syntaxValidation.errors.length === 0 && (
-                  <div className="mt-1 flex items-center gap-2 text-xs text-amber-600">
-                    <AlertTriangle className="h-3 w-3" />
-                    <span>Warning: SQL query might be invalid (unrecognized start keyword).</span>
-                  </div>
-                )}
+                <div className="border border-slate-700 rounded-lg overflow-hidden h-[300px] shadow-inner">
+                  <MonacoSQLEditor
+                    value={editedSQL}
+                    onChange={(value) => setEditedSQL(value || '')}
+                    readOnly={false}
+
+                  />
+                </div>
               </TabsContent>
             </Tabs>
           </div>
@@ -321,7 +405,7 @@ export function HITLApprovalDialog({
             <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
               <div className="text-[10px] text-gray-500 mb-0.5">Operation</div>
               <div className="font-medium text-xs text-emerald-400">
-                {metadata.operationType || 'SELECT'}
+                {metadata?.operationType || approvalContext?.query_type || 'SELECT'}
               </div>
             </div>
             <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
@@ -333,7 +417,7 @@ export function HITLApprovalDialog({
             <div className="bg-slate-800/60 rounded-lg p-2.5 border border-slate-700/50">
               <div className="text-[10px] text-gray-500 mb-0.5">Est. Time</div>
               <div className="font-medium text-xs text-gray-300">
-                {metadata.estimatedTime || '<0.5s'}
+                {metadata?.estimatedTime || '<0.5s'}
               </div>
             </div>
           </div>
@@ -343,22 +427,22 @@ export function HITLApprovalDialog({
             <div className="flex justify-between">
               <span className="text-gray-500">Tables:</span>
               <span className="font-medium text-gray-300 truncate ml-2">
-                {metadata.tablesAccessed?.join(', ') || 'SALES'}
+                {metadata?.tablesAccessed?.join(', ') || 'SALES'}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-500">Est. Rows:</span>
               <span className="font-medium text-gray-300">
-                ~{metadata.estimatedRows || 10}
+                ~{metadata?.estimatedRows || approvalContext?.estimated_rows || 10}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-500">Classification:</span>
               <span className={cn(
                 "font-medium",
-                metadata.dataClassification === 'Confidential' ? "text-yellow-400" : "text-gray-300"
+                metadata?.dataClassification === 'Confidential' ? "text-yellow-400" : "text-gray-300"
               )}>
-                {metadata.dataClassification || 'Standard'}
+                {metadata?.dataClassification || 'Standard'}
               </span>
             </div>
             <div className="flex justify-between">
@@ -366,6 +450,118 @@ export function HITLApprovalDialog({
               <span className="font-medium text-emerald-400">✓ Passed</span>
             </div>
           </div>
+
+          {/* Scope & Guardrails */}
+          {(scopeWarnings.length > 0 || approvalContext?.cartesian_guard || approvalContext?.force_approval) && (
+            <div className="border border-amber-500/30 rounded-lg p-2.5 bg-amber-900/10">
+              <div className="flex items-center gap-2 text-xs font-semibold text-amber-300 mb-1">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Approval Gate Reasons
+              </div>
+              {approvalContext?.cartesian_guard && (
+                <div className="text-[11px] text-amber-200">Potential Cartesian join detected</div>
+              )}
+              {approvalContext?.force_approval && (
+                <div className="text-[11px] text-amber-200">Scope exceeds role-based limits</div>
+              )}
+              {scopeWarnings.map((warning, idx) => (
+                <div key={idx} className="text-[11px] text-amber-200">{warning}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Generation Signals */}
+          {(approvalContext?.intent_source || approvalContext?.skills_used !== undefined || approvalContext?.skills_fallback || approvalContext?.hypothesis_confidence) && (
+            <div className="border border-slate-700/50 rounded-lg p-2.5 bg-slate-800/40">
+              <div className="text-xs font-semibold text-gray-300 mb-1">Generation Signals</div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Intent Source:</span>
+                  <span className="text-gray-300">{approvalContext?.intent_source || 'unknown'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Skills Used:</span>
+                  <span className={cn("font-medium", approvalContext?.skills_used ? "text-emerald-400" : "text-amber-300")}>
+                    {approvalContext?.skills_used ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Skills Fallback:</span>
+                  <span className={cn("font-medium", approvalContext?.skills_fallback ? "text-amber-300" : "text-gray-300")}>
+                    {approvalContext?.skills_fallback ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Hypothesis:</span>
+                  <span className="text-gray-300">{approvalContext?.hypothesis_confidence || 'n/a'}</span>
+                </div>
+                {approvalContext?.skills_fallback_reason && (
+                  <div className="col-span-2 text-[11px] text-amber-200">
+                    Fallback reason: {approvalContext.skills_fallback_reason}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Risk Explanation Panel */}
+          <RiskExplanationPanel
+            estimatedCost={approvalContext?.estimated_cost}
+            estimatedRows={approvalContext?.estimated_rows || metadata?.estimatedRows}
+            hasFullTableScan={approvalContext?.has_full_table_scan}
+            piiDetected={metadata?.dataClassification === 'Confidential'}
+            joinCount={approvalContext?.scope?.join_count}
+            tableCount={approvalContext?.scope?.table_count}
+            riskReasons={riskReasons || (approvalContext as any)?.risk_reasons}
+            recommendations={recommendations}
+          />
+
+          {/* Constrained Approval Options */}
+          <div className="border border-blue-500/30 rounded-lg p-3 bg-blue-900/10">
+            <div className="flex items-center gap-2 text-xs font-semibold text-blue-300 mb-2">
+              <ShieldAlert className="h-3.5 w-3.5" />
+              Constrained Approval Options
+            </div>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="force-limit"
+                    checked={applyForcedLimit}
+                    onChange={(e) => setApplyForcedLimit(e.target.checked)}
+                    className="rounded bg-slate-800 border-slate-600 text-blue-500 focus:ring-blue-500"
+                  />
+                  <label htmlFor="force-limit" className="text-xs text-gray-300 cursor-pointer">
+                    Apply safety row limit (FORCE LIMIT)
+                  </label>
+                </div>
+                {applyForcedLimit && (
+                  <div className="flex items-center gap-1.3 ml-4">
+                    <input
+                      type="number"
+                      value={maxRowsConstraint}
+                      onChange={(e) => setMaxRowsConstraint(parseInt(e.target.value) || 100)}
+                      className="w-16 h-6 px-1.5 text-xs bg-slate-800 border border-slate-600 rounded text-blue-300 focus:outline-none focus:border-blue-500"
+                    />
+                    <span className="text-[10px] text-gray-500 italic">rows</span>
+                  </div>
+                )}
+              </div>
+              <p className="text-[10px] text-gray-500 leading-tight">
+                Constrained approval allows you to execute high-risk queries with platform-enforced safety guards.
+              </p>
+            </div>
+          </div>
+
+          {approvalWarnings.length > 0 && (
+            <div className="border border-slate-700/50 rounded-lg p-2.5 bg-slate-800/40">
+              <div className="text-xs font-semibold text-gray-300 mb-1">Validation Warnings</div>
+              {approvalWarnings.map((warning, idx) => (
+                <div key={idx} className="text-[11px] text-gray-300">{warning}</div>
+              ))}
+            </div>
+          )}
 
           {/* Audit Trail - More compact */}
           <div className="flex items-center gap-2 p-2 bg-blue-900/20 border border-blue-500/30 rounded-lg">

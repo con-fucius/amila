@@ -99,7 +99,7 @@ class QueryOptimizerService:
     def _has_select_star(self, sql_upper: str) -> bool:
         """Check if query uses SELECT *"""
         # Match SELECT * but not SELECT COUNT(*)
-        return bool(re.search(r'\bSELECT\s+\*\b', sql_upper)) and "COUNT(*)" not in sql_upper
+        return bool(re.search(r'\bSELECT\s+\*\s', sql_upper)) and "COUNT(*)" not in sql_upper
     
     def _check_full_table_scan(
         self,
@@ -147,12 +147,13 @@ class QueryOptimizerService:
         column_patterns = re.findall(r'\b([A-Z_][A-Z0-9_]*)\s*(?:=|IN|<|>|LIKE)', where_clause.upper())
         
         if column_patterns:
+            unique_columns = sorted(set(column_patterns))
             suggestions.append(OptimizationSuggestion(
                 type="index",
                 severity="info",
-                description=f"Consider indexes on WHERE clause columns: {', '.join(set(column_patterns))}",
+                description=f"Consider indexes on WHERE clause columns: {', '.join(unique_columns)}",
                 original_pattern="WHERE clause columns without confirmed indexes",
-                suggested_fix=f"CREATE INDEX idx_name ON table_name({', '.join(set(column_patterns)[:3])})",
+                suggested_fix=f"CREATE INDEX idx_name ON table_name({', '.join(unique_columns[:3])})",
                 estimated_improvement="10-1000x faster for filtered queries"
             ))
         

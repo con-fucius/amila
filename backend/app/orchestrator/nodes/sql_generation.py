@@ -5,6 +5,7 @@ Orchestrator Node: Sql_Generation
 import logging
 import time
 import re
+import hashlib
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -26,7 +27,8 @@ from app.core.config import settings
 from app.core.langfuse_client import log_generation
 from app.services.schema_enrichment_service import SchemaEnrichmentService
 from app.agents.sql_generation_skills import SQLGenerationSkillsOrchestrator
-from app.core.sql_dialect_converter import SQLDialectConverter, convert_sql
+from app.core.sql_dialect_converter import SQLDialectConverter, convert_sql, SQLDialect
+from app.core.redis_client import redis_client
 
 # SSE state management
 try:
@@ -35,6 +37,60 @@ except Exception:
     ExecState = None
 
 logger = logging.getLogger(__name__)
+
+QUERY_FINGERPRINT_PREFIX = "query:fingerprint:"
+QUERY_FINGERPRINT_TTL = 86400 * 30  # 30 days
+MAX_FINGERPRINT_QUERY_LEN = 2000
+ENABLE_COST_AWARE_GENERATION = getattr(settings, "COST_AWARE_GENERATION_ENABLED", True)
+
+
+def _sanitize_llm_sql_response(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    fenced = re.search(r"```(?:sql)?\s*(.*?)```", cleaned, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    cleaned = re.sub(r"^\s*SQL\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    lines = cleaned.splitlines()
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*(WITH|SELECT|INSERT|UPDATE|DELETE|--)", line, re.IGNORECASE):
+            start_idx = i
+            break
+    cleaned = "\n".join(lines[start_idx:]).strip()
+    cleaned = cleaned.replace("```", "").strip()
+    return cleaned
+
+
+def _normalize_query_for_fingerprint(text: str) -> str:
+    if not text:
+        return ""
+    lowered = text.lower()
+    lowered = re.sub(r"\b\d+\b", "?", lowered)
+    lowered = re.sub(r"[^\w\s\?]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered[:MAX_FINGERPRINT_QUERY_LEN]
+
+
+def _compute_schema_fingerprint(schema_metadata: dict) -> str:
+    tables = schema_metadata.get("tables", {}) if isinstance(schema_metadata, dict) else {}
+    views = schema_metadata.get("views", {}) if isinstance(schema_metadata, dict) else {}
+    table_parts = []
+    for name, cols in tables.items():
+        table_parts.append(f"{name}:{len(cols) if isinstance(cols, list) else 0}")
+    for name, cols in views.items():
+        table_parts.append(f"{name}:{len(cols) if isinstance(cols, list) else 0}")
+    raw = "|".join(sorted(table_parts))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16] if raw else "no_schema"
+
+
+def _fingerprint_key(user_query: str, intent: str, db_type: str, schema_fp: str) -> str:
+    normalized = _normalize_query_for_fingerprint(user_query)
+    intent_norm = _normalize_query_for_fingerprint(intent)
+    content = f"{db_type}:{schema_fp}:{normalized}:{intent_norm}"
+    fp = hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
+    return f"{QUERY_FINGERPRINT_PREFIX}{fp}"
 
 
 async def generate_sql_node(state: QueryState) -> QueryState:
@@ -120,6 +176,14 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
     logger.info(f"Generating SQL query using Skills orchestrator...")
     
     db_type = (state.get("database_type") or "oracle").lower()
+    try:
+        from app.services.role_based_limits_service import RoleBasedLimitsService
+        role_limits = RoleBasedLimitsService.get_role_limits(state.get("user_role", "viewer"))
+        max_tables = role_limits.max_tables
+        max_joins = role_limits.max_joins
+    except Exception:
+        max_tables = 0
+        max_joins = 0
     
     # Define limit syntax based on database type
     if db_type in ["postgres", "postgresql", "doris"]:
@@ -191,6 +255,35 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
             logger.error(f"Failed to refresh schema metadata during SQL generation: %s", refresh_err, exc_info=True)
             span["output"]["schema_refresh_error"] = str(refresh_err)
 
+    # ========== QUERY REUSE (fingerprint cache) ==========
+    try:
+        schema_fp = _compute_schema_fingerprint(schema_metadata or {})
+        cache_key = _fingerprint_key(
+            state.get("user_query", ""),
+            state.get("intent", ""),
+            db_type,
+            schema_fp
+        )
+        cached = await redis_client.get(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("sql_query"):
+            state["sql_query"] = cached.get("sql_query", "")
+            state["sql_confidence"] = int(cached.get("sql_confidence", 95))
+            state["sql_reused"] = True
+            state["next_action"] = "validate"
+            state["llm_metadata"] = {
+                "provider": "cache",
+                "model": "fingerprint_cache",
+                "generated_successfully": True,
+                "generation_timestamp": datetime.now(timezone.utc).isoformat(),
+                "sql_length": len(state["sql_query"]),
+                "cache_key": cache_key,
+            }
+            span["output"]["sql_reused"] = True
+            span["output"]["cache_key"] = cache_key
+            return state
+    except Exception as cache_err:
+        logger.warning(f"Query reuse lookup failed (non-fatal): {cache_err}")
+
     # ========== SKILLS-BASED SQL GENERATION (feature-flagged) ==========
     # Use Skills orchestrator to systematically map user concepts, unless disabled
     enhanced_prompt = None
@@ -257,6 +350,7 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
             column_mappings = skills_result.get("column_mappings", [])
             
             logger.info(f"Skills orchestrator validated {len(column_mappings)} column mappings")
+            state["skills_used"] = True
             span["output"].update({
                 "clarification_needed": False,
                 "column_mappings": len(column_mappings),
@@ -312,6 +406,13 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
         except Exception as e:
             logger.error(f"Skills orchestrator failed: {e}")
             span["output"]["skills_error"] = str(e)
+            state["skills_used"] = False
+            state["skills_fallback"] = True
+            state["skills_fallback_reason"] = str(e)
+            state.setdefault("warnings", []).append({
+                "stage": "generate_sql",
+                "message": f"Skills fallback activated: {str(e)}"
+            })
             # Fallback to legacy prompt approach
             logger.warning(f"Falling back to legacy SQL generation approach")
             enhanced_prompt = None
@@ -321,6 +422,8 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
         enhanced_prompt = None
         column_mappings = []
         span["output"]["skills_disabled"] = True
+        state["skills_used"] = False
+        state["skills_disabled"] = True
     
     # ========== HYBRID APPROACH: SKILLS + LEGACY ==========
     # Skills orchestrator ENHANCES the legacy prompt with validated column mappings
@@ -496,7 +599,7 @@ async def _generate_sql_node_inner(state: QueryState, span: dict) -> QueryState:
         # Critical: No schema available - cannot generate accurate SQL
         logger.error(f"CRITICAL: No schema metadata available! Agent cannot generate valid SQL.")
         schema_context = """
- WARNING: Schema metadata not available!
+Schema metadata not available!
 
 To fix this issue:
 1. Call POST /api/v1/schema/refresh to discover your database schema
@@ -515,6 +618,22 @@ Without schema metadata, SQL generation will fail.
             for idx, query in enumerate(similar_queries[:3], 1):
                 context_section += f"{idx}. {query['name']} (created: {query['created_at']})\n"
             context_section += "\nUse these patterns to inform your SQL generation.\n"
+
+    # Hypothesis constraints (structured plan)
+    hypothesis_section = ""
+    hypothesis_structured = state.get("hypothesis_structured") if isinstance(state.get("hypothesis_structured"), dict) else {}
+    if hypothesis_structured:
+        hypothesis_section = "\n\n HYPOTHESIS CONSTRAINTS (must be respected):\n"
+        hypothesis_section += "=" * 60 + "\n"
+        hypothesis_section += f"Main table: {hypothesis_structured.get('main_table')}\n"
+        hypothesis_section += f"Additional tables: {', '.join(hypothesis_structured.get('additional_tables') or [])}\n"
+        hypothesis_section += f"Filters: {', '.join(hypothesis_structured.get('filters') or [])}\n"
+        hypothesis_section += f"Aggregations: {', '.join(hypothesis_structured.get('aggregations') or [])}\n"
+        hypothesis_section += f"Group by: {', '.join(hypothesis_structured.get('group_by') or [])}\n"
+        hypothesis_section += f"Order by: {', '.join(hypothesis_structured.get('order_by') or [])}\n"
+        hypothesis_section += f"Limit: {hypothesis_structured.get('limit') if hypothesis_structured.get('limit') is not None else 'none'}\n"
+        hypothesis_section += f"Grain: {hypothesis_structured.get('grain')}\n"
+        hypothesis_section += "=" * 60 + "\n"
     
     # Add sample data context (NEW FEATURE - helps with column inference)
     sample_data_section = ""
@@ -549,6 +668,25 @@ Without schema metadata, SQL generation will fail.
                     relationship_section += f"    JOIN hint: {join_hint}\n"
             relationship_section += "=" * 60 + "\n"
             relationship_section += " Use these relationships to construct proper JOINs.\n"
+
+    join_paths_section = ""
+    if state.get("context"):
+        join_paths = state["context"].get("join_paths", [])
+        if join_paths:
+            join_paths_section = "\n\n RANKED JOIN PATHS (preferred order):\n"
+            join_paths_section += "=" * 60 + "\n"
+            for path in join_paths[:5]:
+                from_table = path.get("from_table")
+                to_table = path.get("to_table")
+                join_paths_section += f"Path {from_table} -> {to_table} (hops={path.get('hops')}):\n"
+                for edge in path.get("path", []):
+                    hint = edge.get("join_hint", "")
+                    join_paths_section += f"  - {edge.get('from')} -> {edge.get('to')} ({edge.get('type')})"
+                    if hint:
+                        join_paths_section += f" :: {hint}"
+                    join_paths_section += "\n"
+            join_paths_section += "=" * 60 + "\n"
+            join_paths_section += " Prefer these join paths unless user explicitly requests another.\n"
     
     # Derived column hints (e.g., QUARTER from DATE)
     derived_hints_section = ""
@@ -587,6 +725,33 @@ Without schema metadata, SQL generation will fail.
             logger.info(f"Injected {len(relevant_corrections)} learned corrections into prompt")
     except Exception as e:
         logger.warning(f"Failed to retrieve learned corrections: {e}")
+    
+    # Metrics Layer - suggest relevant business metrics
+    metrics_section = ""
+    try:
+        from app.services.metrics_layer_service import suggest_metrics_for_query
+        
+        metric_suggestions = await suggest_metrics_for_query(state["user_query"])
+        
+        if metric_suggestions:
+            metrics_section = "\n\n" + "="*80 + "\n"
+            metrics_section += " CANONICAL BUSINESS METRICS AVAILABLE\n"
+            metrics_section += "="*80 + "\n\n"
+            metrics_section += "The following canonical metrics may be relevant to this query:\n\n"
+            
+            for i, metric in enumerate(metric_suggestions[:3], 1):
+                metrics_section += f"{i}. {metric['display_name']} (relevance: {metric['relevance_score']:.0%})\n"
+                metrics_section += f"   Definition: {metric['description']}\n"
+                metrics_section += f"   SQL Template: {metric['sql_template']}\n\n"
+            
+            metrics_section += "="*80 + "\n"
+            metrics_section += " Consider using these metric definitions for consistency.\n"
+            metrics_section += "="*80 + "\n"
+            
+            logger.info(f"Injected {len(metric_suggestions)} metric suggestions into prompt")
+            span["output"]["metric_suggestions_count"] = len(metric_suggestions)
+    except Exception as e:
+        logger.warning(f"Failed to retrieve metric suggestions: {e}")
     
     # Few-shot example for QoQ growth and outlier flagging (GENERIC - use placeholder names)
     example_sql = """
@@ -640,6 +805,11 @@ ORDER BY m.<DIMENSION_COL>, m.QUARTER_START
    - Type casting: column::TYPE or CAST(column AS TYPE)
    - Array operations: ARRAY[...], ANY(), ALL()
    - JSON operations: ->, ->>, @>, etc.
+   - **CRITICAL: PostgreSQL is case-sensitive for identifiers!**
+     - Table names and column names are LOWERCASE by default
+     - If schema shows uppercase names (TEST_TABLE), use lowercase in SQL (test_table)
+     - Only use quotes if the identifier has mixed case or special characters
+     - Example: Schema shows "TEST_AGG_EBU_IFRS_DAY" -> Use "test_agg_ebu_ifrs_day" in SQL
 """
         db_name = "PostgreSQL"
     elif db_type == "doris":
@@ -661,12 +831,24 @@ ORDER BY m.<DIMENSION_COL>, m.QUARTER_START
    - Reserved words MUST be quoted: "DATE", "USER", etc.
 """
         db_name = "Oracle"
+
+    scope_section = ""
+    if max_tables or max_joins:
+        scope_section = "\n\n QUERY SCOPE CONSTRAINTS:\n"
+        scope_section += "=" * 60 + "\n"
+        if max_tables:
+            scope_section += f" - Maximum tables: {max_tables}\n"
+        if max_joins:
+            scope_section += f" - Maximum joins: {max_joins}\n"
+        scope_section += " Do not exceed these limits unless the user explicitly requests.\n"
+        scope_section += "=" * 60 + "\n"
     
     system_prompt = f"""You are an expert {db_name} SQL query generator specialized in accurate schema mapping.
 Database Type: {db_name}
+Dialect Constraint: Generate SQL ONLY in {db_name} dialect. Do not output other dialects.
 
 {column_mapping_enhancement}
-{schema_context}{context_section}{sample_data_section}{relationship_section}{derived_hints_section}{corrections_section}
+{schema_context}{context_section}{hypothesis_section}{sample_data_section}{relationship_section}{join_paths_section}{derived_hints_section}{corrections_section}{metrics_section}{scope_section}
 
 EXAMPLE QUERY TEMPLATE (adjust to actual columns):
 ```sql
@@ -686,11 +868,16 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
    - Reserved words (DATE, USER, etc.) MUST be quoted
    - For simple "show rows" queries, prefer SELECT * over listing all columns
    
-   **Examples:**
-    CORRECT: SELECT * FROM CUSTOMER_DATA {limit_syntax_5}
+    **Examples:**
+     CORRECT: SELECT * FROM CUSTOMER_DATA {limit_syntax_5}
     CORRECT: SELECT "DATE", "month", PRODUCT FROM CUSTOMER_DATA
     WRONG: SELECT DATE, month FROM CUSTOMER_DATA (missing quotes)
     WRONG: SELECT day, MONTH_NAME FROM REF_DATE (wrong column names)
+
+1b. **JOIN SAFETY (NO CARTESIAN PRODUCTS)**
+   - Every JOIN must include ON or USING predicates
+   - Do NOT use CROSS JOIN unless explicitly requested
+   - Avoid comma joins (FROM a, b) without predicates
 
 2. **COLUMN MAPPING STRATEGY (STRICT VALIDATION REQUIRED)**
    
@@ -779,6 +966,18 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
       - No specific count mentioned -> {limit_syntax_100} (default preview)
       - Large result sets -> {limit_syntax_1000} (max limit)
       - **NEVER use ROWNUM for limiting - use {limit_syntax_n} syntax**
+    
+    **CRITICAL: MULTIPLE TABLES HANDLING**
+      - **NEVER generate multiple SELECT statements in one query!**
+      - If user asks for "all tables" or "multiple tables", you MUST:
+        1. Pick the MOST RELEVANT table based on the query intent
+        2. Generate a SINGLE SELECT statement for that table only
+        3. Add a comment explaining which table was chosen and why
+      - Example: User asks "show first 5 rows of all tables"
+        WRONG: SELECT * FROM table1 LIMIT 5; SELECT * FROM table2 LIMIT 5;
+        CORRECT: SELECT * FROM most_relevant_table LIMIT 5;
+                 -- Note: Showing most_relevant_table as it contains the primary data
+      - If truly ambiguous, request clarification about which specific table to query
 
 8. **IF COLUMN/VALUE NOT FOUND - REQUEST CLARIFICATION**
    
@@ -821,7 +1020,9 @@ EXAMPLE QUERY TEMPLATE (adjust to actual columns):
 
 
 
-Generate ONLY the SQL query OR clarification request. No explanations.
+Output format:
+ - Return SQL only. No markdown, no code fences, no explanations.
+ - If clarification is required, return ONLY the clarification comment block.
 
 Do not request clarification solely because a metric name is not a physical column. If the metric can be expressed using available columns (e.g., quarter_over_quarter_growth), compute it with SQL expressions/window functions and alias it with the requested name.
 """
@@ -843,72 +1044,53 @@ Do not request clarification solely because a metric name is not a physical colu
         logger.info(f"Calling LLM: {llm_provider}/{llm_model}")
         
         response = await llm.ainvoke(messages)
-        sql_query = response.content.strip()
+        sql_query = _sanitize_llm_sql_response(response.content)
         span["output"].update({
             "llm_provider": llm_provider,
             "llm_model": llm_model,
         })
 
-        # DEBUG: Log raw LLM response
         logger.info(f"LLM raw response length: {len(sql_query)} chars")
         logger.debug(f"LLM raw response (first 200 chars): {sql_query[:200]}")
 
-        
-        # Clean up SQL (remove markdown code blocks if present)
-        if sql_query.startswith("```"):
-            sql_query = sql_query.split("\n", 1)[1].rsplit("\n```", 1)[0].strip()
-            logger.debug(f"Cleaned SQL (removed markdown blocks): {sql_query[:200]}")
+        if not sql_query:
+            raise ValueError("LLM returned empty SQL output")
 
-        # Enhanced dialect normalization using comprehensive SQL dialect converter
-        if db_type == "doris":
-            original_sql = sql_query
-            conversion_result = convert_sql(
-                sql=sql_query,
-                from_dialect="oracle",
-                to_dialect="doris",
-                strict=False
-            )
-            
-            if conversion_result.success:
-                sql_query = conversion_result.sql
-                if sql_query != original_sql:
-                    logger.info(f"Converted SQL to Doris dialect using sqlglot")
-                    logger.debug(f"Conversion warnings: {conversion_result.warnings}")
-                    logger.debug(f"Unsupported features: {conversion_result.unsupported_features}")
-                    span["output"]["sql_dialect_conversion"] = {
-                        "from": "oracle",
-                        "to": "doris",
-                        "warnings": conversion_result.warnings,
-                        "unsupported_features": conversion_result.unsupported_features
-                    }
+        # Dialect validation and fallback conversion (only if needed)
+        try:
+            dialect_enum = SQLDialect.ORACLE
+            if db_type in ["postgres", "postgresql"]:
+                dialect_enum = SQLDialect.POSTGRES
+            elif db_type == "doris":
+                dialect_enum = SQLDialect.DORIS
+
+            validation_result = SQLDialectConverter.validate_for_dialect(sql_query, dialect_enum)
+            if not validation_result.success and db_type in ["doris", "postgres", "postgresql"]:
+                original_sql = sql_query
+                conversion_result = convert_sql(
+                    sql=sql_query,
+                    from_dialect="oracle",
+                    to_dialect="postgres" if db_type in ["postgres", "postgresql"] else "doris",
+                    strict=False
+                )
+                if conversion_result.success:
+                    sql_query = conversion_result.sql
+                    if sql_query != original_sql:
+                        logger.info(f"Converted SQL to {db_type} dialect after validation failure")
+                        span["output"]["sql_dialect_conversion"] = {
+                            "from": "oracle",
+                            "to": db_type,
+                            "warnings": conversion_result.warnings,
+                            "unsupported_features": conversion_result.unsupported_features
+                        }
+                else:
+                    logger.warning(f"SQL dialect conversion failed: {conversion_result.errors}")
+                    span["output"]["sql_dialect_conversion_error"] = conversion_result.errors
             else:
-                logger.warning(f"SQL dialect conversion failed: {conversion_result.errors}")
-                span["output"]["sql_dialect_conversion_error"] = conversion_result.errors
-        
-        elif db_type in ["postgres", "postgresql"]:
-            original_sql = sql_query
-            conversion_result = convert_sql(
-                sql=sql_query,
-                from_dialect="oracle",
-                to_dialect="postgres",
-                strict=False
-            )
-            
-            if conversion_result.success:
-                sql_query = conversion_result.sql
-                if sql_query != original_sql:
-                    logger.info(f"Converted SQL to PostgreSQL dialect using sqlglot")
-                    logger.debug(f"Conversion warnings: {conversion_result.warnings}")
-                    logger.debug(f"Unsupported features: {conversion_result.unsupported_features}")
-                    span["output"]["sql_dialect_conversion"] = {
-                        "from": "oracle",
-                        "to": "postgres",
-                        "warnings": conversion_result.warnings,
-                        "unsupported_features": conversion_result.unsupported_features
-                    }
-            else:
-                logger.warning(f"SQL dialect conversion failed: {conversion_result.errors}")
-                span["output"]["sql_dialect_conversion_error"] = conversion_result.errors
+                span["output"]["sql_dialect_validation"] = "passed"
+        except Exception as dialect_err:
+            logger.warning(f"Dialect validation failed (non-fatal): {dialect_err}")
+            span["output"]["sql_dialect_validation_error"] = str(dialect_err)
 
         # ========== ERROR MESSAGE DETECTION ==========
         # Check if LLM returned an error message instead of SQL
@@ -959,6 +1141,71 @@ Do not request clarification solely because a metric name is not a physical colu
             sql_query = re.sub(r'--\s*CONFIDENCE:.*$', '', sql_query, flags=re.MULTILINE).strip()
         span["output"]["sql_confidence"] = confidence_score
 
+        # Cost-aware optimization (pre-validation, optional)
+        user_role = (state.get("user_role") or "viewer").lower()
+        if ENABLE_COST_AWARE_GENERATION and not state.get("sql_reused") and user_role != "viewer" and len(sql_query) < 5000:
+            try:
+                from app.services.query_cost_estimator import QueryCostEstimator, CostLevel
+                db_type_for_cost = (state.get("database_type") or "oracle").lower()
+                pre_cost = await QueryCostEstimator.estimate_query_cost(
+                    sql_query=sql_query,
+                    connection_name=settings.oracle_default_connection if db_type_for_cost == "oracle" else None,
+                    database_type=db_type_for_cost,
+                    include_plan=False,
+                )
+
+                state["cost_estimate_pre"] = {
+                    "total_cost": pre_cost.total_cost,
+                    "cardinality": pre_cost.cardinality,
+                    "cost_level": pre_cost.cost_level.value,
+                    "has_full_table_scan": pre_cost.has_full_table_scan,
+                    "warnings": pre_cost.warnings,
+                    "recommendations": pre_cost.recommendations,
+                }
+                span["output"]["cost_estimate_pre"] = state["cost_estimate_pre"]
+
+                should_optimize = (
+                    pre_cost.cost_level in [CostLevel.HIGH, CostLevel.CRITICAL]
+                    or pre_cost.has_full_table_scan
+                )
+
+                if should_optimize and pre_cost.recommendations:
+                    llm_opt = get_llm()
+                    if llm_opt:
+                        optimize_prompt = f"""You are a SQL performance optimizer for {db_type_for_cost}.
+Preserve the query's semantics and result set. Do NOT add or remove filters, limits, or grouping unless explicitly requested by the user.
+Use index-friendly patterns and avoid full table scans when possible.
+If helpful, add optimizer hints supported by {db_type_for_cost} WITHOUT changing results.
+Return only the optimized SQL. Do not include explanations.
+
+User Query:
+{state.get('user_query', '')}
+
+Current SQL:
+{sql_query}
+
+Cost Warnings:
+{'; '.join(pre_cost.warnings[:5])}
+
+Recommendations:
+{'; '.join(pre_cost.recommendations[:5])}
+"""
+                        opt_resp = await llm_opt.ainvoke([
+                            SystemMessage(content="Optimize SQL for performance without changing semantics."),
+                            HumanMessage(content=optimize_prompt)
+                        ])
+                        optimized = _sanitize_llm_sql_response(
+                            opt_resp.content if hasattr(opt_resp, "content") else str(opt_resp)
+                        )
+                        if optimized and optimized != sql_query:
+                            sql_query = optimized
+                            state["cost_optimized"] = True
+                            span["output"]["cost_optimized"] = True
+                        else:
+                            state["cost_optimized"] = False
+            except Exception as cost_opt_err:
+                logger.warning(f"Cost-aware optimization skipped: {cost_opt_err}")
+
         # Store confidence in state for potential clarification routing
         state["sql_confidence"] = confidence_score
 
@@ -972,6 +1219,72 @@ Do not request clarification solely because a metric name is not a physical colu
         except Exception as norm_err:
             logger.warning(f"Identifier normalization skipped due to error: {norm_err}")
             span["output"]["identifier_normalization_error"] = str(norm_err)
+        
+        # CRITICAL: Enforce single statement rule - split and take only first statement
+        # This is a safety net in case LLM ignores the prompt instructions
+        if ';' in sql_query.strip():
+            statements = [s.strip() for s in sql_query.split(';') if s.strip()]
+            if len(statements) > 1:
+                logger.warning(f"LLM generated {len(statements)} statements, enforcing single statement rule")
+                logger.warning(f"  Original: {sql_query[:200]}...")
+                sql_query = statements[0]  # Take only the first statement
+                logger.info(f"  Enforced: {sql_query[:200]}...")
+                span["output"]["multiple_statements_prevented"] = True
+                span["output"]["original_statement_count"] = len(statements)
+        
+        # PostgreSQL-specific normalization: lowercase table and column names
+        if db_type in ["postgres", "postgresql"]:
+            try:
+                # Simple regex-based approach to lowercase identifiers for PostgreSQL
+                # PostgreSQL treats unquoted identifiers as lowercase
+                import re
+                
+                def normalize_postgres_sql(sql_text):
+                    """Convert uppercase table/column names to lowercase for PostgreSQL using regex"""
+                    # Split by semicolons to handle multiple statements (though we should prevent this)
+                    statements = sql_text.split(';')
+                    normalized_statements = []
+                    
+                    for stmt in statements:
+                        if not stmt.strip():
+                            continue
+                            
+                        # Pattern to match table names after FROM, JOIN, INTO, UPDATE
+                        # This matches: FROM table_name, JOIN table_name, INTO table_name, UPDATE table_name
+                        stmt = re.sub(
+                            r'\b(FROM|JOIN|INTO|UPDATE)\s+([A-Z_][A-Z0-9_]*)\b',
+                            lambda m: f"{m.group(1)} {m.group(2).lower()}",
+                            stmt,
+                            flags=re.IGNORECASE
+                        )
+                        
+                        # Pattern to match column names (more conservative - only in SELECT clause)
+                        # Match: SELECT column_name or SELECT table.column_name
+                        stmt = re.sub(
+                            r'\bSELECT\s+([A-Z_][A-Z0-9_]*(?:\s*,\s*[A-Z_][A-Z0-9_]*)*)',
+                            lambda m: f"SELECT {m.group(1).lower()}",
+                            stmt,
+                            flags=re.IGNORECASE
+                        )
+                        
+                        normalized_statements.append(stmt)
+                    
+                    # CRITICAL: Only return the FIRST statement if multiple were generated
+                    # This prevents the "multiple statements" error
+                    if len(normalized_statements) > 1:
+                        logger.warning(f"Multiple SQL statements detected ({len(normalized_statements)}), using only the first one")
+                        return normalized_statements[0].strip()
+                    
+                    return ';'.join(normalized_statements).strip()
+                
+                normalized_pg_sql = normalize_postgres_sql(sql_query)
+                if normalized_pg_sql != sql_query:
+                    logger.info(f"Normalized PostgreSQL SQL: {len(sql_query)} -> {len(normalized_pg_sql)} chars")
+                    sql_query = normalized_pg_sql
+                    span["output"]["postgres_identifiers_normalized"] = True
+            except Exception as pg_norm_err:
+                logger.warning(f"PostgreSQL identifier normalization failed (non-fatal): {pg_norm_err}")
+                span["output"]["postgres_normalization_error"] = str(pg_norm_err)
 
         # ========== COLUMN NAME VALIDATION - CATCH INVENTED COLUMNS ==========
         # Extract all column references from SQL and validate against schema
@@ -1101,16 +1414,28 @@ Do not request clarification solely because a metric name is not a physical colu
                 logger.warning(f"Column validation failed: {e}")
         
         # Low confidence threshold - request clarification
+        # Fix 3: Increased threshold from 30% to 70% as per requirements
+        # If confidence < 70%, auto-trigger clarification instead of execution
+        CONFIDENCE_THRESHOLD = 70  # 70% confidence required for auto-execution
         should_request_clarification = False
-        if confidence_score < 30:
-            logger.warning(f"Low confidence ({confidence_score}%) - requesting clarification")
+        
+        if confidence_score < CONFIDENCE_THRESHOLD:
+            logger.warning(f"Low confidence ({confidence_score}%) below threshold ({CONFIDENCE_THRESHOLD}%) - requesting clarification")
             state["needs_approval"] = False  # FIXED: Clarification does NOT need approval
             state["next_action"] = "request_clarification"
+            state["clarification_reason"] = f"SQL generation confidence ({confidence_score}%) is below the threshold ({CONFIDENCE_THRESHOLD}%). Please review or rephrase your query for better accuracy."
             should_request_clarification = True
             span["output"].update({
                 "low_confidence": confidence_score,
-                "llm_status": "low_confidence",
+                "confidence_threshold": CONFIDENCE_THRESHOLD,
+                "llm_status": "low_confidence_clarification",
+                "clarification_triggered": True
             })
+            
+            # Add clarification message to state
+            state["messages"].append(AIMessage(
+                content=f" The generated SQL has low confidence ({confidence_score}%). I'm not certain about the column mappings. Could you clarify which columns you'd like to see?"
+            ))
 
         # Analyze query for optimization opportunities (NEW FEATURE)
         try:
@@ -1229,6 +1554,30 @@ Do not request clarification solely because a metric name is not a physical colu
             "sql_length": len(sql_query),
             "token_usage": token_usage,
         }
+
+        # Store query fingerprint cache for reuse
+        try:
+            schema_fp = _compute_schema_fingerprint(schema_metadata or {})
+            cache_key = _fingerprint_key(
+                state.get("user_query", ""),
+                state.get("intent", ""),
+                db_type,
+                schema_fp
+            )
+            existing = await redis_client.get(cache_key)
+            usage_count = 1
+            if isinstance(existing, dict):
+                usage_count = int(existing.get("usage_count", 0)) + 1
+            await redis_client.set(cache_key, {
+                "sql_query": sql_query,
+                "sql_confidence": confidence_score,
+                "database_type": db_type,
+                "schema_fingerprint": schema_fp,
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "usage_count": usage_count,
+            }, ttl=QUERY_FINGERPRINT_TTL)
+        except Exception as cache_err:
+            logger.warning(f"Query reuse cache update failed (non-fatal): {cache_err}")
         span["output"].update({
             "sql_length": len(sql_query),
             "token_usage": token_usage,

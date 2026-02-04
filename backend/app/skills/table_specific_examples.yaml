@@ -1,0 +1,320 @@
+# Table-Specific SQL Examples for Few-Shot Learning
+# These examples provide validated SQL patterns for common tables
+
+# Generic patterns that can be applied across tables
+generic_patterns:
+  - name: "select_all_with_limit"
+    description: "Basic select with row limit"
+    pattern: "SELECT * FROM {table} FETCH FIRST {limit} ROWS ONLY"
+    use_for: ["exploratory", "preview"]
+    
+  - name: "count_all"
+    description: "Count total rows in table"
+    pattern: "SELECT COUNT(*) as total_count FROM {table}"
+    use_for: ["aggregation", "metadata"]
+    
+  - name: "select_with_date_filter"
+    description: "Filter by date range"
+    pattern: "SELECT * FROM {table} WHERE {date_column} >= :start_date AND {date_column} <= :end_date"
+    use_for: ["filtered", "time-series"]
+    
+  - name: "aggregation_by_category"
+    description: "Group by category with aggregation"
+    pattern: |
+      SELECT {category_column}, 
+             COUNT(*) as count,
+             SUM({amount_column}) as total,
+             AVG({amount_column}) as average
+      FROM {table}
+      GROUP BY {category_column}
+      ORDER BY total DESC
+    use_for: ["aggregation", "grouped"]
+
+# Sales/Orders Tables
+sales_tables:
+  patterns:
+    - name: "monthly_sales_summary"
+      description: "Monthly sales totals"
+      sql: |
+        SELECT 
+          TO_CHAR(order_date, 'YYYY-MM') as month,
+          COUNT(*) as order_count,
+          SUM(order_total) as total_revenue,
+          AVG(order_total) as avg_order_value
+        FROM sales_orders
+        WHERE order_date >= ADD_MONTHS(SYSDATE, -12)
+        GROUP BY TO_CHAR(order_date, 'YYYY-MM')
+        ORDER BY month DESC
+      common_columns: ["order_date", "order_total", "customer_id"]
+      
+    - name: "top_customers"
+      description: "Top customers by revenue"
+      sql: |
+        SELECT 
+          customer_id,
+          customer_name,
+          SUM(order_total) as total_revenue,
+          COUNT(*) as order_count
+        FROM sales_orders
+        WHERE order_date >= ADD_MONTHS(SYSDATE, -6)
+        GROUP BY customer_id, customer_name
+        ORDER BY total_revenue DESC
+        FETCH FIRST 20 ROWS ONLY
+      common_columns: ["customer_id", "customer_name", "order_total"]
+      
+    - name: "sales_by_product"
+      description: "Sales aggregated by product"
+      sql: |
+        SELECT 
+          product_id,
+          product_name,
+          SUM(quantity) as units_sold,
+          SUM(line_total) as total_revenue
+        FROM sales_order_lines
+        WHERE created_date >= :start_date
+        GROUP BY product_id, product_name
+        ORDER BY total_revenue DESC
+      common_columns: ["product_id", "product_name", "quantity", "line_total"]
+
+# Customer Tables
+customer_tables:
+  patterns:
+    - name: "customer_segmentation"
+      description: "Segment customers by value"
+      sql: |
+        SELECT 
+          CASE 
+            WHEN lifetime_value >= 10000 THEN 'VIP'
+            WHEN lifetime_value >= 1000 THEN 'High Value'
+            WHEN lifetime_value >= 100 THEN 'Medium Value'
+            ELSE 'Low Value'
+          END as segment,
+          COUNT(*) as customer_count,
+          AVG(lifetime_value) as avg_value
+        FROM customers
+        GROUP BY 
+          CASE 
+            WHEN lifetime_value >= 10000 THEN 'VIP'
+            WHEN lifetime_value >= 1000 THEN 'High Value'
+            WHEN lifetime_value >= 100 THEN 'Medium Value'
+            ELSE 'Low Value'
+          END
+        ORDER BY avg_value DESC
+      common_columns: ["lifetime_value", "customer_id"]
+      
+    - name: "recent_customers"
+      description: "Recently acquired customers"
+      sql: |
+        SELECT 
+          customer_id,
+          customer_name,
+          email,
+          created_date,
+          city,
+          state
+        FROM customers
+        WHERE created_date >= ADD_MONTHS(SYSDATE, -3)
+        ORDER BY created_date DESC
+      common_columns: ["customer_id", "customer_name", "created_date", "email"]
+
+# Product/Inventory Tables
+product_tables:
+  patterns:
+    - name: "inventory_status"
+      description: "Current inventory levels"
+      sql: |
+        SELECT 
+          product_id,
+          product_name,
+          quantity_on_hand,
+          reorder_point,
+          CASE 
+            WHEN quantity_on_hand <= reorder_point THEN 'REORDER'
+            WHEN quantity_on_hand <= reorder_point * 1.5 THEN 'LOW'
+            ELSE 'OK'
+          END as stock_status
+        FROM products
+        ORDER BY quantity_on_hand / NULLIF(reorder_point, 0) ASC
+      common_columns: ["product_id", "quantity_on_hand", "reorder_point"]
+      
+    - name: "product_performance"
+      description: "Product sales performance"
+      sql: |
+        SELECT 
+          p.product_id,
+          p.product_name,
+          p.category,
+          COUNT(s.order_id) as times_ordered,
+          SUM(s.quantity) as total_units_sold
+        FROM products p
+        LEFT JOIN sales_order_lines s ON p.product_id = s.product_id
+        GROUP BY p.product_id, p.product_name, p.category
+        ORDER BY total_units_sold DESC NULLS LAST
+      common_columns: ["product_id", "product_name", "category"]
+
+# Employee/HR Tables
+hr_tables:
+  patterns:
+    - name: "headcount_by_department"
+      description: "Employee count by department"
+      sql: |
+        SELECT 
+          department,
+          COUNT(*) as employee_count,
+          AVG(salary) as avg_salary,
+          MIN(hire_date) as earliest_hire
+        FROM employees
+        WHERE status = 'ACTIVE'
+        GROUP BY department
+        ORDER BY employee_count DESC
+      common_columns: ["department", "salary", "hire_date", "status"]
+      
+    - name: "employee_tenure"
+      description: "Employee tenure analysis"
+      sql: |
+        SELECT 
+          employee_id,
+          first_name || ' ' || last_name as full_name,
+          department,
+          hire_date,
+          ROUND(MONTHS_BETWEEN(SYSDATE, hire_date) / 12, 1) as years_of_service
+        FROM employees
+        WHERE status = 'ACTIVE'
+        ORDER BY hire_date ASC
+      common_columns: ["employee_id", "first_name", "last_name", "hire_date", "department"]
+
+# Financial Tables
+finance_tables:
+  patterns:
+    - name: "monthly_financial_summary"
+      description: "Monthly P&L summary"
+      sql: |
+        SELECT 
+          fiscal_period,
+          SUM(CASE WHEN account_type = 'REVENUE' THEN amount ELSE 0 END) as total_revenue,
+          SUM(CASE WHEN account_type = 'EXPENSE' THEN amount ELSE 0 END) as total_expenses,
+          SUM(CASE WHEN account_type = 'REVENUE' THEN amount ELSE -amount END) as net_income
+        FROM financial_transactions
+        WHERE fiscal_year = EXTRACT(YEAR FROM SYSDATE)
+        GROUP BY fiscal_period
+        ORDER BY fiscal_period
+      common_columns: ["fiscal_period", "account_type", "amount", "fiscal_year"]
+      
+    - name: "budget_vs_actual"
+      description: "Budget variance analysis"
+      sql: |
+        SELECT 
+          department,
+          account_code,
+          budget_amount,
+          actual_amount,
+          actual_amount - budget_amount as variance,
+          ROUND((actual_amount - budget_amount) / NULLIF(budget_amount, 0) * 100, 2) as variance_pct
+        FROM budget_summary
+        WHERE fiscal_period = :period
+        ORDER BY ABS(variance) DESC
+      common_columns: ["department", "budget_amount", "actual_amount", "fiscal_period"]
+
+# Date/Time Analysis Patterns
+date_patterns:
+  - name: "year_over_year"
+    description: "Year-over-year comparison"
+    sql: |
+      SELECT 
+        EXTRACT(MONTH FROM transaction_date) as month_num,
+        SUM(CASE WHEN EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM SYSDATE) 
+            THEN amount ELSE 0 END) as current_year,
+        SUM(CASE WHEN EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM SYSDATE) - 1 
+            THEN amount ELSE 0 END) as previous_year,
+        ROUND(
+          (SUM(CASE WHEN EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM SYSDATE) 
+              THEN amount ELSE 0 END) - 
+           SUM(CASE WHEN EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM SYSDATE) - 1 
+              THEN amount ELSE 0 END)) / 
+          NULLIF(SUM(CASE WHEN EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM SYSDATE) - 1 
+              THEN amount ELSE 0 END), 0) * 100, 
+          2
+        ) as yoy_change_pct
+      FROM {table}
+      WHERE transaction_date >= ADD_MONTHS(SYSDATE, -24)
+      GROUP BY EXTRACT(MONTH FROM transaction_date)
+      ORDER BY month_num
+    
+  - name: "trailing_12_months"
+    description: "Rolling 12-month aggregation"
+    sql: |
+      SELECT 
+        {group_by_column},
+        SUM({amount_column}) as trailing_12_month_total,
+        AVG({amount_column}) as monthly_average,
+        COUNT(DISTINCT TO_CHAR({date_column}, 'YYYY-MM')) as months_with_activity
+      FROM {table}
+      WHERE {date_column} >= ADD_MONTHS(SYSDATE, -12)
+      GROUP BY {group_by_column}
+      ORDER BY trailing_12_month_total DESC
+
+# Column Pattern Recognition
+column_pattern_hints:
+  date_columns:
+    - created_at
+    - updated_at
+    - transaction_date
+    - order_date
+    - hire_date
+    - effective_date
+    
+  amount_columns:
+    - amount
+    - total
+    - price
+    - cost
+    - revenue
+    - salary
+    - budget
+    
+  identifier_columns:
+    - id
+    - uuid
+    - code
+    - number
+    
+  name_columns:
+    - name
+    - full_name
+    - description
+    - title
+    
+  status_columns:
+    - status
+    - state
+    - type
+    - category
+    - flag
+
+# Query Intent to Pattern Mapping
+intent_patterns:
+  exploratory:
+    - select_all_with_limit
+    - count_all
+    
+  aggregation:
+    - aggregation_by_category
+    - monthly_sales_summary
+    - headcount_by_department
+    
+  time_series:
+    - select_with_date_filter
+    - year_over_year
+    - trailing_12_months
+    
+  comparison:
+    - year_over_year
+    - budget_vs_actual
+    
+  top_n:
+    - top_customers
+    - product_performance
+    
+  status_check:
+    - inventory_status
+    - customer_segmentation

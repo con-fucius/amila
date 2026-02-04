@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from app.orchestrator.state import QueryState
 from app.orchestrator.llm_config import get_llm, get_query_llm_provider, get_query_llm_model
 from app.orchestrator.utils import emit_state_event, update_node_history, METRICS_AVAILABLE, record_llm_usage
+from app.services.query_results_store import build_transport_payload
 from app.core.config import settings
 from app.core.client_registry import registry
 
@@ -255,6 +256,15 @@ async def format_results_node(state: QueryState) -> QueryState:
     elif row_count > 10 and any("DATE" in col for col in columns):
         # Time-series data
         visualization_hints["recommended_chart"] = "line"
+    else:
+        lat_cols = [c for c in columns if isinstance(c, str) and "lat" in c.lower()]
+        lon_cols = [c for c in columns if isinstance(c, str) and any(k in c.lower() for k in ["lon", "lng", "longitude"])]
+        if lat_cols and lon_cols:
+            visualization_hints["recommended_chart"] = "map"
+            visualization_hints["chart_config"] = {
+                "lat": lat_cols[0],
+                "lon": lon_cols[0],
+            }
     
     state["visualization_hints"] = visualization_hints
 
@@ -262,12 +272,102 @@ async def format_results_node(state: QueryState) -> QueryState:
     try:
         from app.services.insights_service import InsightsService
         ins = await InsightsService.generate_insights(state.get("sql_query", ""), columns, result.get("rows", []) or [])
-        state["insights"] = ins.get("insights", [])
-        state["suggested_queries"] = ins.get("suggested_queries", [])
+        # InsightResult is a dataclass, access attributes directly
+        state["insights"] = ins.insights if ins else []
+        state["suggested_queries"] = ins.suggested_queries if ins else []
+        state["forecast"] = ins.forecast if ins else {}
+        state["root_cause_analysis"] = ins.root_causes if ins else []
+        state["narrative"] = ins.narrative if ins else ""
     except Exception as e:
         logger.warning(f"Insights generation failed: {e}")
         state["insights"] = []
         state["suggested_queries"] = []
+        state["forecast"] = {}
+        state["root_cause_analysis"] = []
+        state["narrative"] = ""
+    
+    # Generate Smart Follow-ups based on results and query history
+    smart_followups_count = 0
+    try:
+        from app.services.smart_followup_service import SmartFollowUpService
+        
+        followup_service = SmartFollowUpService()
+        followups = await followup_service.generate_follow_ups(
+            original_query=state.get("user_query", ""),
+            sql_query=state.get("sql_query", ""),
+            results={
+                "row_count": row_count,
+                "columns": columns,
+                "rows": rows[:5] if rows else []
+            },
+            user_id=state.get("user_id", "anonymous"),
+            context={
+                "user_role": state.get("user_role", "analyst"),
+                "conversation_history": state.get("messages", [])
+            }
+        )
+        
+        if followups:
+            # Convert FollowUpSuggestion objects to dictionaries
+            followup_dicts = []
+            for f in followups:
+                if hasattr(f, 'to_dict'):
+                    followup_dicts.append(f.to_dict())
+                else:
+                    # Handle dataclass objects
+                    followup_dicts.append({
+                        "suggestion_id": getattr(f, 'suggestion_id', ''),
+                        "query_text": getattr(f, 'query_text', ''),
+                        "description": getattr(f, 'description', ''),
+                        "category": getattr(f, 'category', ''),
+                        "confidence": getattr(f, 'confidence', 0.0),
+                        "requires_clarification": getattr(f, 'requires_clarification', False),
+                        "estimated_result_type": getattr(f, 'estimated_result_type', ''),
+                        "icon": getattr(f, 'icon', '')
+                    })
+            
+            state["smart_followups"] = {
+                "followups": followup_dicts[:5],
+                "context_aware": True
+            }
+            smart_followups_count = len(followup_dicts)
+            
+            # Add to suggested_queries if they exist
+            if not state.get("suggested_queries"):
+                state["suggested_queries"] = []
+            
+            # Add follow-up suggestions to suggested_queries
+            for followup in followups[:3]:
+                suggestion_text = getattr(followup, 'query_text', '') or getattr(followup, 'suggestion', '')
+                state["suggested_queries"].append({
+                    "type": "follow_up",
+                    "suggestion": suggestion_text,
+                    "confidence": getattr(followup, 'confidence', 0.0),
+                    "category": getattr(followup, 'category', 'general')
+                })
+            
+            logger.info(f"Generated {len(followups)} smart follow-ups")
+            
+    except ImportError as e:
+        logger.debug(f"SmartFollowUpService not available, skipping follow-up generation: {e}")
+    except Exception as e:
+        logger.warning(f"Smart follow-up generation failed (non-fatal): {e}")
+
+    # Record successful query patterns for skill auto-generation
+    try:
+        from app.services.skill_generator_service import analyze_and_record_query
+        schema_context = {}
+        if isinstance(state.get("context"), dict):
+            schema_context = state["context"].get("schema_metadata") or {}
+
+        await analyze_and_record_query(
+            user_query=state.get("user_query", ""),
+            sql_query=state.get("sql_query", ""),
+            schema_context=schema_context,
+            execution_success=(result.get("status") == "success")
+        )
+    except Exception as e:
+        logger.warning(f"Skill pattern recording failed (non-fatal): {e}")
     
     # Store successful query pattern in Graphiti knowledge graph
     try:
@@ -316,7 +416,9 @@ User Pattern Episode (user:{user_id}):
             logger.info(f"Query patterns stored in knowledge graph")
     except Exception as e:
         # Don't fail the workflow if Graphiti storage fails
-        logger.warning(f"Failed to store episode in Graphiti: {e}")
+        # Note: Graphiti library has hardcoded gemini-2.5-flash-lite-preview model
+        # which doesn't exist, causing 404 errors. Suppress verbose logging.
+        logger.debug(f"Graphiti episode storage skipped: {str(e)[:100]}")
     
     # Store conversation in persistent memory (Redis)
     try:
@@ -363,9 +465,17 @@ User Pattern Episode (user:{user_id}):
 
     # Stream lifecycle: finished with complete progress
     if ExecState:
+        cache_status = state.get("execution_cache_status")
+        transport_result, result_ref, is_truncated = build_transport_payload(
+            query_id=state.get("query_id", "unknown"),
+            result=result,
+            cache_status=cache_status,
+        )
         await emit_state_event(state, ExecState.FINISHED, {
             "row_count": row_count,
-            "result": result,
+            "result": transport_result,
+            "result_ref": result_ref,
+            "results_truncated": is_truncated,
             "insights": state.get("insights", []),
             "suggested_queries": state.get("suggested_queries", []),
             "sql": state.get("sql_query", ""),

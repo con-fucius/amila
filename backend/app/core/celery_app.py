@@ -12,6 +12,8 @@ Handles asynchronous background tasks:
 import logging
 from celery import Celery
 from celery.signals import task_prerun, task_postrun, task_failure
+from opentelemetry import trace, propagate, context
+from opentelemetry.trace import SpanKind
 from kombu import serializer
 
 from app.core.config import settings
@@ -27,6 +29,8 @@ celery_app = Celery(
         "app.tasks.query_tasks",
         "app.tasks.schema_tasks",
         "app.tasks.report_tasks",
+        "app.tasks.alert_tasks",
+        "app.tasks.webhook_tasks",
     ],
 )
 
@@ -51,6 +55,7 @@ celery_app.conf.update(
         "app.tasks.query_tasks.*": {"queue": "queries"},
         "app.tasks.schema_tasks.*": {"queue": "schema"},
         "app.tasks.report_tasks.*": {"queue": "reports"},
+        "app.tasks.webhook_tasks.*": {"queue": "webhooks"},
     },
     
     # Worker settings
@@ -85,6 +90,14 @@ celery_app.conf.update(
             "schedule": 86400.0,  # Every 24 hours
             "kwargs": {"retention_days": 7, "max_per_thread": 10, "dry_run": False},
         },
+        "run-due-report-schedules": {
+            "task": "app.tasks.report_tasks.run_due_schedules",
+            "schedule": 60.0,
+        },
+        "process-alert-escalations": {
+            "task": "app.tasks.alert_tasks.process_alert_escalations",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -95,6 +108,16 @@ celery_app.conf.update(
 def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **extra):
     """Log task start"""
     logger.info(f"Task started: {task.name} (ID: {task_id})")
+    try:
+        tracer = trace.get_tracer("celery")
+        headers = getattr(task.request, "headers", {}) or {}
+        ctx = propagate.extract(headers)
+        token = context.attach(ctx)
+        span = tracer.start_span(task.name, kind=SpanKind.CONSUMER)
+        task.request._otel_span = span
+        task.request._otel_token = token
+    except Exception:
+        pass
 
 
 @task_postrun.connect
@@ -103,6 +126,15 @@ def task_postrun_handler(
 ):
     """Log task completion"""
     logger.info(f"Task completed: {task.name} (ID: {task_id})")
+    try:
+        span = getattr(task.request, "_otel_span", None)
+        token = getattr(task.request, "_otel_token", None)
+        if span:
+            span.end()
+        if token:
+            context.detach(token)
+    except Exception:
+        pass
 
 
 @task_failure.connect
@@ -111,6 +143,16 @@ def task_failure_handler(
 ):
     """Log task failure"""
     logger.error(f"Task failed: {sender.name} (ID: {task_id}) - {exception}")
+    try:
+        span = getattr(sender.request, "_otel_span", None)
+        token = getattr(sender.request, "_otel_token", None)
+        if span:
+            span.record_exception(exception)
+            span.end()
+        if token:
+            context.detach(token)
+    except Exception:
+        pass
 
 
 # ==================== HELPER FUNCTIONS ====================

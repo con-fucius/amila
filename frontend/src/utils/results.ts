@@ -14,7 +14,10 @@ interface BackendResultLike {
   execution_time_ms?: number
 }
 
-export function normalizeBackendResult(result: BackendResultLike | null | undefined): QueryResult {
+export function normalizeBackendResult(
+  result: BackendResultLike | null | undefined,
+  options?: { resultRef?: QueryResult['resultRef']; resultsTruncated?: boolean }
+): QueryResult {
   if (!result) {
     return { columns: [], rows: [], rowCount: 0, executionTime: 0 }
   }
@@ -24,7 +27,14 @@ export function normalizeBackendResult(result: BackendResultLike | null | undefi
   const executionTime = typeof result.execution_time_ms === 'number'
     ? result.execution_time_ms / 1000
     : undefined
-  return { columns, rows, rowCount, executionTime }
+  return {
+    columns,
+    rows,
+    rowCount,
+    executionTime,
+    resultRef: options?.resultRef,
+    resultsTruncated: options?.resultsTruncated,
+  }
 }
 
 export type CellAccessor = (row: any, column: string, index: number) => any

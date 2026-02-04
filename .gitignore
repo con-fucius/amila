@@ -65,6 +65,27 @@ yarn-error.log*
 logs/
 *.log
 logs_fetched.txt
+logs.txt
+build_log.txt
+
+# Documentation (except README)
+FIXES_*.md
+SESSION_*.md
+findings.md
+DORIS_FIX_GUIDE.md
+RESTART_BACKEND.md
+STARTUP_GUIDE.md
+
+# Toolbox and development docs
+toolbox/
+
+# Test and debugging scripts
+verify_*.py
+check_status.ps1
+populate_databases.ps1
+start_*.ps1
+START_ALL.ps1
+scripts/fix_*.ps1
 
 # Database
 *.db

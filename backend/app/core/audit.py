@@ -7,6 +7,7 @@ Security Features:
 - Immutable audit logs with 90-day retention
 - Structured logging with correlation IDs
 - Field-level encryption for PII and sensitive data
+- Cryptographic integrity verification with blockchain-inspired chaining
 """
 
 import logging
@@ -22,6 +23,14 @@ from app.core.redis_client import redis_client
 from app.core.config import settings
 from app.core.encryption import get_encryption_service
 from app.models.internal_models import AuditEntryData, safe_parse_json
+
+# Import audit immutability service for cryptographic verification
+from app.services.audit_immutability_service import (
+    AuditImmutabilityService,
+    AuditEntry as ImmutabilityAuditEntry,
+    VerificationStatus
+)
+from app.services.native_audit_service import native_audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +69,10 @@ class AuditAction(str, Enum):
     USER_UPDATE = "admin.user_update"
     USER_DELETE = "admin.user_delete"
     ROLE_ASSIGN = "admin.role_assign"
+    
+    # Security operations
+    SECURITY_VIOLATION = "security.violation"
+    RLS_ENFORCEMENT = "security.rls_enforcement"
 
 
 class AuditSeverity(str, Enum):
@@ -97,12 +110,55 @@ class AuditEntry:
 
 
 class AuditLogger:
-    """Audit trail logging system"""
+    """Audit trail logging system with cryptographic immutability verification"""
     
     def __init__(self):
         self.logger = logging.getLogger("audit")
         self.redis_prefix = "audit:"
         self.retention_days = 90  # Keep audit logs for 90 days
+        
+        # Initialize immutability service for cryptographic verification
+        self.immutability_service = AuditImmutabilityService()
+        self._last_entry_hash = None  # Track last entry for chain integrity
+        self._chain_initialized = False
+    
+    async def _initialize_chain(self):
+        """Initialize the audit chain with a genesis entry if needed"""
+        if self._chain_initialized:
+            return
+        
+        try:
+            # Check if we have existing chain head in Redis
+            chain_head = await redis_client.get(f"{self.redis_prefix}chain_head")
+            if chain_head:
+                self._last_entry_hash = chain_head
+                logger.debug("Audit chain initialized from existing head")
+            else:
+                # Create genesis entry for new chain
+                genesis_entry = self.immutability_service.create_genesis_entry(
+                    system_id="amila_audit",
+                    description="Audit trail genesis - cryptographic chain start"
+                )
+                self._last_entry_hash = genesis_entry.hash
+                
+                # Store genesis entry
+                await redis_client.set(
+                    f"{self.redis_prefix}genesis",
+                    json.dumps({
+                        "entry_id": genesis_entry.entry_id,
+                        "timestamp": genesis_entry.timestamp,
+                        "hash": genesis_entry.hash,
+                        "signature": genesis_entry.signature
+                    })
+                )
+                await redis_client.set(f"{self.redis_prefix}chain_head", genesis_entry.hash)
+                logger.info("Audit chain genesis entry created")
+            
+            self._chain_initialized = True
+        except Exception as e:
+            logger.error(f"Failed to initialize audit chain: {e}")
+            # Continue without chain integrity - audit logging should not fail
+            self._chain_initialized = True  # Mark as initialized to prevent retry loops
     
     async def _decrypt_and_parse_entry(self, key: str, entry_json: Any) -> Optional[AuditEntry]:
         """
@@ -213,9 +269,35 @@ class AuditLogger:
             await self._store_in_redis(entry)
         except Exception as e:
             logger.error(f"Failed to store audit entry in Redis: {e}")
+            
+        # Write to native database if enabled
+        if getattr(settings, 'NATIVE_AUDIT_ENABLED', False):
+            try:
+                # We don't pass a db_session here, the service will get one if needed
+                # or we can pass None and let it handle connection management
+                await native_audit_service.write_audit_entry(
+                    action=action.value,
+                    user_id=user,
+                    user_role=user_role,
+                    success=success,
+                    severity=severity.value,
+                    resource_type=resource,
+                    resource_id=resource_id,
+                    details=details,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    session_id=session_id,
+                    correlation_id=correlation_id
+                )
+            except Exception as e:
+                logger.error(f"Failed to write audit entry to native database: {e}")
     
     async def _store_in_redis(self, entry: AuditEntry):
-        """Store audit entry in Redis with encryption for sensitive fields"""
+        """Store audit entry in Redis with encryption and cryptographic signing"""
+        # Initialize chain if needed
+        if not self._chain_initialized:
+            await self._initialize_chain()
+        
         # Generate unique key
         entry_key = f"{self.redis_prefix}{entry.timestamp}:{entry.user}:{entry.action}"
         
@@ -224,11 +306,53 @@ class AuditLogger:
         encryption_service = get_encryption_service()
         encrypted_entry = encryption_service.encrypt_audit_entry(entry_dict)
         
+        # Create cryptographically signed audit entry for immutability
+        try:
+            # Create immutability entry linking to previous entry in chain
+            immutability_entry = self.immutability_service.create_entry(
+                event_type=entry.action,
+                user_id=entry.user,
+                session_id=entry.session_id or "unknown",
+                correlation_id=entry.correlation_id or entry_key,
+                action=entry.action,
+                resource=entry.resource or "system",
+                status="success" if entry.success else "failure",
+                details={
+                    "severity": entry.severity,
+                    "user_role": entry.user_role,
+                    "resource_id": entry.resource_id,
+                    "audit_entry_key": entry_key,
+                    **encrypted_entry  # Include encrypted audit data
+                },
+                previous_entry=self._get_previous_entry()
+            )
+            
+            # Store the signed entry with immutability metadata
+            signed_entry_data = {
+                **encrypted_entry,
+                "immutability": {
+                    "entry_id": immutability_entry.entry_id,
+                    "hash": immutability_entry.hash,
+                    "previous_hash": immutability_entry.previous_hash,
+                    "signature": immutability_entry.signature,
+                    "timestamp": immutability_entry.timestamp
+                }
+            }
+            
+            # Update chain head
+            self._last_entry_hash = immutability_entry.hash
+            await redis_client.set(f"{self.redis_prefix}chain_head", immutability_entry.hash)
+            
+        except Exception as e:
+            logger.warning(f"Failed to create signed audit entry: {e}")
+            # Continue with unsigned entry - don't fail audit logging
+            signed_entry_data = encrypted_entry
+        
         # Store encrypted entry
         await redis_client.setex(
             entry_key,
             self.retention_days * 24 * 60 * 60,  # TTL in seconds
-            json.dumps(encrypted_entry, cls=CustomJSONEncoder)
+            json.dumps(signed_entry_data, cls=CustomJSONEncoder)
         )
         
         # Add to user's audit trail (sorted set)
@@ -246,6 +370,109 @@ class AuditLogger:
             {entry_key: datetime.fromisoformat(entry.timestamp).timestamp()}
         )
         await redis_client.expire(action_audit_key, self.retention_days * 24 * 60 * 60)
+    
+    def _get_previous_entry(self):
+        """Get the previous audit entry for chain linking"""
+        if not self._last_entry_hash:
+            return None
+        
+        # Create a minimal entry object with just the hash
+        class MinimalEntry:
+            def __init__(self, hash_value):
+                self.hash = hash_value
+        
+        return MinimalEntry(self._last_entry_hash)
+    
+    async def verify_audit_chain_integrity(self) -> Dict[str, Any]:
+        """
+        Verify the integrity of the audit trail chain.
+        
+        Returns:
+            Verification report with chain integrity status
+        """
+        try:
+            # Get all audit entries from Redis
+            pattern = f"{self.redis_prefix}*"
+            keys = await redis_client.keys(pattern)
+            
+            # Filter to entry keys only (exclude index and metadata keys)
+            entry_keys = [
+                k for k in keys 
+                if not k.endswith(":chain_head") 
+                and not k.endswith(":genesis")
+                and not k.startswith(f"{self.redis_prefix}user:")
+                and not k.startswith(f"{self.redis_prefix}action:")
+            ]
+            
+            # Fetch and parse entries with immutability data
+            entries = []
+            for key in entry_keys[:1000]:  # Limit to prevent memory issues
+                entry_json = await redis_client.get(key)
+                if entry_json:
+                    try:
+                        if isinstance(entry_json, str):
+                            entry_data = json.loads(entry_json)
+                        else:
+                            entry_data = entry_json
+                        
+                        # Check if entry has immutability metadata
+                        if "immutability" in entry_data:
+                            entries.append(entry_data["immutability"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            
+            if not entries:
+                return {
+                    "status": "empty",
+                    "message": "No signed audit entries found",
+                    "verified": True
+                }
+            
+            # Use immutability service to verify chain
+            from app.services.audit_immutability_service import AuditEntry
+            
+            audit_entries = []
+            for imm_data in entries:
+                audit_entries.append(AuditEntry(
+                    entry_id=imm_data.get("entry_id", ""),
+                    timestamp=imm_data.get("timestamp", ""),
+                    event_type="audit",
+                    user_id="system",
+                    session_id="system",
+                    correlation_id=imm_data.get("entry_id", ""),
+                    action="verify",
+                    resource="audit_chain",
+                    status="pending",
+                    details={},
+                    hash=imm_data.get("hash"),
+                    previous_hash=imm_data.get("previous_hash"),
+                    signature=imm_data.get("signature")
+                ))
+            
+            # Verify chain integrity
+            all_valid, results = self.immutability_service.verify_entry_chain(audit_entries)
+            
+            verified_count = sum(1 for r in results if r.status == VerificationStatus.VERIFIED)
+            tampered_count = sum(1 for r in results if r.status == VerificationStatus.TAMPERED)
+            
+            return {
+                "status": "healthy" if all_valid else "compromised",
+                "verified": all_valid,
+                "total_entries": len(entries),
+                "verified_count": verified_count,
+                "tampered_count": tampered_count,
+                "chain_head": self._last_entry_hash,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Audit chain verification failed: {e}")
+            return {
+                "status": "error",
+                "verified": False,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
     
     async def get_user_audit_trail(
         self,

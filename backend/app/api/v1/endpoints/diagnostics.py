@@ -26,7 +26,8 @@ from app.services.diagnostic_service import (
     get_query_pipeline_traces,
     get_connection_pool_health,
     get_langgraph_state_history,
-    get_system_diagnostics_summary
+    get_system_diagnostics_summary,
+    get_trace_diffs
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,19 @@ class SystemDiagnostics(BaseModel):
     active_queries: int
     recent_failures: List[Dict[str, Any]]
     performance_metrics: Dict[str, Any]
+    business_kpis: Optional[Dict[str, Any]] = None
+    alerts: Optional[Dict[str, Any]] = None
+
+
+class RepairTraceEntry(BaseModel):
+    """Entry in a SQL repair trace"""
+    type: str
+    error: str
+    action: str
+    before_sql: Optional[str] = None
+    after_sql: Optional[str] = None
+    diff: Optional[str] = None
+    timestamp: datetime
 
 
 # ==================== Endpoints ====================
@@ -281,5 +295,21 @@ async def attempt_recovery(
             "current_status": status
         }
     except Exception as e:
-        logger.error(f"Failed to attempt recovery: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/repair-trace/{query_id}", response_model=List[RepairTraceEntry])
+async def get_query_repair_trace(
+    query_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get SQL repair trajectory for a specific query.
+    Shows how the system attempted to fix errors, including SQL diffs.
+    """
+    try:
+        traces = await get_trace_diffs(query_id)
+        return traces
+    except Exception as e:
+        logger.error(f"Failed to get repair trace: {e}")
         raise HTTPException(status_code=500, detail=str(e))
